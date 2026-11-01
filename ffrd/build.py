@@ -1,16 +1,22 @@
 """build: apply dialog/**/*.toml edits to the vanilla text and pack the mod into build/.
 
 The game's text lives in FFRS/Content/Localization/Game/<lang>/Game.locres
-inside the legacy .pak. The mod ships its own English locres in the same
-folder, plus a .utoc/.ucas pair the loader requires (copies of the game's
-empty global container). Two shapes:
+inside the legacy .pak. The mod packs FFRS-Unstraightened_P.pak, plus a
+.utoc/.ucas pair the loader requires (copies of the game's empty global
+container). Three shapes, chosen by flag:
 
-- default: en/Game.locres, holding the whole English table with the edits
-  applied. It replaces the game's table, and the game was seen to honour it.
-- --partial: en/Unstraightened.locres, holding only the edited entries, each
-  under its namespace, key and vanilla source-string hash. The game was seen
-  to ignore a second en/*.locres for an entry Game.locres already holds, so
-  this shape does not change those entries.
+- default (target): two files. FFRS/Content/Localization/Unstraightened/en/
+  Unstraightened.locres holds only the edited entries, each under its
+  namespace, key and vanilla source-string hash. FFRS/Config/UserGame.ini
+  lists the Unstraightened folder ahead of the Game folder in the game's
+  localization paths. The game was seen to honour this shape.
+- --full: FFRS/Content/Localization/Game/en/Game.locres, holding the whole
+  English table with the edits applied. It replaces the game's table, and
+  the game was seen to honour it.
+- --partial: FFRS/Content/Localization/Game/en/Unstraightened.locres, holding
+  only the edited entries. The game was seen to ignore a second en/*.locres
+  for an entry Game.locres already holds, so this shape does not change those
+  entries.
 """
 
 import argparse
@@ -26,6 +32,15 @@ from pylocres import Entry, LocresFile, Namespace
 from ffrd.game import LOCRES, MOD_NAME, Fail, build_id, paks_dir, read_locres, repo_root, vanilla, vanilla_dir, vanilla_hash
 
 REPAK = "repak"
+PAK_SHAPES = ("target", "full", "partial")
+TARGET_LOCRES = Path("FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres")
+USER_GAME_INI = Path("FFRS/Config/UserGame.ini")
+USER_GAME_TEXT = (
+    "[Internationalization]\n"
+    "-LocalizationPaths=%GAMEDIR%Content/Localization/Game\n"
+    "+LocalizationPaths=%GAMEDIR%Content/Localization/Unstraightened\n"
+    "+LocalizationPaths=%GAMEDIR%Content/Localization/Game\n"
+)
 
 PLACEHOLDER = re.compile(r"\{[^}]*\}")
 STYLE_OPEN = re.compile(r"<text\b[^>]*>")
@@ -98,6 +113,34 @@ def partial_table(en: LocresFile, overrides: dict[tuple[str, str], str]) -> Locr
     return table
 
 
+def pak_files(shape: str, en: LocresFile, overrides: dict[tuple[str, str], str]) -> dict[Path, bytes]:
+    """Pak-relative path -> bytes for each file the shape packs. The full shape applies the overrides to en in place."""
+    if shape == "target":
+        return {TARGET_LOCRES: partial_table(en, overrides).to_binary(), USER_GAME_INI: USER_GAME_TEXT.encode("utf-8")}
+    if shape == "partial":
+        return {LOCRES / "en" / "Unstraightened.locres": partial_table(en, overrides).to_binary()}
+    if shape == "full":
+        for (ns, key), text in overrides.items():
+            en[ns][key].translation = text
+        return {LOCRES / "en" / "Game.locres": en.to_binary()}
+    raise ValueError(f"unknown shape {shape!r}")
+
+
+def pack(files: dict[Path, bytes], out: Path, name: str) -> Path:
+    """Stage files under out/stage, pack them with repak into out/<name>.pak, and return that path."""
+    stage = out / "stage"
+    for rel, data in files.items():
+        path = stage / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    pak = out / f"{name}.pak"
+    subprocess.run(
+        [REPAK, "pack", "-q", "--version", "V11", "--compression", "Zlib", "-m", "../../../", str(stage), str(pak)],
+        check=True,
+    )
+    return pak
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     root = repo_root()
     stamp = vanilla_dir() / "BUILDID"
@@ -112,41 +155,50 @@ def cmd_build(args: argparse.Namespace) -> None:
     if errors:
         raise Fail("\n".join(errors))
 
-    if args.partial:
-        table, name = partial_table(en, overrides), "Unstraightened.locres"
-    else:
-        for (ns, key), text in overrides.items():
-            en[ns][key].translation = text
-        table, name = en, "Game.locres"
-
+    files = pak_files(args.shape, en, overrides)
     out = root / "build"
     if out.exists():
         shutil.rmtree(out)
-    stage = out / "stage"
-    locres_path = stage / LOCRES / "en" / name
-    locres_path.parent.mkdir(parents=True)
-    locres_path.write_bytes(table.to_binary())
+    pak = pack(files, out, MOD_NAME)
 
-    check = read_locres(locres_path)
+    locres = next(path for path in files if path.suffix == ".locres")
+    check = read_locres(out / "stage" / locres)
     bad = [f"{ns},{key}" for (ns, key), text in overrides.items() if check[ns][key].translation != text]
     if bad:
+        pak.unlink()
         raise Fail(f"built locres lost overrides: {bad[:10]}")
 
-    pak = out / f"{MOD_NAME}.pak"
-    subprocess.run(
-        [REPAK, "pack", "-q", "--version", "V11", "--compression", "Zlib", "-m", "../../../", str(stage), str(pak)],
-        check=True,
-    )
     for ext in ("utoc", "ucas"):
         shutil.copyfile(paks_dir() / f"global.{ext}", out / f"{MOD_NAME}.{ext}")
     print(f"{len(overrides)} lines overridden -> build/{MOD_NAME}.{{pak,utoc,ucas}}")
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    build = subparsers.add_parser("build", help="apply dialog/**/*.toml edits to vanilla text and pack the mod into build/")
-    build.add_argument(
+    build = subparsers.add_parser(
+        "build",
+        help="apply dialog/**/*.toml edits to vanilla text and pack the mod into build/",
+        description=(
+            "Pack the mod into build/. Shapes: the default (target) packs the edited entries as "
+            "FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres plus FFRS/Config/UserGame.ini, "
+            "which lists that folder ahead of Game; --full packs the whole English table as en/Game.locres; "
+            "--partial packs the edited entries as en/Unstraightened.locres in the Game folder."
+        ),
+    )
+    shape = build.add_mutually_exclusive_group()
+    shape.add_argument(
+        "--full",
+        dest="shape",
+        action="store_const",
+        const="full",
+        default="target",
+        help="pack the whole English table with the edits applied as en/Game.locres, replacing the game's table",
+    )
+    shape.add_argument(
         "--partial",
-        action="store_true",
+        dest="shape",
+        action="store_const",
+        const="partial",
+        default="target",
         help="pack only the edited entries as en/Unstraightened.locres; the game was seen to ignore it for entries Game.locres holds",
     )
     build.set_defaults(fn=cmd_build)

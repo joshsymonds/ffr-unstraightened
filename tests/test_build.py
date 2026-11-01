@@ -6,12 +6,23 @@ import pytest
 from pylocres import Entry, LocresFile, Namespace
 
 from ffrd import cli
+from ffrd.build import PAK_SHAPES, pack, pak_files
 from ffrd.game import LOCRES, MOD_NAME, vanilla, vanilla_hash
 
 # Made-up lines. Not game text. They match SYNTHETIC_LINES in tests/conftest.py.
 TEN = "Synthetic line ten."
 TWO = "Synthetic line two."
 OUT = "{pak,utoc,ucas}"
+TARGET_LOCRES = "FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres"
+USER_GAME_INI = "FFRS/Config/UserGame.ini"
+GAME_LOCRES = f"{LOCRES}/en/Game.locres"
+PARTIAL_LOCRES = f"{LOCRES}/en/Unstraightened.locres"
+ANCHORS_INI = (
+    "[Internationalization]\n"
+    "-LocalizationPaths=%GAMEDIR%Content/Localization/Game\n"
+    "+LocalizationPaths=%GAMEDIR%Content/Localization/Unstraightened\n"
+    "+LocalizationPaths=%GAMEDIR%Content/Localization/Game\n"
+)
 
 
 @pytest.fixture
@@ -45,12 +56,15 @@ def write_english(vanilla: Path, lines: tuple[tuple[str, str, str], ...]) -> Non
     locres.write(str(path))
 
 
-def packed_locres(repo: Path, name: str, tmp_path: Path) -> LocresFile:
-    """Read one English locres back out of the built pak with repak get."""
+def packed_bytes(repo: Path, path_in_pak: str) -> bytes:
+    """One file's bytes out of the built pak, read with repak get."""
     pak = repo / "build" / f"{MOD_NAME}.pak"
-    data = subprocess.run(["repak", "get", str(pak), f"{LOCRES}/en/{name}"], check=True, capture_output=True).stdout
-    path = tmp_path / name
-    path.write_bytes(data)
+    return subprocess.run(["repak", "get", str(pak), path_in_pak], check=True, capture_output=True).stdout
+
+
+def packed_locres(repo: Path, path_in_pak: str, tmp_path: Path) -> LocresFile:
+    path = tmp_path / Path(path_in_pak).name
+    path.write_bytes(packed_bytes(repo, path_in_pak))
     locres = LocresFile()
     locres.read(str(path))
     return locres
@@ -61,9 +75,10 @@ def contents(locres: LocresFile) -> dict[tuple[str, str], tuple[str, int]]:
     return {(ns.name, entry.key): (entry.translation, entry.hash) for ns in locres for entry in ns}
 
 
-def pak_listing(repo: Path) -> str:
+def pak_listing(repo: Path) -> set[str]:
     pak = repo / "build" / f"{MOD_NAME}.pak"
-    return subprocess.run(["repak", "list", str(pak)], check=True, capture_output=True, text=True).stdout
+    listing = subprocess.run(["repak", "list", str(pak)], check=True, capture_output=True, text=True).stdout
+    return set(listing.splitlines())
 
 
 def test_build_applies_toml_edits_from_nested_dialog_folders(
@@ -71,10 +86,10 @@ def test_build_applies_toml_edits_from_nested_dialog_folders(
 ) -> None:
     write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
     write_edits(repo, "scenes/deep/two.toml", edit("ST_C01_001_01", "2", TWO, "Edited two."))
-    cli.main(["build"])
+    cli.main(["build", "--full"])
     build = repo / "build"
     original = contents(vanilla())
-    assert contents(packed_locres(repo, "Game.locres", tmp_path)) == {
+    assert contents(packed_locres(repo, GAME_LOCRES, tmp_path)) == {
         **original,
         ("ST_C01_001_01", "10"): ("Edited ten.", original[("ST_C01_001_01", "10")][1]),
         ("ST_C01_001_01", "2"): ("Edited two.", original[("ST_C01_001_01", "2")][1]),
@@ -84,43 +99,60 @@ def test_build_applies_toml_edits_from_nested_dialog_folders(
     assert capsys.readouterr().out == f"2 lines overridden -> build/{MOD_NAME}.{OUT}\n"
 
 
+def test_default_build_packs_exactly_the_edited_locres_and_the_user_game_ini(
+    fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
+    write_edits(repo, "scenes/deep/two.toml", edit("ST_C01_001_01", "2", TWO, "Edited two."))
+    cli.main(["build"])
+    assert pak_listing(repo) == {TARGET_LOCRES, USER_GAME_INI}
+    original = contents(vanilla())
+    assert contents(packed_locres(repo, TARGET_LOCRES, tmp_path)) == {
+        ("ST_C01_001_01", "10"): ("Edited ten.", original[("ST_C01_001_01", "10")][1]),
+        ("ST_C01_001_01", "2"): ("Edited two.", original[("ST_C01_001_01", "2")][1]),
+    }
+    assert packed_bytes(repo, USER_GAME_INI).decode("utf-8") == ANCHORS_INI
+    assert capsys.readouterr().out == f"2 lines overridden -> build/{MOD_NAME}.{OUT}\n"
+
+
 def test_partial_build_packs_only_the_edited_entries_into_unstraightened_locres(
     fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path
 ) -> None:
     write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
     cli.main(["build", "--partial"])
     listing = pak_listing(repo)
-    assert f"{LOCRES}/en/Unstraightened.locres" in listing
-    assert f"{LOCRES}/en/Game.locres" not in listing
-    assert contents(packed_locres(repo, "Unstraightened.locres", tmp_path)) == {
+    assert PARTIAL_LOCRES in listing
+    assert GAME_LOCRES not in listing
+    assert contents(packed_locres(repo, PARTIAL_LOCRES, tmp_path)) == {
         ("ST_C01_001_01", "10"): ("Edited ten.", contents(vanilla())[("ST_C01_001_01", "10")][1]),
     }
 
 
-def test_default_build_packs_the_whole_english_table_with_edits_applied(
+def test_full_build_packs_the_whole_english_table_with_edits_applied(
     fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path
 ) -> None:
     write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
     write_edits(repo, "scenes/deep/two.toml", edit("ST_C01_001_01", "2", TWO, "Edited two."))
-    cli.main(["build"])
+    cli.main(["build", "--full"])
     listing = pak_listing(repo)
-    assert f"{LOCRES}/en/Game.locres" in listing
-    assert "Unstraightened.locres" not in listing
+    assert GAME_LOCRES in listing
+    assert TARGET_LOCRES not in listing
+    assert USER_GAME_INI not in listing
     expected = contents(vanilla())
     expected[("ST_C01_001_01", "10")] = ("Edited ten.", expected[("ST_C01_001_01", "10")][1])
     expected[("ST_C01_001_01", "2")] = ("Edited two.", expected[("ST_C01_001_01", "2")][1])
-    assert contents(packed_locres(repo, "Game.locres", tmp_path)) == expected
+    assert contents(packed_locres(repo, GAME_LOCRES, tmp_path)) == expected
 
 
-def test_full_flag_is_rejected_as_an_unknown_argument(capsys: pytest.CaptureFixture[str]) -> None:
+def test_full_and_partial_are_mutually_exclusive(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["build", "--full"])
+        cli.main(["build", "--full", "--partial"])
     assert exit_info.value.code == 2
-    assert "unrecognized arguments: --full" in capsys.readouterr().err
+    assert "not allowed with argument" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("argv", [["build"], ["build", "--partial"]], ids=["default", "partial"])
-def test_build_writes_the_unstraightened_mod_files_in_both_shapes(
+@pytest.mark.parametrize("argv", [["build"], ["build", "--full"], ["build", "--partial"]], ids=["default", "full", "partial"])
+def test_build_writes_the_unstraightened_mod_files_in_every_shape(
     argv: list[str], fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
@@ -132,12 +164,51 @@ def test_build_writes_the_unstraightened_mod_files_in_both_shapes(
     assert capsys.readouterr().out == f"1 lines overridden -> build/FFRS-Unstraightened_P.{OUT}\n"
 
 
-def test_zero_edits_default_build_packs_the_vanilla_english_table(
+def test_zero_edits_default_build_packs_an_empty_target_locres_and_the_ini(
     fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cli.main(["build"])
     assert capsys.readouterr().out == f"0 lines overridden -> build/{MOD_NAME}.{OUT}\n"
-    assert contents(packed_locres(repo, "Game.locres", tmp_path)) == contents(vanilla())
+    assert pak_listing(repo) == {TARGET_LOCRES, USER_GAME_INI}
+    assert contents(packed_locres(repo, TARGET_LOCRES, tmp_path)) == {}
+    assert packed_bytes(repo, USER_GAME_INI).decode("utf-8") == ANCHORS_INI
+
+
+def test_zero_edits_full_build_packs_the_vanilla_english_table(
+    fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["build", "--full"])
+    assert capsys.readouterr().out == f"0 lines overridden -> build/{MOD_NAME}.{OUT}\n"
+    assert contents(packed_locres(repo, GAME_LOCRES, tmp_path)) == contents(vanilla())
+
+
+def test_pak_files_names_the_pak_paths_of_each_shape(fake_vanilla: Path, fake_game: Path) -> None:
+    overrides = {("ST_C01_001_01", "10"): "Edited ten."}
+    assert PAK_SHAPES == ("target", "full", "partial")
+    assert set(pak_files("target", vanilla(), overrides)) == {Path(TARGET_LOCRES), Path(USER_GAME_INI)}
+    assert set(pak_files("full", vanilla(), overrides)) == {Path(GAME_LOCRES)}
+    assert set(pak_files("partial", vanilla(), overrides)) == {Path(PARTIAL_LOCRES)}
+
+
+def test_pack_stages_the_files_under_out_and_returns_the_pak_path(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    pak = pack({Path(USER_GAME_INI): ANCHORS_INI.encode("utf-8")}, out, "Probe_P")
+    assert pak == out / "Probe_P.pak"
+    assert (out / "stage" / USER_GAME_INI).read_bytes() == ANCHORS_INI.encode("utf-8")
+    got = subprocess.run(["repak", "get", str(pak), USER_GAME_INI], check=True, capture_output=True).stdout
+    assert got == ANCHORS_INI.encode("utf-8")
+
+
+@pytest.mark.parametrize("make_empty_dialog", [False, True], ids=["missing", "empty"])
+def test_build_with_no_dialog_edits_packs_an_empty_unstraightened_locres(
+    make_empty_dialog: bool, fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if make_empty_dialog:
+        (repo / "dialog").mkdir()
+    cli.main(["build", "--partial"])
+    assert capsys.readouterr().out == f"0 lines overridden -> build/{MOD_NAME}.{OUT}\n"
+    assert PARTIAL_LOCRES in pak_listing(repo)
+    assert contents(packed_locres(repo, PARTIAL_LOCRES, tmp_path)) == {}
 
 
 @pytest.mark.parametrize(
@@ -239,19 +310,7 @@ def test_build_warns_on_stderr_when_an_edit_drops_a_placeholder_and_still_builds
     captured = capsys.readouterr()
     assert captured.err == "warning: dialog/warn.toml: ST_C01_001_01,10 drops placeholders ['{name}']\n"
     assert captured.out == f"1 lines overridden -> build/{MOD_NAME}.{OUT}\n"
-    assert packed_locres(repo, "Game.locres", tmp_path)["ST_C01_001_01"]["10"].translation == "Hello there, line ten."
-
-
-@pytest.mark.parametrize("make_empty_dialog", [False, True], ids=["missing", "empty"])
-def test_build_with_no_dialog_edits_packs_an_empty_unstraightened_locres(
-    make_empty_dialog: bool, fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    if make_empty_dialog:
-        (repo / "dialog").mkdir()
-    cli.main(["build", "--partial"])
-    assert capsys.readouterr().out == f"0 lines overridden -> build/{MOD_NAME}.{OUT}\n"
-    assert f"{LOCRES}/en/Unstraightened.locres" in pak_listing(repo)
-    assert contents(packed_locres(repo, "Unstraightened.locres", tmp_path)) == {}
+    assert packed_locres(repo, TARGET_LOCRES, tmp_path)["ST_C01_001_01"]["10"].translation == "Hello there, line ten."
 
 
 def test_build_without_a_buildid_exits_1(fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
