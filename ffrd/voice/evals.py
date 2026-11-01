@@ -1,21 +1,25 @@
 """Voice eval metrics: AUROC of game-likeness scores separating held-out game lines (label 1) from their paraphrases (label 0), overall and for short lines; and the revert check, where Opus alters training lines and the share of renders that keep the alteration is measured."""
 
+import argparse
 import hashlib
 import json
 import statistics
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 from ffrd.game import Fail
 from ffrd.pipeline import accounts, claude
 from ffrd.pipeline.claude import Rejected, Unfinished
-from ffrd.pipeline.store import Store
-from ffrd.voice.classifier import Pair
+from ffrd.pipeline.store import Store, work_dir
+from ffrd.voice import remote
+from ffrd.voice.classifier import Pair, Scorer, load_pairs
+from ffrd.voice.render import PORT, rendering
 
 CLASSIFIER_BAR = 0.90
 SHORT_WORDS = 8
@@ -220,3 +224,85 @@ def revert_metrics(
         "kept_rate": kept / n,
         "pass": Fraction(kept, n) >= _REVERT_BAR_EXACT,
     }
+
+
+NLI_MALFORMED_REPLY = "nli worker sent a malformed reply"
+
+
+class Entailer:
+    def __init__(self) -> None:
+        self._worker = remote.Worker(["python3", "-m", "tools.voice.nli", "serve"])
+
+    def __enter__(self) -> Self:
+        self._worker.__enter__()
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
+        self._worker.__exit__(exc_type, exc, tb)
+
+    def holds_many(self, pairs: Sequence[tuple[str, str]]) -> list[bool]:
+        if not pairs:
+            return []
+        reply = self._worker.ask({"pairs": [list(pair) for pair in pairs]})
+        holds = reply.get("holds")
+        if not isinstance(holds, list) or len(holds) != len(pairs) or not all(isinstance(hold, bool) for hold in holds):
+            raise Fail(NLI_MALFORMED_REPLY)
+        return holds
+
+
+def classifier_scored(pairs: Sequence[Pair], score_many: ScoreMany) -> list[Scored]:
+    labelled = [(original, 1, word_count(original)) for original in dict.fromkeys(pair.original for pair in pairs)]
+    labelled += [(pair.paraphrase, 0, word_count(pair.original)) for pair in pairs if pair.paraphrase != pair.original]
+    scores = score_many([text for text, _, _ in labelled])
+    return [Scored(label=label, words=words, score=score) for (_, label, words), score in zip(labelled, scores, strict=True)]
+
+
+def _print_metrics(metrics: Mapping[str, object]) -> None:
+    for key, value in metrics.items():
+        print(f"{key}\t{json.dumps(value)}")
+
+
+def cmd_classifier(args: argparse.Namespace) -> None:
+    remote.sync()
+    pairs = load_pairs("heldout")
+    with Scorer() as scorer:
+        scored = classifier_scored(pairs, scorer.score_many)
+    _print_metrics(classifier_metrics(scored))
+
+
+def cmd_render(args: argparse.Namespace) -> None:
+    remote.sync()
+    pairs = load_pairs("heldout")
+    with rendering(args.port) as render_line, Scorer() as scorer, Entailer() as entailer:
+        metrics = render_metrics(pairs, render_line, scorer.score_many, entailer.holds_many)
+    _print_metrics(metrics)
+
+
+def cmd_revert(args: argparse.Namespace) -> None:
+    remote.sync()
+    sample = revert_sample(load_pairs("train"))
+    voice = work_dir("voice")
+    altered, calls = alter(sample, Store(voice / "revert"), voice / "revert-accounts.log")
+    with rendering(args.port) as render_line, Entailer() as entailer:
+        metrics = revert_metrics(sample, altered, render_line, entailer.holds_many)
+    _print_metrics(metrics)
+    print(f"calls\t{sum(calls.values())}")
+    for account in sorted(calls):
+        print(f"account {account}\t{calls[account]}")
+
+
+def _add_port(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--port", type=int, default=PORT, help="llama-server port on the GPU host's 127.0.0.1")
+
+
+def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    ev = subparsers.add_parser("eval", help="print voice-model metrics: classifier AUROC, render and revert checks")
+    actions = ev.add_subparsers(dest="action", required=True)
+    classifier_p = actions.add_parser("classifier", help="AUROC of the classifier on held-out game lines vs paraphrases")
+    classifier_p.set_defaults(fn=cmd_classifier)
+    render_p = actions.add_parser("render", help="render held-out paraphrases on the GPU host and check game-likeness and meaning")
+    _add_port(render_p)
+    render_p.set_defaults(fn=cmd_render)
+    revert_p = actions.add_parser("revert", help="alter train lines with Opus and check that renders keep the alteration")
+    _add_port(revert_p)
+    revert_p.set_defaults(fn=cmd_revert)

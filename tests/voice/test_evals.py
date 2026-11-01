@@ -1,6 +1,8 @@
+import argparse
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from ffrd.pipeline import accounts, claude
 from ffrd.pipeline.accounts import Account
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.store import Store
+from ffrd.voice import evals, remote
 from ffrd.voice.classifier import Pair
 from ffrd.voice.evals import (
     ALTER_PROMPT,
@@ -23,16 +26,20 @@ from ffrd.voice.evals import (
     REVERT_BATCH,
     REVERT_INPUTS,
     SHORT_WORDS,
+    Entailer,
     Scored,
     alter,
     auroc,
     classifier_metrics,
+    classifier_scored,
     heldout_sample,
+    register,
     render_metrics,
     revert_metrics,
     revert_sample,
     word_count,
 )
+from ffrd.voice.render import PORT
 
 
 def test_constants_match_the_frozen_interface() -> None:
@@ -617,3 +624,271 @@ def test_revert_metrics_result_has_exactly_the_contract_keys_and_no_text() -> No
     assert set(metrics) == {"n", "kept_rate", "pass"}
     assert all(isinstance(value, int | float | bool) for value in metrics.values())
     assert "secret" not in repr(metrics)
+
+
+NLI_MALFORMED = "nli worker sent a malformed reply"
+
+
+class FakeWorker:
+    def __init__(self, argv: Sequence[str], reply: object) -> None:
+        self.argv = list(argv)
+        self.reply = reply
+        self.asks: list[dict[str, Any]] = []
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> "FakeWorker":
+        self.entered = True
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.exited = True
+
+    def ask(self, request: dict[str, Any]) -> Any:
+        self.asks.append(request)
+        return self.reply
+
+
+@pytest.fixture
+def fake_worker(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], list[FakeWorker]]:
+    def install(reply: object) -> list[FakeWorker]:
+        made: list[FakeWorker] = []
+
+        def make(argv: Sequence[str]) -> FakeWorker:
+            worker = FakeWorker(argv, reply)
+            made.append(worker)
+            return worker
+
+        monkeypatch.setattr(remote, "Worker", make)
+        return made
+
+    return install
+
+
+def test_entailer_serves_the_nli_module_through_a_worker(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"holds": []})
+    with Entailer():
+        pass
+    assert [worker.argv for worker in made] == [["python3", "-m", "tools.voice.nli", "serve"]]
+    assert made[0].entered
+    assert made[0].exited
+
+
+def test_holds_many_sends_one_request_of_pairs_and_keeps_order(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"holds": [True, False]})
+    with Entailer() as entailer:
+        assert entailer.holds_many([("synthetic-a", "synthetic-b"), ("synthetic-c", "synthetic-d")]) == [True, False]
+    assert made[0].asks == [{"pairs": [["synthetic-a", "synthetic-b"], ["synthetic-c", "synthetic-d"]]}]
+
+
+def test_holds_many_empty_input_sends_nothing(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"holds": []})
+    with Entailer() as entailer:
+        assert entailer.holds_many([]) == []
+    assert made[0].asks == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"holds": [True]},
+        {"holds": [True, False, True]},
+        {"holds": "yes"},
+        {"holds": True},
+        {"holds": [1, 0]},
+        {"holds": [True, None]},
+        {"other": [True, False]},
+    ],
+    ids=["short", "long", "string", "scalar", "ints", "null-item", "missing-key"],
+)
+def test_holds_many_malformed_reply_raises_content_free_fail(fake_worker: Callable[[object], list[FakeWorker]], reply: object) -> None:
+    fake_worker(reply)
+    with Entailer() as entailer, pytest.raises(Fail) as err:
+        entailer.holds_many([("synthetic-a", "synthetic-b"), ("synthetic-c", "synthetic-d")])
+    assert str(err.value) == NLI_MALFORMED
+    assert "synthetic" not in str(err.value)
+
+
+def test_classifier_scored_labels_distinct_originals_and_differing_paraphrases() -> None:
+    pairs = [
+        make_pair("Alpha one two", "Alpha one three and more words here"),
+        make_pair("Alpha one two", "Alpha one four"),
+        make_pair("Beta line", "Beta line"),
+    ]
+    table = {
+        "Alpha one two": 0.9,
+        "Beta line": 0.8,
+        "Alpha one three and more words here": 0.2,
+        "Alpha one four": 0.1,
+    }
+    calls: list[list[str]] = []
+
+    def score_many(texts: Sequence[str]) -> list[float]:
+        calls.append(list(texts))
+        return [table[text] for text in texts]
+
+    scored = classifier_scored(pairs, score_many)
+    assert calls == [["Alpha one two", "Beta line", "Alpha one three and more words here", "Alpha one four"]]
+    # Paraphrase rows take the word count of their original (3), not their own (7).
+    # The identical paraphrase of "Beta line" is not scored.
+    assert scored == [
+        Scored(label=1, words=3, score=0.9),
+        Scored(label=1, words=2, score=0.8),
+        Scored(label=0, words=3, score=0.2),
+        Scored(label=0, words=3, score=0.1),
+    ]
+
+
+class Harness:
+    """Replaces every live dependency of the eval commands and records the order they are used in."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.work = tmp_path / "work"
+        self.events: list[str] = []
+        self.pairs: dict[str, list[Pair]] = {
+            "heldout": [make_pair("Alpha one two three", "Alpha paraphrase here", "spk-a")],
+            "train": [make_train_pair(i) for i in range(10)],
+        }
+        self.scores: dict[str, float] = {
+            "Alpha one two three": 0.9,
+            "Alpha paraphrase here": 0.1,
+            "R:Alpha paraphrase here": 0.9,
+        }
+        self.holds_reply: list[bool] | None = None
+        self.account_counts: dict[int, int] = {3: 2, 5: 1}
+        self.ports: list[int] = []
+        self.render_inputs: list[tuple[str, str]] = []
+        self.alter_calls: list[tuple[list[Pair], Store, Path]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(remote, "sync", lambda: self.events.append("sync"))
+        monkeypatch.setattr(evals, "work_dir", lambda lens: self.work / lens)
+        monkeypatch.setattr(evals, "load_pairs", self._load_pairs)
+        monkeypatch.setattr(evals, "Scorer", self._scorer_class())
+        monkeypatch.setattr(evals, "Entailer", self._entailer_class())
+        monkeypatch.setattr(evals, "rendering", self._rendering)
+        monkeypatch.setattr(evals, "alter", self._alter)
+
+    def _load_pairs(self, split: str) -> list[Pair]:
+        self.events.append(f"load {split}")
+        return list(self.pairs[split])
+
+    @contextmanager
+    def _rendering(self, port: int = PORT) -> Iterator[Callable[[str, str], str]]:
+        self.events.append(f"rendering {port}")
+        self.ports.append(port)
+
+        def render(speaker: str, text: str) -> str:
+            self.render_inputs.append((speaker, text))
+            return f"R:{text}"
+
+        yield render
+
+    def _alter(self, sample: Sequence[Pair], store: Store, log: Path) -> tuple[list[str], dict[int, int]]:
+        self.events.append("alter")
+        self.alter_calls.append((list(sample), store, log))
+        return [f"altered:{pair.paraphrase}" for pair in sample], dict(self.account_counts)
+
+    def _scorer_class(self) -> type:
+        harness = self
+
+        class FakeScorer:
+            def __enter__(self) -> "FakeScorer":
+                harness.events.append("scorer")
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def score_many(self, texts: Sequence[str]) -> list[float]:
+                return [harness.scores[text] for text in texts]
+
+        return FakeScorer
+
+    def _entailer_class(self) -> type:
+        harness = self
+
+        class FakeEntailer:
+            def __enter__(self) -> "FakeEntailer":
+                harness.events.append("entailer")
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def holds_many(self, pairs: Sequence[tuple[str, str]]) -> list[bool]:
+                if harness.holds_reply is None:
+                    return [True] * len(pairs)
+                return list(harness.holds_reply)
+
+        return FakeEntailer
+
+
+@pytest.fixture
+def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Harness:
+    fake = Harness(tmp_path)
+    fake.install(monkeypatch)
+    return fake
+
+
+def parse_eval(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    register(parser.add_subparsers(required=True))
+    return parser.parse_args(["eval", *argv])
+
+
+def test_eval_requires_an_action() -> None:
+    with pytest.raises(SystemExit):
+        parse_eval([])
+
+
+def test_eval_rejects_an_unknown_action() -> None:
+    with pytest.raises(SystemExit):
+        parse_eval(["tally"])
+
+
+def test_classifier_command_syncs_then_scores_heldout_and_prints_only_metrics(harness: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    args = parse_eval(["classifier"])
+    args.fn(args)
+    assert harness.events == ["sync", "load heldout", "scorer"]
+    # Both lines have 4 words, so both fall in the short subset.
+    assert capsys.readouterr().out == "n\t2\nauroc\t1.0\nn_short\t2\nauroc_short\t1.0\npass\ttrue\n"
+
+
+def test_render_command_syncs_then_renders_heldout_on_the_default_port(harness: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    args = parse_eval(["render"])
+    args.fn(args)
+    assert harness.events == ["sync", "load heldout", f"rendering {PORT}", "scorer", "entailer"]
+    assert harness.ports == [PORT]
+    assert harness.render_inputs == [("spk-a", "Alpha paraphrase here")]
+    assert capsys.readouterr().out == (
+        "n\t1\nmedian_render_score\t0.9\nmedian_paraphrase_score\t0.1\nrender_entailment_rate\t1.0\n"
+        "pairs_entailment_rate\t1.0\ngame_likeness_pass\ttrue\nmeaning_pass\ttrue\npass\ttrue\n"
+    )
+
+
+def test_revert_command_syncs_then_alters_train_and_prints_metrics_and_calls(harness: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    harness.holds_reply = [False] * 9 + [True]
+    args = parse_eval(["revert"])
+    args.fn(args)
+    assert harness.events == ["sync", "load train", "alter", f"rendering {PORT}", "entailer"]
+    assert capsys.readouterr().out == "n\t10\nkept_rate\t0.9\npass\ttrue\ncalls\t3\naccount 3\t2\naccount 5\t1\n"
+
+
+def test_revert_alters_the_train_sample_into_work_voice_and_renders_the_altered_texts(harness: Harness) -> None:
+    args = parse_eval(["revert"])
+    args.fn(args)
+    [(sample, store, log)] = harness.alter_calls
+    assert sample == revert_sample(harness.pairs["train"])
+    assert store.root == harness.work / "voice" / "revert"
+    assert log == harness.work / "voice" / "revert-accounts.log"
+    assert harness.render_inputs == [(pair.speaker, f"altered:{pair.paraphrase}") for pair in sample]
+
+
+@pytest.mark.parametrize("command", ["render", "revert"])
+def test_render_and_revert_take_a_port_and_default_to_the_renderer_port(harness: Harness, command: str) -> None:
+    args = parse_eval([command])
+    args.fn(args)
+    args = parse_eval([command, "--port", "9001"])
+    args.fn(args)
+    assert harness.ports == [PORT, 9001]
