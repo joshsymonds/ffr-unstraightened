@@ -1,12 +1,66 @@
 """Classifier metrics for the voice eval: AUROC of game-likeness scores separating held-out game lines (label 1) from their paraphrases (label 0), overall and for short lines."""
 
-from collections.abc import Sequence
+import hashlib
+import statistics
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 
 from ffrd.game import Fail
+from ffrd.voice.classifier import Pair
 
 CLASSIFIER_BAR = 0.90
 SHORT_WORDS = 8
+RENDER_SCORE_BAR = 0.5
+MEANING_MARGIN = 0.03
+# Exact decimal so the meaning boundary is compared without float rounding.
+_MEANING_MARGIN_EXACT = Fraction(str(MEANING_MARGIN))
+
+Renderer = Callable[[str, str], str]
+ScoreMany = Callable[[Sequence[str]], list[float]]
+HoldsMany = Callable[[Sequence[tuple[str, str]]], list[bool]]
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def heldout_sample(pairs: Sequence[Pair]) -> list[Pair]:
+    """One pair per held-out line: the paraphrase with the lowest sha256, lines ordered by sha256 of the original."""
+    chosen: dict[str, Pair] = {}
+    for pair in pairs:
+        best = chosen.get(pair.original)
+        if best is None or _digest(pair.paraphrase) < _digest(best.paraphrase):
+            chosen[pair.original] = pair
+    return sorted(chosen.values(), key=lambda pair: _digest(pair.original))
+
+
+def render_metrics(pairs: Sequence[Pair], render: Renderer, score_many: ScoreMany, holds_many: HoldsMany) -> dict[str, int | float | bool]:
+    sample = heldout_sample(pairs)
+    if not sample:
+        raise Fail("render eval needs at least one held-out pair")
+    renders = [render(pair.speaker, pair.paraphrase) for pair in sample]
+    render_scores = score_many(renders)
+    paraphrase_scores = score_many([pair.paraphrase for pair in sample])
+    render_holds = holds_many([(pair.paraphrase, rendered) for pair, rendered in zip(sample, renders, strict=True)])
+    pair_holds = holds_many([(pair.paraphrase, pair.original) for pair in sample])
+    n = len(sample)
+    median_render = statistics.median(render_scores)
+    median_paraphrase = statistics.median(paraphrase_scores)
+    render_hits = sum(render_holds)
+    pair_hits = sum(pair_holds)
+    game_likeness_pass = median_render >= RENDER_SCORE_BAR and median_render > median_paraphrase
+    meaning_pass = Fraction(render_hits, n) >= Fraction(pair_hits, n) - _MEANING_MARGIN_EXACT
+    return {
+        "n": n,
+        "median_render_score": median_render,
+        "median_paraphrase_score": median_paraphrase,
+        "render_entailment_rate": render_hits / n,
+        "pairs_entailment_rate": pair_hits / n,
+        "game_likeness_pass": game_likeness_pass,
+        "meaning_pass": meaning_pass,
+        "pass": game_likeness_pass and meaning_pass,
+    }
 
 
 def word_count(text: str) -> int:
