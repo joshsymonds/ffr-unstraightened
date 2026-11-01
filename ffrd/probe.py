@@ -1,9 +1,12 @@
-"""probe: run the UE4SS probe mod on the gnomon host to see which text shape FFR honours.
+"""probe and usmap: run the game on the gnomon host under UE4SS.
 
-It refuses while FFR runs on the Steam Deck or on the gnomon host, and when the gnomon build is not the vanilla build.
-For each shape it packs one edited line of PROBE_KEY, installs the pak beside the game's own global container, and
-launches the probe mod. The partial shape is tried first and the full shape only when the partial one is not honoured.
-Only keys and hashes are printed, never the probe text.
+`ffrd probe` checks which text shape FFR honours. It refuses while FFR runs on the Steam Deck or on the gnomon host,
+and when the gnomon build is not the vanilla build. For each shape it packs one edited line of PROBE_KEY, with .utoc
+and .ucas copied from the host's global container, installs it in the host's Paks/~mods and runs the probe mod. The
+partial shape is tried first and the full shape only when the partial one is not honoured. It prints only keys and
+hashes, never the probe text.
+
+`ffrd usmap` dumps the game's mappings with the usmap mod and saves them as Mappings.usmap in the vanilla folder.
 """
 
 import argparse
@@ -25,6 +28,9 @@ PROBE_MOD = "FFRS-UnstraightenedProbe_P"
 MOD_DIR = "ue4ss/UnstraightenedProbe"
 LOG = "probe.log"
 SHAPES = ("partial", "full")
+USMAP_MOD = "ue4ss/UnstraightenedUsmap"
+USMAP_LOG = "usmap.log"
+USMAP_NAME = "Mappings.usmap"
 
 
 def _probe_text() -> str:
@@ -124,6 +130,34 @@ def cmd_probe(args: argparse.Namespace) -> None:
     raise Fail("neither shape is honoured by the game")
 
 
+def _newest_usmap(host: str) -> str | None:
+    # The glob runs under sh: a login shell such as zsh aborts on a glob that matches nothing.
+    out = deck.ssh(host, f"sh -c 'ls -t \"$1\"/*.usmap 2>/dev/null | head -n 1' sh {deck.remote(gnomon.ue4ss())}")
+    path = out.decode("utf-8", errors="replace").strip()
+    return path or None
+
+
+def cmd_usmap(args: argparse.Namespace) -> None:
+    _check_deck()
+    host = gnomon.host()
+    deck.ssh(host, f"sh -c 'rm -f \"$1\"/*.usmap' sh {deck.remote(gnomon.ue4ss())}")
+    lines = gnomon.run_mod(repo_root() / USMAP_MOD, {}, USMAP_LOG)
+    if "failed" in lines:
+        raise Fail(f"the usmap mod reported failed on {host}")
+    remote = _newest_usmap(host)
+    if remote is None:
+        raise Fail(f"no .usmap in {gnomon.ue4ss()} on {host}")
+    data = gnomon.fetch(remote)
+    root = vanilla_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    dest = root / USMAP_NAME
+    dest.write_bytes(data)
+    deck.ssh(host, f"rm -f {deck.remote(remote)}")
+    print(f"wrote {dest} ({len(data)} bytes)")
+
+
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     probe = subparsers.add_parser("probe", help="run the UE4SS probe on the gnomon host to see which text shape FFR honours")
     probe.set_defaults(fn=cmd_probe)
+    usmap = subparsers.add_parser("usmap", help="dump the game's usmap on the gnomon host and save it as Mappings.usmap in vanilla")
+    usmap.set_defaults(fn=cmd_usmap)

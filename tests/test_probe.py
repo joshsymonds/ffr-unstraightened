@@ -848,3 +848,211 @@ def test_refuses_when_vanilla_has_no_build_stamp(
     assert fake.fetched == []
     assert fake.puts == []
     assert fake.runs == []
+
+
+# ffrd usmap: the usmap mod's log, the newest dump fetched into vanilla, the remote dump removed. Made-up bytes only.
+
+USMAP_SCRIPT = WORKSPACE / "ue4ss/UnstraightenedUsmap/Scripts/main.lua"
+USMAP_PRELUDE = """
+function ExecuteWithDelay(_, f) f() end
+function ExecuteInGameThread(f) f() end
+"""
+
+
+def run_usmap_mod(root: Path, dump: str) -> list[str]:
+    scripts = root / "UnstraightenedUsmap" / "Scripts"
+    scripts.mkdir(parents=True)
+    copied = scripts / "main.lua"
+    shutil.copyfile(USMAP_SCRIPT, copied)
+    stub = root / "stub.lua"
+    stub.write_text(USMAP_PRELUDE + dump + f"\ndofile({lua_string(str(copied))})\n", encoding="utf-8")
+    subprocess.run(["lua", str(stub)], capture_output=True, text=True, encoding="utf-8", timeout=60, check=True)
+    return (scripts.parent / "usmap.log").read_text(encoding="utf-8").splitlines()
+
+
+def test_usmap_mod_logs_only_done_after_a_clean_dump(tmp_path: Path) -> None:
+    assert run_usmap_mod(tmp_path, "function DumpUSMAP(all) assert(all == true, 'not called with true') end") == ["done"]
+
+
+def test_usmap_mod_logs_failed_then_done_when_the_dump_raises(tmp_path: Path) -> None:
+    assert run_usmap_mod(tmp_path, 'function DumpUSMAP(_) error("synthetic dump failure") end') == ["failed", "done"]
+
+
+UE4SS = f"{GAME}/FFRS/Binaries/Win64/ue4ss"
+DUMP = f"{UE4SS}/FFRS-5.6.1-synthetic.usmap"
+OLD_DUMP = f"{UE4SS}/FFRS-5.6.0-synthetic.usmap"
+STALE_DUMP = f"{UE4SS}/FFRS-5.5.0-stale.usmap"
+DUMP_BYTES = b"synthetic usmap bytes\x00\x01"
+RM_DUMPS = f"sh -c 'rm -f \"$1\"/*.usmap' sh {UE4SS}"
+LS_DUMPS = f"sh -c 'ls -t \"$1\"/*.usmap 2>/dev/null | head -n 1' sh {UE4SS}"
+OLD_BYTES = b"old synthetic usmap bytes"
+USMAP_MOD_PATH = "ue4ss/UnstraightenedUsmap"
+
+
+class UsmapRemote:
+    """Stands in for ssh, the Deck check and the usmap mod. Running the mod adds its dumps to the remote files."""
+
+    def __init__(
+        self,
+        deck_status: int,
+        lines: list[str],
+        stale: dict[str, tuple[float, bytes]],
+        dumps: dict[str, tuple[float, bytes]],
+    ) -> None:
+        self.deck_status = deck_status
+        self.lines = lines
+        self.files = dict(stale)
+        self.dumps = dumps
+        self.status_calls: list[tuple[str, str]] = []
+        self.commands: list[str] = []
+        self.runs: list[tuple[Path, dict[str, bytes], str]] = []
+        self.seen_at_run: set[str] = set()
+        self.fetched: list[str] = []
+
+    def ssh_status(self, host: str, command: str) -> int:
+        self.status_calls.append((host, command))
+        return self.deck_status
+
+    def ssh(self, host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
+        self.commands.append(command)
+        if command == RM_DUMPS:
+            for path in [p for p in self.files if p.startswith(f"{UE4SS}/") and p.endswith(".usmap")]:
+                del self.files[path]
+            return b""
+        if command == LS_DUMPS:
+            newest = sorted(
+                ((mtime, path) for path, (mtime, _) in self.files.items() if path.startswith(f"{UE4SS}/") and path.endswith(".usmap")),
+                reverse=True,
+            )
+            return f"{newest[0][1]}\n".encode() if newest else b""
+        if command.startswith("rm -f "):
+            self.files.pop(command[len("rm -f ") :], None)
+            return b""
+        raise AssertionError(f"unexpected ssh command: {command}")
+
+    def fetch(self, path: str) -> bytes:
+        self.fetched.append(path)
+        return self.files[path][1]
+
+    def run(self, mod: Path, files: dict[str, bytes], log: str) -> list[str]:
+        self.runs.append((mod, files, log))
+        self.seen_at_run = set(self.files)
+        self.files.update(self.dumps)
+        return list(self.lines)
+
+
+def run_ffrd_usmap() -> int:
+    try:
+        cli.main(["usmap"])
+    except SystemExit as exit_info:
+        assert isinstance(exit_info.code, int)
+        return exit_info.code
+    return 0
+
+
+@pytest.fixture
+def make_usmap(fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[..., UsmapRemote]:
+    root = tmp_path / "repo"
+    (root / "ffrd").mkdir(parents=True)
+    (root / "devenv.nix").write_text("{ }\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("FFR_DECK_HOST", DECK)
+
+    def make(
+        deck_status: int = 1,
+        lines: Sequence[str] = ("done",),
+        stale: dict[str, tuple[float, bytes]] | None = None,
+        dumps: dict[str, tuple[float, bytes]] | None = None,
+    ) -> UsmapRemote:
+        fake = UsmapRemote(deck_status, list(lines), stale or {}, dumps or {})
+        monkeypatch.setattr(deck, "ssh_status", fake.ssh_status)
+        monkeypatch.setattr(deck, "ssh", fake.ssh)
+        monkeypatch.setattr(gnomon, "fetch", fake.fetch)
+        monkeypatch.setattr(gnomon, "run_mod", fake.run)
+        return fake
+
+    return make
+
+
+def test_usmap_refuses_when_ffr_runs_on_the_deck(
+    make_usmap: Callable[..., UsmapRemote], fake_vanilla: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_usmap(deck_status=0, dumps={DUMP: (1.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 1
+    assert capsys.readouterr().err == f"ffrd: FINAL FANTASY RESONANCE is running on {DECK}; refusing to probe\n"
+    assert fake.status_calls == [(DECK, EXE_PGREP)]
+    assert fake.commands == []
+    assert fake.runs == []
+    assert fake.fetched == []
+    assert not (fake_vanilla / "Mappings.usmap").exists()
+
+
+def test_usmap_writes_the_fetched_bytes_to_vanilla(
+    make_usmap: Callable[..., UsmapRemote], fake_vanilla: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_usmap(dumps={DUMP: (1.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 0
+    dest = fake_vanilla / "Mappings.usmap"
+    assert dest.read_bytes() == DUMP_BYTES
+    assert fake.fetched == [DUMP]
+    assert capsys.readouterr().out == f"wrote {dest} ({len(DUMP_BYTES)} bytes)\n"
+
+
+def test_usmap_removes_the_remote_dump_after_the_write(make_usmap: Callable[..., UsmapRemote]) -> None:
+    fake = make_usmap(dumps={DUMP: (1.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 0
+    assert DUMP not in fake.files
+    assert fake.commands == [RM_DUMPS, LS_DUMPS, f"rm -f {DUMP}"]
+
+
+def test_usmap_clears_stale_dumps_before_the_mod_runs(make_usmap: Callable[..., UsmapRemote]) -> None:
+    fake = make_usmap(stale={STALE_DUMP: (0.5, OLD_BYTES)}, dumps={DUMP: (1.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 0
+    assert len(fake.runs) == 1
+    assert STALE_DUMP not in fake.seen_at_run
+    assert fake.fetched == [DUMP]
+
+
+def test_usmap_fetches_the_newest_of_several_dumps(make_usmap: Callable[..., UsmapRemote], fake_vanilla: Path) -> None:
+    fake = make_usmap(dumps={OLD_DUMP: (1.0, OLD_BYTES), DUMP: (2.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 0
+    assert fake.fetched == [DUMP]
+    assert (fake_vanilla / "Mappings.usmap").read_bytes() == DUMP_BYTES
+
+
+def test_usmap_runs_the_usmap_mod_with_no_extra_files(make_usmap: Callable[..., UsmapRemote], tmp_path: Path) -> None:
+    fake = make_usmap(dumps={DUMP: (1.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 0
+    assert fake.runs == [(tmp_path / "repo" / USMAP_MOD_PATH, {}, "usmap.log")]
+
+
+def test_usmap_exits_1_when_the_mod_reports_failed(
+    make_usmap: Callable[..., UsmapRemote], fake_vanilla: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_usmap(lines=["failed", "done"])
+    assert run_ffrd_usmap() == 1
+    assert "gnomon" in capsys.readouterr().err
+    assert fake.fetched == []
+    assert not (fake_vanilla / "Mappings.usmap").exists()
+
+
+def test_usmap_exits_1_when_no_dump_exists(
+    make_usmap: Callable[..., UsmapRemote], fake_vanilla: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_usmap(lines=["done"])
+    assert run_ffrd_usmap() == 1
+    err = capsys.readouterr().err
+    assert "no .usmap" in err
+    assert "gnomon" in err
+    assert fake.fetched == []
+    assert not (fake_vanilla / "Mappings.usmap").exists()
+
+
+def test_usmap_creates_the_vanilla_directory_when_absent(
+    make_usmap: Callable[..., UsmapRemote], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = tmp_path / "absent" / "vanilla"
+    monkeypatch.setenv("FFR_VANILLA", str(fresh))
+    make_usmap(dumps={DUMP: (1.0, DUMP_BYTES)})
+    assert run_ffrd_usmap() == 0
+    assert (fresh / "Mappings.usmap").read_bytes() == DUMP_BYTES
