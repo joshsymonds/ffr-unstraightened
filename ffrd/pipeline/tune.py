@@ -1,5 +1,6 @@
 """tune: pick the Jev triage threshold with zero Sonnet-positive misses on a sample of scenes, then save and load it per lens. Writes counts and the threshold, never scene text."""
 
+import argparse
 import json
 import os
 import tempfile
@@ -7,11 +8,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ffrd.game import Fail
+from ffrd.game import Fail, repo_root
+from ffrd.pipeline import jev, stages
 from ffrd.pipeline.claude import Rejected, Unfinished
-from ffrd.pipeline.lens import Lens
+from ffrd.pipeline.lens import Lens, load_lens
+from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.stages import Ask, Scene, Triage, screen, triage
-from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import Store, work_dir
 
 SAMPLE = 100
 THRESHOLD_FILE = "threshold.json"
@@ -104,3 +107,22 @@ def load_threshold(directory: Path) -> float:
     if isinstance(threshold, bool) or not isinstance(threshold, int | float) or not 0 <= threshold <= 1:
         raise Fail(f"triage threshold {path} is not a number from 0 to 1")
     return float(threshold)
+
+
+def cmd_tune(args: argparse.Namespace) -> None:
+    root = repo_root()
+    lens = load_lens(root / "lenses" / f"{args.lens}.toml")
+    directory = work_dir(args.lens)
+    scenes = scoped(stages.bindings().scenes.scenes())
+    tuning = tune(Store(directory), lens, scenes, jev.triage, lambda: stages.Batch().ask)
+    save_threshold(directory, tuning)
+    print(
+        f"threshold {tuning.threshold:.4f}: {tuning.positives} of {tuning.scenes} sampled scenes flagged by the screen, "
+        f"{tuning.passing} at or above it"
+    )
+
+
+def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = subparsers.add_parser("tune", help="set a lens's Jev triage threshold from Sonnet screen labels on up to 100 scenes")
+    p.add_argument("--lens", required=True, help="name of the lens to tune, read from lenses/<name>.toml and saved under work/<name>/")
+    p.set_defaults(fn=cmd_tune)

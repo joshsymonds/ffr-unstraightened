@@ -1,15 +1,28 @@
+import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from ffrd.game import Fail
+from ffrd.pipeline import jev, stages
 from ffrd.pipeline.claude import Unfinished
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import Ask, Scene, SceneLine
 from ffrd.pipeline.store import Store
-from ffrd.pipeline.tune import SAMPLE, THRESHOLD_FILE, Tuning, load_threshold, sample, save_threshold, tune
+from ffrd.pipeline.tune import (
+    SAMPLE,
+    THRESHOLD_FILE,
+    Tuning,
+    cmd_tune,
+    load_threshold,
+    register,
+    sample,
+    save_threshold,
+    tune,
+)
 
 # Made-up scene, lens and answers. Not game text.
 LENS = Lens(
@@ -200,3 +213,136 @@ def test_save_threshold_names_the_path_when_the_directory_cannot_be_created(tmp_
         save_threshold(blocked, Tuning(threshold=0.6, scenes=4, positives=2, passing=3))
 
     assert str(blocked / THRESHOLD_FILE) in str(excinfo.value)
+
+
+# Made-up lens file for the command tests. Not game text.
+CLI_LENS = "made-up"
+CLI_LENS_TOML = """\
+[[triage]]
+id = "made-up-alpha"
+question = "Made-up question alpha. Not game text."
+
+[[triage]]
+id = "made-up-beta"
+question = "Made-up question beta. Not game text."
+
+[screen]
+criteria = ["Made-up criterion one. Not game text."]
+
+[intent]
+rule = "Made-up intent rule. Not game text."
+
+[judge]
+rubric = "Made-up judge rubric. Not game text."
+"""
+OUT_OF_SCOPE_TEXT = "Made-up out-of-scope line. Not game text."
+REAL_BINDINGS = stages.bindings
+COUNTS_LINE = "threshold 0.9000: 1 of 2 sampled scenes flagged by the screen, 1 at or above it\n"
+
+SCENE_ONE = Scene(
+    "made-up-scene-1",
+    (
+        SceneLine("ST_C01_001_01", "1", None, "Made-up in-scope line. Not game text.", "Made-up Japanese. Not game text.", 1),
+        SceneLine("ST_ItemName_001", "2", None, OUT_OF_SCOPE_TEXT, "Made-up Japanese. Not game text.", 1),
+    ),
+)
+SCENE_TWO = Scene(
+    "made-up-scene-2",
+    (SceneLine("ST_C01_001_02", "1", None, "Made-up second line. Not game text.", "Made-up Japanese. Not game text.", 1),),
+)
+
+
+class _Source:
+    def __init__(self, scenes: list[Scene]) -> None:
+        self._scenes = scenes
+
+    def scenes(self) -> list[Scene]:
+        return self._scenes
+
+
+class _Batch:
+    def __init__(self, ask: Ask) -> None:
+        self.ask = ask
+
+
+@pytest.fixture
+def cmd_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "repo"
+    (root / "ffrd").mkdir(parents=True)
+    (root / "devenv.nix").write_text("{ }\n")
+    (root / "lenses").mkdir()
+    (root / "lenses" / f"{CLI_LENS}.toml").write_text(CLI_LENS_TOML)
+    monkeypatch.chdir(root)
+    return root
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ffrd")
+    register(parser.add_subparsers(required=True))
+    return parser
+
+
+def test_cmd_tune_scopes_scenes_saves_threshold_and_prints_only_the_counts(
+    cmd_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(stages, "bindings", lambda: SimpleNamespace(scenes=_Source([SCENE_ONE, SCENE_TWO])))
+    jev_fake = Fake(scores(0.9, 0.1), scores(0.2, 0.3))
+    batches = Asks(FLAGGED, NOT_FLAGGED)
+    monkeypatch.setattr(jev, "triage", jev_fake)
+    monkeypatch.setattr(stages, "Batch", lambda: _Batch(batches()))
+
+    cmd_tune(argparse.Namespace(lens=CLI_LENS))
+
+    assert capsys.readouterr().out == COUNTS_LINE
+    assert load_threshold(cmd_repo / "work" / CLI_LENS) == 0.9
+    assert json.loads((cmd_repo / "work" / CLI_LENS / THRESHOLD_FILE).read_text(encoding="utf-8")) == {
+        "threshold": 0.9,
+        "scenes": 2,
+        "positives": 1,
+        "passing": 1,
+    }
+    assert len(jev_fake.calls) == 2
+    assert OUT_OF_SCOPE_TEXT not in repr(jev_fake.calls)
+    assert OUT_OF_SCOPE_TEXT not in repr([fake.calls for fake in batches.made])
+
+
+def test_cmd_tune_with_unbound_scenes_fails_with_the_bindings_message_and_writes_nothing(
+    cmd_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(stages, "bindings", REAL_BINDINGS)
+    jev_fake = Fake()
+    monkeypatch.setattr(jev, "triage", jev_fake)
+    monkeypatch.setattr(stages, "Batch", lambda: _Batch(Fake()))
+
+    with pytest.raises(Fail) as excinfo:
+        cmd_tune(argparse.Namespace(lens=CLI_LENS))
+
+    assert str(excinfo.value) == "no scene source, classifier and renderer are bound yet"
+    assert jev_fake.calls == []
+    assert capsys.readouterr().out == ""
+    assert not (cmd_repo / "work").exists()
+
+
+def test_tune_is_registered_with_lens_required_and_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as missing:
+        _parser().parse_args(["tune"])
+    assert missing.value.code == 2
+    assert "--lens" in capsys.readouterr().err
+
+    args = _parser().parse_args(["tune", "--lens", CLI_LENS])
+    assert args.fn is cmd_tune
+    assert args.lens == CLI_LENS
+
+    with pytest.raises(SystemExit) as helped:
+        _parser().parse_args(["tune", "--help"])
+    assert helped.value.code == 0
+    tune_help = " ".join(capsys.readouterr().out.split())
+    assert "--lens" in tune_help
+    assert "lenses/<name>.toml" in tune_help
+    assert "work/<name>/" in tune_help
+
+    with pytest.raises(SystemExit) as top:
+        _parser().parse_args(["--help"])
+    assert top.value.code == 0
+    top_help = " ".join(capsys.readouterr().out.split())
+    assert "tune set a lens's Jev triage threshold from Sonnet screen labels on up to 100 scenes" in top_help
