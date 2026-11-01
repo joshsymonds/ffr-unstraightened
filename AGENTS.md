@@ -18,8 +18,9 @@ the matched text. It then exits 1.
 
 Never read, grep, list or print anything in the gitignored `vanilla/` or `work/`
 directories or in the game install. `work/` holds saved model results, which can
-contain game text. The only permitted way to see game text is `ffrd find`, which is
-progress-gated.
+contain game text. The only permitted ways to see game text are `ffrd find` and
+`ffrd diff --lens <name>`. Both are progress-gated: they need recorded progress
+before they show any game text.
 
 ## Tests
 
