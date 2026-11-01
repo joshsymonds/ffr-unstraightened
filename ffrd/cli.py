@@ -6,8 +6,9 @@ from types import ModuleType
 
 from ffrd import build, extract, find, install, leakcheck, progress
 from ffrd.game import Fail
+from ffrd.pipeline import diff, report
 
-COMMANDS: tuple[ModuleType, ...] = (extract, progress, find, build, install, leakcheck)
+COMMANDS: tuple[ModuleType, ...] = (extract, progress, find, build, install, leakcheck, report, diff)
 
 
 def main(argv: list[str] | None = None) -> None:
