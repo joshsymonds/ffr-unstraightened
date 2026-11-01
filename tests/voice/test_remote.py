@@ -11,9 +11,11 @@ import pytest
 from ffrd.game import Fail
 from ffrd.voice import remote
 
+REAL_RUN = subprocess.run
+
 # The default scratch dir, prepared the way every remote command prepares it.
 PREFIX = "umask 077 && mkdir -p ~/.local/share/ffr-unstraightened/voice/logs && cd ~/.local/share/ffr-unstraightened/voice"
-NIX = "nix develop path:./tools/voice#cuda --command"
+DEVENV = "env -C tools/voice devenv shell --profile cuda -- env -C ../.."
 
 
 class Ssh:
@@ -126,8 +128,8 @@ def test_host_and_scratch_default_and_read_env(monkeypatch: pytest.MonkeyPatch) 
     assert remote.scratch() == "/data/voice"
 
 
-def test_env_wraps_shell_quoted_argv_in_nix_develop() -> None:
-    assert remote.env(["python3", "-m", "pytest", "a b"]) == f"{NIX} python3 -m pytest 'a b'"
+def test_env_wraps_shell_quoted_argv_in_devenv_cuda_profile_from_scratch_root() -> None:
+    assert remote.env(["python3", "-m", "pytest", "a b"]) == f"{DEVENV} python3 -m pytest 'a b'"
 
 
 def test_shell_runs_prefix_then_command_in_one_ssh_call(ssh: Ssh) -> None:
@@ -154,16 +156,21 @@ def test_shell_nonzero_exit_raises_fail_with_host_and_code_only(ssh: Ssh) -> Non
 
 def test_run_appends_remote_stderr_to_remote_log(ssh: Ssh) -> None:
     remote.run(["python3", "x.py"])
-    assert ssh.calls[0][0][2] == f"{PREFIX} && {NIX} python3 x.py 2>> logs/remote.log"
+    assert ssh.calls[0][0][2] == f"{PREFIX} && {DEVENV} python3 x.py 2>> logs/remote.log"
 
 
-def test_sync_tar_holds_only_tools_voice_files_without_pycache(ssh: Ssh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+SYNC = "mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {} + && tar -x -f -"
+
+
+def test_sync_tar_holds_only_tools_voice_files_without_pycache_or_devenv(ssh: Ssh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     voice = tmp_path / "tools" / "voice"
     (voice / "pkg").mkdir(parents=True)
     (voice / "__pycache__").mkdir()
-    (voice / "flake.nix").write_text("{}\n")
+    (voice / ".devenv" / "state").mkdir(parents=True)
+    (voice / "devenv.nix").write_text("{}\n")
     (voice / "pkg" / "a.py").write_text("x = 1\n")
     (voice / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"\0")
+    (voice / ".devenv" / "state" / "local").write_text("local-state\n")
     (tmp_path / "ffrd").mkdir()
     (tmp_path / "ffrd" / "b.py").write_text("y = 2\n")
     monkeypatch.setattr(remote, "repo_root", lambda: tmp_path)
@@ -171,10 +178,36 @@ def test_sync_tar_holds_only_tools_voice_files_without_pycache(ssh: Ssh, tmp_pat
     remote.sync()
 
     args, kwargs = ssh.calls[0]
-    assert args == ["ssh", "gnomon", f"{PREFIX} && rm -rf -- tools/voice && tar -x -f -"]
+    assert args == ["ssh", "gnomon", f"{PREFIX} && {SYNC}"]
     with tarfile.open(fileobj=io.BytesIO(kwargs["input"])) as tar:
         names = sorted(tar.getnames())
-    assert names == ["tools/voice/flake.nix", "tools/voice/pkg/a.py"]
+    assert names == ["tools/voice/devenv.nix", "tools/voice/pkg/a.py"]
+
+
+def test_sync_keeps_remote_devenv_state_and_drops_stale_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Runs the real remote command with sh in a fake scratch dir under a fake HOME, so the .devenv
+    # preservation is checked by behavior rather than by the command text.
+    home = tmp_path / "home"
+    scratch_voice = home / ".local" / "share" / "ffr-unstraightened" / "voice" / "tools" / "voice"
+    (scratch_voice / ".devenv").mkdir(parents=True)
+    (scratch_voice / ".devenv" / "state").write_text("remote-state\n")
+    (scratch_voice / "stale.py").write_text("old = 1\n")
+    repo = tmp_path / "repo"
+    (repo / "tools" / "voice" / ".devenv").mkdir(parents=True)
+    (repo / "tools" / "voice" / ".devenv" / "state").write_text("local-state\n")
+    (repo / "tools" / "voice" / "devenv.nix").write_text("{}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(remote, "repo_root", lambda: repo)
+
+    def run_here(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return REAL_RUN(["sh", "-c", args[2]], input=kwargs["input"], check=False)
+
+    monkeypatch.setattr(remote.subprocess, "run", run_here)
+    remote.sync()
+
+    assert (scratch_voice / ".devenv" / "state").read_text() == "remote-state\n"
+    assert not (scratch_voice / "stale.py").exists()
+    assert (scratch_voice / "devenv.nix").read_text() == "{}\n"
 
 
 def test_push_sends_file_bytes_to_name_under_scratch(ssh: Ssh, tmp_path: Path) -> None:
@@ -230,7 +263,7 @@ def test_worker_ask_round_trips_one_json_line(monkeypatch: pytest.MonkeyPatch) -
     assert popen.calls[0][0] == [
         "ssh",
         "gnomon",
-        f"{PREFIX} && {NIX} python3 serve.py 2>> logs/worker.log",
+        f"{PREFIX} && {DEVENV} python3 serve.py 2>> logs/worker.log",
     ]
     assert process.stdin.closed
     assert process.waits == [30]

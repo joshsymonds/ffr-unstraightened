@@ -274,9 +274,9 @@ def test_score_returns_single_score_and_closes_worker(fake_worker: Callable[[obj
     assert made[0].exited is True
 
 
-# The same prefix and NIX wrapper every remote command builds in the default scratch dir.
+# The same prefix and devenv wrapper every remote command builds in the default scratch dir.
 REMOTE_PREFIX = "umask 077 && mkdir -p ~/.local/share/ffr-unstraightened/voice/logs && cd ~/.local/share/ffr-unstraightened/voice"
-REMOTE_NIX = "nix develop path:./tools/voice#cuda --command"
+REMOTE_DEVENV = "env -C tools/voice devenv shell --profile cuda -- env -C ../.."
 
 
 class RecordingSsh:
@@ -301,7 +301,7 @@ def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Recordin
     monkeypatch.setattr(remote, "repo_root", lambda: tmp_path / "repo")
     voice = tmp_path / "repo" / "tools" / "voice"
     voice.mkdir(parents=True)
-    (voice / "flake.nix").write_text("{}\n", encoding="utf-8")
+    (voice / "devenv.nix").write_text("{}\n", encoding="utf-8")
     work = tmp_path / "work"
     monkeypatch.setattr(remote, "work_dir", lambda lens: work / lens)
     monkeypatch.setattr(
@@ -321,10 +321,13 @@ def test_train_syncs_then_stages_examples_then_runs_remote_trainer(train_env: tu
     classifier.train(epochs=3)
 
     assert len(ssh.commands) == 3
-    assert ssh.commands[0] == f"{REMOTE_PREFIX} && rm -rf -- tools/voice && tar -x -f -"
+    assert (
+        ssh.commands[0]
+        == f"{REMOTE_PREFIX} && mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {{}} + && tar -x -f -"
+    )
     assert ssh.commands[1] == f"{REMOTE_PREFIX} && mkdir -p -- data && cat > data/classifier.jsonl"
     assert ssh.commands[2] == (
-        f"{REMOTE_PREFIX} && {REMOTE_NIX} python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
+        f"{REMOTE_PREFIX} && {REMOTE_DEVENV} python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
     )
 
 

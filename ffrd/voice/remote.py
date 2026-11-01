@@ -21,7 +21,11 @@ from ffrd.pipeline.store import work_dir
 
 DEFAULT_HOST = "gnomon"
 DEFAULT_SCRATCH = "~/.local/share/ffr-unstraightened/voice"
-ENV = "path:./tools/voice#cuda"
+# Runs from the scratch dir: the cuda profile of the devenv in tools/voice, then argv from the scratch root.
+DEVENV = "env -C tools/voice devenv shell --profile cuda --"
+# Clears the synced tools/voice but keeps the GPU host's devenv state, which is never synced.
+CLEAR_VOICE = "mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {} +"
+EXCLUDED_PARTS = frozenset({"__pycache__", ".devenv"})
 WAIT_SECONDS = 30
 TUNNEL_TIMEOUT = 30.0
 
@@ -35,7 +39,7 @@ def scratch() -> str:
 
 
 def env(argv: Sequence[str]) -> str:
-    return f"nix develop {ENV} --command {shlex.join(argv)}"
+    return f"{DEVENV} env -C ../.. {shlex.join(argv)}"
 
 
 def _prefix() -> str:
@@ -74,9 +78,9 @@ def sync() -> None:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         for path in sorted(base.rglob("*")):
-            if path.is_file() and "__pycache__" not in path.relative_to(base).parts:
+            if path.is_file() and EXCLUDED_PARTS.isdisjoint(path.relative_to(base).parts):
                 tar.add(path, arcname=path.relative_to(root).as_posix())
-    _require_ok(_ssh(f"{_prefix()} && rm -rf -- tools/voice && tar -x -f -", input=buf.getvalue()), "sync")
+    _require_ok(_ssh(f"{_prefix()} && {CLEAR_VOICE} && tar -x -f -", input=buf.getvalue()), "sync")
 
 
 def push(local: Path, name: str) -> None:

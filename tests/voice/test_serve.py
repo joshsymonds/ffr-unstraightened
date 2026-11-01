@@ -20,7 +20,7 @@ from ffrd.voice.render import PORT
 # Made-up host name. Never a real host.
 SYNTHETIC_HOST = "synthetic-host"
 LAUNCH = (
-    "{ setsid nohup nix develop path:./tools/voice#cuda --command llama-server -m models/voice.gguf --host 127.0.0.1 "
+    "{ setsid nohup env -C tools/voice devenv shell --profile cuda -- env -C ../.. llama-server -m models/voice.gguf --host 127.0.0.1 "
     "--port 8737 -c 4096 -np 4 -ngl 999 > /dev/null 2>&1 < /dev/null & echo $! > serve.pid; }"
 )
 STOP = "if [ -f serve.pid ]; then kill -TERM -- -$(cat serve.pid) 2>/dev/null; rm -f serve.pid; fi"
@@ -176,7 +176,7 @@ def test_start_launches_and_waits_past_non_200_polls(host: Host, stub: Stub, cap
 def test_start_uses_the_given_port_and_gguf(host: Host) -> None:
     serve.start(9000, "models/other.gguf")
     assert host.commands[1] == (
-        "{ setsid nohup nix develop path:./tools/voice#cuda --command llama-server -m models/other.gguf --host 127.0.0.1 "
+        "{ setsid nohup env -C tools/voice devenv shell --profile cuda -- env -C ../.. llama-server -m models/other.gguf --host 127.0.0.1 "
         "--port 9000 -c 4096 -np 4 -ngl 999 > /dev/null 2>&1 < /dev/null & echo $! > serve.pid; }"
     )
     assert host.tunnels == [9000]
