@@ -13,8 +13,8 @@ from ffrd import cli, extract, install, probe, scenes
 from ffrd.game import LOCRES, MOD_NAME, vanilla_hash
 from ffrd.pipeline import smoke
 from ffrd.scenes import SceneLine
+from ffrd.voice import classifier, evals, lora, pairs, render, serve
 from ffrd.voice import cli as voice_cli
-from ffrd.voice import pairs
 
 EXTS = ("pak", "utoc", "ucas")
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -549,8 +549,8 @@ def test_voice_without_a_subcommand_exits_2(repo: Path, capsys: pytest.CaptureFi
     assert "required" in capsys.readouterr().err
 
 
-def test_voice_subcommands_are_pairs_only() -> None:
-    assert (pairs,) == voice_cli.SUBCOMMANDS
+def test_voice_subcommands_include_pairs_and_the_wired_modules() -> None:
+    assert {pairs, classifier, lora, serve, render, evals} <= set(voice_cli.SUBCOMMANDS)
 
 
 def test_voice_pairs_check_through_the_cli_prints_counts_only(

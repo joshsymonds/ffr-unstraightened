@@ -203,3 +203,18 @@ def test_main_merges_and_writes_out(world):
 
     assert os.listdir(world.exports) == ["model.gguf"]
     assert mode(out) == 0o600
+
+
+def test_main_defaults_quant_to_q8_0(world):
+    export.main([str(world.adapter), str(world.exports / "model.gguf")])
+
+    assert calls(world)[1]["argv"][-1] == "Q8_0"
+
+
+def test_main_passes_quant_to_the_quantizer(world):
+    out = world.exports / "model.gguf"
+
+    export.main([str(world.adapter), str(out), "--quant", "Q4_K_M"])
+
+    assert calls(world)[1]["argv"][-1] == "Q4_K_M"
+    assert mode(out) == 0o600

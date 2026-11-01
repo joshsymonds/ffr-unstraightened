@@ -9,15 +9,17 @@ from ffrd.voice.render import prompt
 # Made-up strings for the LoRA records. Not game text.
 TRAIN_ARGV = ["python3", "-m", "tools.voice.finetune", "train", lora.DATA, lora.ADAPTER, "--epochs"]
 EXPORT_ARGV = ["python3", "-m", "tools.voice.export", lora.ADAPTER, lora.GGUF]
+SYNTH_BASE = "synthetic/base-model-alt"
+SYNTH_QUANT = "Q4_K_M"
 
 
-def pair(split: str, n: int) -> Pair:
+def pair(split: str, n: int, *, null_speaker: bool = False) -> Pair:
     return Pair(
         scene="synth-scene",
-        speaker=f"SYNTH-SPEAKER-{n}",
+        speaker=None if null_speaker else f"SYNTH-SPEAKER-{n}",
         paraphrase=f"SYNTH-PARAPHRASE-{n} wording",
         original=f"SYNTH-ORIGINAL-{n} wording",
-        slot="synth-slot",
+        slot=1,
         model="synth-model",
         split=split,
     )
@@ -44,7 +46,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
 def train_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_load(split: str) -> list[Pair]:
         assert split == "train"
-        return [pair("train", 1), pair("heldout", 2)]
+        return [pair("train", 1), pair("heldout", 2), pair("train", 4, null_speaker=True)]
 
     monkeypatch.setattr(lora, "load_pairs", fake_load)
 
@@ -61,6 +63,14 @@ def test_records_builds_shared_prompt_and_original_target_for_train_pairs_in_ord
 
 def test_records_skips_heldout_pairs_entirely() -> None:
     assert lora.records([pair("heldout", 1)]) == []
+
+
+def test_records_leaves_out_null_speaker_train_pairs() -> None:
+    rows = lora.records([pair("train", 1), pair("train", 2, null_speaker=True), pair("train", 3)])
+    assert rows == [
+        {"prompt": prompt("SYNTH-SPEAKER-1", "SYNTH-PARAPHRASE-1 wording"), "target": "SYNTH-ORIGINAL-1 wording"},
+        {"prompt": prompt("SYNTH-SPEAKER-3", "SYNTH-PARAPHRASE-3 wording"), "target": "SYNTH-ORIGINAL-3 wording"},
+    ]
 
 
 def test_train_syncs_then_stages_train_records_then_runs(
@@ -81,9 +91,19 @@ def test_train_passes_epochs_to_the_finetune_job(calls: list[tuple[object, ...]]
     assert calls[-1] == ("run", [*TRAIN_ARGV, "3"])
 
 
+def test_train_passes_base_model_to_the_finetune_job(calls: list[tuple[object, ...]], train_pairs: None) -> None:
+    lora.train(base_model=SYNTH_BASE)
+    assert calls[-1] == ("run", [*TRAIN_ARGV, "1", "--base-model", SYNTH_BASE])
+
+
 def test_export_syncs_then_exports_adapter_to_gguf(calls: list[tuple[object, ...]]) -> None:
     lora.export()
     assert calls == [("sync",), ("run", EXPORT_ARGV)]
+
+
+def test_export_passes_quant_to_the_export_job(calls: list[tuple[object, ...]]) -> None:
+    lora.export(quant=SYNTH_QUANT)
+    assert calls == [("sync",), ("run", [*EXPORT_ARGV, "--quant", SYNTH_QUANT])]
 
 
 def parse(argv: list[str]) -> argparse.Namespace:
@@ -102,10 +122,30 @@ def test_register_lora_train_defaults_epochs_to_one() -> None:
     assert parse(["lora", "train"]).epochs == 1
 
 
+def test_register_lora_train_parses_base_model_and_runs_train(calls: list[tuple[object, ...]], train_pairs: None) -> None:
+    args = parse(["lora", "train", "--base-model", SYNTH_BASE])
+    args.fn(args)
+    assert calls[-1] == ("run", [*TRAIN_ARGV, "1", "--base-model", SYNTH_BASE])
+
+
+def test_register_lora_train_defaults_base_model_to_none() -> None:
+    assert parse(["lora", "train"]).base_model is None
+
+
 def test_register_lora_export_runs_export(calls: list[tuple[object, ...]]) -> None:
     args = parse(["lora", "export"])
     args.fn(args)
     assert calls == [("sync",), ("run", EXPORT_ARGV)]
+
+
+def test_register_lora_export_parses_quant_and_runs_export(calls: list[tuple[object, ...]]) -> None:
+    args = parse(["lora", "export", "--quant", SYNTH_QUANT])
+    args.fn(args)
+    assert calls == [("sync",), ("run", [*EXPORT_ARGV, "--quant", SYNTH_QUANT])]
+
+
+def test_register_lora_export_defaults_quant_to_none() -> None:
+    assert parse(["lora", "export"]).quant is None
 
 
 def test_register_lora_requires_an_action() -> None:

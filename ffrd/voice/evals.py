@@ -64,20 +64,31 @@ def _digest(text: str) -> str:
 
 
 def heldout_sample(pairs: Sequence[Pair]) -> list[Pair]:
-    """One pair per held-out line: the paraphrase with the lowest sha256, lines ordered by sha256 of the original."""
+    """One pair per held-out line: the paraphrase with the lowest sha256, lines ordered by sha256 of the original. Null-speaker pairs are never rendered, so they are not sampled."""
     chosen: dict[str, Pair] = {}
-    for pair in pairs:
+    for pair in (pair for pair in pairs if pair.speaker is not None):
         best = chosen.get(pair.original)
         if best is None or _digest(pair.paraphrase) < _digest(best.paraphrase):
             chosen[pair.original] = pair
     return sorted(chosen.values(), key=lambda pair: _digest(pair.original))
 
 
+def _speakers(sample: Sequence[Pair]) -> list[str]:
+    """The speaker each sampled pair is rendered as. A null speaker fails here, before any render."""
+    speakers: list[str] = []
+    for pair in sample:
+        if pair.speaker is None:
+            raise Fail("pair has no speaker to render as; null-speaker pairs are never rendered")
+        speakers.append(pair.speaker)
+    return speakers
+
+
 def render_metrics(pairs: Sequence[Pair], render: Renderer, score_many: ScoreMany, holds_many: HoldsMany) -> dict[str, int | float | bool]:
     sample = heldout_sample(pairs)
     if not sample:
         raise Fail("render eval needs at least one held-out pair")
-    renders = [render(pair.speaker, pair.paraphrase) for pair in sample]
+    speakers = _speakers(sample)
+    renders = [render(speaker, pair.paraphrase) for speaker, pair in zip(speakers, sample, strict=True)]
     render_scores = score_many(renders)
     paraphrase_scores = score_many([pair.paraphrase for pair in sample])
     render_holds = holds_many([(pair.paraphrase, rendered) for pair, rendered in zip(sample, renders, strict=True)])
@@ -215,7 +226,8 @@ def revert_metrics(
         raise Fail("revert eval needs at least one training input")
     if len(altered) != len(sample):
         raise Fail("revert eval needs one altered text per training input")
-    renders = [render(pair.speaker, text) for pair, text in zip(sample, altered, strict=True)]
+    speakers = _speakers(sample)
+    renders = [render(speaker, text) for speaker, text in zip(speakers, altered, strict=True)]
     holds = holds_many([(rendered, pair.original) for pair, rendered in zip(sample, renders, strict=True)])
     n = len(sample)
     kept = n - sum(holds)

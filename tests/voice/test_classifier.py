@@ -3,6 +3,7 @@ import io
 import json
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import pytest
 
 from ffrd.game import Fail
 from ffrd.pipeline.gates import Classifier
-from ffrd.voice import classifier, remote
+from ffrd.voice import classifier, pairs, remote
 from ffrd.voice.classifier import MODEL_DIR, Pair, Scorer, examples, load_pairs
 
 # Made-up strings for the pairs loader. Not game text.
@@ -20,24 +21,30 @@ SYNTH_TEXTS = (
     "SYNTH-ORIGINAL-ONE wording",
     "SYNTH-PARAPHRASE-TWO wording",
     "SYNTH-ORIGINAL-TWO wording",
-    "SYNTH-RAW-NOT-JSON fragment",
 )
 
 # Made-up strings for the scorer. Not game text.
 SCORE_TEXTS = ("SYNTH-SCORE-ONE wording", "SYNTH-SCORE-TWO wording")
 
 
-def record(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
-        "scene": "synth-scene-1",
-        "speaker": SYNTH_TEXTS[0],
-        "paraphrase": SYNTH_TEXTS[1],
-        "original": SYNTH_TEXTS[2],
-        "slot": "synth-slot-1",
-        "model": "synth-model-1",
-    }
-    base.update(overrides)
-    return base
+def pair_row(
+    *,
+    scene: str = "synth-scene-1",
+    speaker: str | None = SYNTH_TEXTS[0],
+    paraphrase: str = SYNTH_TEXTS[1],
+    original: str = SYNTH_TEXTS[2],
+    slot: int = 2,
+) -> pairs.Pair:
+    return pairs.Pair(
+        scene=scene,
+        namespace="synth-namespace-1",
+        key="synth-key-1",
+        speaker=speaker,
+        slot=slot,
+        model="synth-model-1",
+        original=original,
+        paraphrase=paraphrase,
+    )
 
 
 def line(value: dict[str, object]) -> str:
@@ -45,24 +52,24 @@ def line(value: dict[str, object]) -> str:
 
 
 @pytest.fixture
-def pairs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def voice_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "work"
     monkeypatch.setattr(classifier, "work_dir", lambda lens: root / lens)
-    return root / "voice" / "pairs"
+    return root / "voice"
 
 
-def write_split(pairs_dir: Path, split: str, lines: list[str]) -> None:
-    pairs_dir.mkdir(parents=True, exist_ok=True)
-    (pairs_dir / f"{split}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+def write_pairs(voice_dir: Path, name: str, rows: list[pairs.Pair]) -> None:
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    (voice_dir / name).write_text("".join(line(asdict(row)) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_load_pairs_maps_fields_in_file_order(pairs_dir: Path) -> None:
-    write_split(
-        pairs_dir,
-        "train",
+def test_load_pairs_reads_train_file_in_pairs_format_in_file_order(voice_dir: Path) -> None:
+    write_pairs(
+        voice_dir,
+        pairs.TRAIN,
         [
-            line(record(scene="synth-scene-1", original=SYNTH_TEXTS[2], paraphrase=SYNTH_TEXTS[1])),
-            line(record(scene="synth-scene-2", speaker=SYNTH_TEXTS[0], original=SYNTH_TEXTS[4], paraphrase=SYNTH_TEXTS[3])),
+            pair_row(scene="synth-scene-1", original=SYNTH_TEXTS[2], paraphrase=SYNTH_TEXTS[1]),
+            pair_row(scene="synth-scene-2", speaker=SYNTH_TEXTS[0], original=SYNTH_TEXTS[4], paraphrase=SYNTH_TEXTS[3], slot=4),
         ],
     )
     assert load_pairs("train") == [
@@ -71,7 +78,7 @@ def test_load_pairs_maps_fields_in_file_order(pairs_dir: Path) -> None:
             speaker=SYNTH_TEXTS[0],
             paraphrase=SYNTH_TEXTS[1],
             original=SYNTH_TEXTS[2],
-            slot="synth-slot-1",
+            slot=2,
             model="synth-model-1",
             split="train",
         ),
@@ -80,54 +87,41 @@ def test_load_pairs_maps_fields_in_file_order(pairs_dir: Path) -> None:
             speaker=SYNTH_TEXTS[0],
             paraphrase=SYNTH_TEXTS[3],
             original=SYNTH_TEXTS[4],
-            slot="synth-slot-1",
+            slot=4,
             model="synth-model-1",
             split="train",
         ),
     ]
 
 
-def test_load_pairs_sets_split_from_argument(pairs_dir: Path) -> None:
-    write_split(pairs_dir, "heldout", [line(record()), line(record(scene="synth-scene-2"))])
+def test_load_pairs_reads_heldout_file_and_sets_split_from_argument(voice_dir: Path) -> None:
+    write_pairs(voice_dir, pairs.HELDOUT, [pair_row(), pair_row(scene="synth-scene-2")])
     loaded = load_pairs("heldout")
-    assert len(loaded) == 2
+    assert [pair.scene for pair in loaded] == ["synth-scene-1", "synth-scene-2"]
     assert {pair.split for pair in loaded} == {"heldout"}
 
 
-def test_load_pairs_skips_blank_lines(pairs_dir: Path) -> None:
-    write_split(pairs_dir, "train", ["", line(record()), "   ", "\t", line(record(scene="synth-scene-2"))])
-    assert [pair.scene for pair in load_pairs("train")] == ["synth-scene-1", "synth-scene-2"]
+def test_load_pairs_keeps_null_speaker_pairs_with_their_int_slot(voice_dir: Path) -> None:
+    write_pairs(
+        voice_dir,
+        pairs.TRAIN,
+        [pair_row(scene="synth-scene-1", speaker=None, slot=3), pair_row(scene="synth-scene-2")],
+    )
+    loaded = load_pairs("train")
+    assert [(pair.scene, pair.speaker, pair.slot) for pair in loaded] == [
+        ("synth-scene-1", None, 3),
+        ("synth-scene-2", SYNTH_TEXTS[0], 2),
+    ]
 
 
-def test_load_pairs_rejects_unknown_split(pairs_dir: Path) -> None:
+def test_load_pairs_rejects_unknown_split(voice_dir: Path) -> None:
     with pytest.raises(Fail, match="unknown pairs split 'synthetic'"):
         load_pairs("synthetic")
 
 
-def test_load_pairs_missing_file_points_at_pairs_command(pairs_dir: Path) -> None:
-    with pytest.raises(Fail, match="no heldout pairs file; run `ffrd voice pairs` first"):
+def test_load_pairs_missing_file_surfaces_pairs_reader_error(voice_dir: Path) -> None:
+    with pytest.raises(Fail, match=r"no pairs at .*heldout\.jsonl; run `ffrd voice pairs`"):
         load_pairs("heldout")
-
-
-@pytest.mark.parametrize(
-    ("bad_line", "reason"),
-    [
-        (f"[{json.dumps(SYNTH_TEXTS[2])}]", "not a JSON object"),
-        (SYNTH_TEXTS[5], "not a JSON object"),
-        (line({k: v for k, v in record().items() if k != "model"}), "missing or non-string 'model' field"),
-        (line(record(paraphrase=7)), "missing or non-string 'paraphrase' field"),
-    ],
-    ids=["array", "not-json", "missing-field", "non-string-field"],
-)
-def test_load_pairs_failures_name_split_and_line_only(pairs_dir: Path, bad_line: str, reason: str) -> None:
-    write_split(pairs_dir, "train", [line(record()), bad_line])
-    with pytest.raises(Fail) as excinfo:
-        load_pairs("train")
-    message = str(excinfo.value)
-    assert "train line 2" in message
-    assert reason in message
-    for text in (*SYNTH_TEXTS, "synth-scene-1", "synth-model-1"):
-        assert text not in message
 
 
 def test_pair_repr_hides_speaker_paraphrase_and_original() -> None:
@@ -136,7 +130,7 @@ def test_pair_repr_hides_speaker_paraphrase_and_original() -> None:
         speaker=SYNTH_TEXTS[0],
         paraphrase=SYNTH_TEXTS[1],
         original=SYNTH_TEXTS[2],
-        slot="synth-slot-1",
+        slot=1,
         model="synth-model-1",
         split="train",
     )
@@ -152,7 +146,7 @@ def make_pair(original: str, paraphrase: str) -> Pair:
         speaker=SYNTH_TEXTS[0],
         paraphrase=paraphrase,
         original=original,
-        slot="synth-slot-1",
+        slot=1,
         model="synth-model-1",
         split="train",
     )
@@ -171,6 +165,11 @@ def test_examples_dedupes_originals_and_keeps_pair_order() -> None:
         (SYNTH_TEXTS[3], 0),
         ("SYNTH-PARAPHRASE-THREE wording", 0),
     ]
+
+
+def test_examples_includes_null_speaker_pairs_original_and_paraphrase(voice_dir: Path) -> None:
+    write_pairs(voice_dir, pairs.TRAIN, [pair_row(speaker=None, original=SYNTH_TEXTS[2], paraphrase=SYNTH_TEXTS[1])])
+    assert examples(load_pairs("train")) == [(SYNTH_TEXTS[2], 1), (SYNTH_TEXTS[1], 0)]
 
 
 def test_examples_drops_paraphrase_identical_to_its_original() -> None:
@@ -274,9 +273,9 @@ def test_score_returns_single_score_and_closes_worker(fake_worker: Callable[[obj
     assert made[0].exited is True
 
 
-# The same prefix and NIX wrapper every remote command builds in the default scratch dir.
+# The same prefix and devenv wrapper every remote command builds in the default scratch dir.
 REMOTE_PREFIX = "umask 077 && mkdir -p ~/.local/share/ffr-unstraightened/voice/logs && cd ~/.local/share/ffr-unstraightened/voice"
-REMOTE_NIX = "nix develop path:./tools/voice#cuda --command"
+REMOTE_DEVENV = "env -C tools/voice devenv shell --profile cuda -- env -C ../.."
 
 
 class RecordingSsh:
@@ -291,17 +290,22 @@ class RecordingSsh:
         stdin = kwargs.get("stdin")
         if isinstance(stdin, io.IOBase):
             self.pushed = stdin.read()
-        return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0, stdout=b"")
 
 
 @pytest.fixture
 def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[RecordingSsh, Path]:
     ssh = RecordingSsh()
     monkeypatch.setattr(remote.subprocess, "run", ssh)
+
+    def forbidden(args: list[str], **kwargs: Any) -> None:
+        pytest.fail("remote commands must go through the intercepted ssh run, not Popen")
+
+    monkeypatch.setattr(remote.subprocess, "Popen", forbidden)
     monkeypatch.setattr(remote, "repo_root", lambda: tmp_path / "repo")
     voice = tmp_path / "repo" / "tools" / "voice"
     voice.mkdir(parents=True)
-    (voice / "flake.nix").write_text("{}\n", encoding="utf-8")
+    (voice / "devenv.nix").write_text("{}\n", encoding="utf-8")
     work = tmp_path / "work"
     monkeypatch.setattr(remote, "work_dir", lambda lens: work / lens)
     monkeypatch.setattr(
@@ -316,16 +320,27 @@ def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Recordin
     return ssh, work
 
 
-def test_train_syncs_then_stages_examples_then_runs_remote_trainer(train_env: tuple[RecordingSsh, Path]) -> None:
+def test_train_syncs_then_stages_examples_then_starts_the_remote_trainer_and_polls_it(
+    train_env: tuple[RecordingSsh, Path],
+) -> None:
     ssh, _ = train_env
     classifier.train(epochs=3)
 
-    assert len(ssh.commands) == 3
-    assert ssh.commands[0] == f"{REMOTE_PREFIX} && rm -rf -- tools/voice && tar -x -f -"
-    assert ssh.commands[1] == f"{REMOTE_PREFIX} && mkdir -p -- data && cat > data/classifier.jsonl"
-    assert ssh.commands[2] == (
-        f"{REMOTE_PREFIX} && {REMOTE_NIX} python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
+    assert len(ssh.commands) == 5
+    assert (
+        ssh.commands[0]
+        == f"{REMOTE_PREFIX} && mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {{}} + && tar -x -f -"
     )
+    assert ssh.commands[1] == f"{REMOTE_PREFIX} && mkdir -p -- data && cat > data/classifier.jsonl"
+    assert ssh.commands[2].startswith(f"{REMOTE_PREFIX} && mkdir -p jobs/")
+    assert "setsid nohup sh -c " in ssh.commands[2]
+    assert (
+        f"{REMOTE_DEVENV} env PYTHONUNBUFFERED=1 python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3"
+        in ssh.commands[2]
+    )
+    assert "2>> logs/remote.log" in ssh.commands[2]
+    assert ssh.commands[3].startswith(f"{REMOTE_PREFIX} && {{ if [ -f jobs/")
+    assert ssh.commands[4].startswith(f"{REMOTE_PREFIX} && exit $(cat jobs/")
 
 
 def test_train_stages_text_and_label_rows_for_each_example(train_env: tuple[RecordingSsh, Path]) -> None:

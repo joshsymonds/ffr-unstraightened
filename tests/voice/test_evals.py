@@ -186,13 +186,13 @@ def test_short_figure_is_reported_but_does_not_gate_pass() -> None:
     assert metrics["pass"] is True
 
 
-def make_pair(original: str, paraphrase: str, speaker: str = "spk-a") -> Pair:
+def make_pair(original: str, paraphrase: str, speaker: str | None = "spk-a") -> Pair:
     return Pair(
         scene="scene-x",
         speaker=speaker,
         paraphrase=paraphrase,
         original=original,
-        slot="slot-1",
+        slot=1,
         model="model-m",
         split="heldout",
     )
@@ -250,6 +250,27 @@ def test_heldout_sample_orders_lines_by_sha256_of_the_original() -> None:
 
 def test_heldout_sample_of_nothing_is_empty() -> None:
     assert heldout_sample([]) == []
+
+
+def test_heldout_sample_leaves_out_null_speaker_pairs() -> None:
+    # sha256("para-a2") sorts first, but its speaker is null, so para-a1 is the sample.
+    pairs = [make_pair("line-alpha", "para-a2", None), make_pair("line-alpha", "para-a1")]
+    assert [(pair.original, pair.paraphrase) for pair in heldout_sample(pairs)] == [("line-alpha", "para-a1")]
+
+
+def test_render_metrics_never_passes_a_null_speaker_to_the_renderer() -> None:
+    pairs = [make_pair("line-alpha", "para-a2", None), make_pair("line-alpha", "para-a1"), make_pair("line-beta", "para-b1", None)]
+    fakes = Fakes()
+    metrics = render_metrics(pairs, fakes.render, fakes.score_many, fakes.holds_many)
+    assert fakes.render_inputs == [("spk-a", "para-a1")]
+    assert metrics["n"] == 1
+
+
+def test_render_metrics_of_only_null_speaker_pairs_raises_before_any_render() -> None:
+    fakes = Fakes()
+    with pytest.raises(Fail, match="needs at least one held-out pair"):
+        render_metrics([make_pair("line-alpha", "para-a1", None)], fakes.render, fakes.score_many, fakes.holds_many)
+    assert fakes.render_inputs == []
 
 
 def test_every_render_happens_before_the_first_score_call() -> None:
@@ -377,7 +398,7 @@ def make_train_pair(i: int) -> Pair:
         speaker=f"spk-{i}",
         paraphrase=f"para-{i:03d}",
         original=f"line-{i:03d}",
-        slot="slot-1",
+        slot=1,
         model="model-m",
         split="train",
     )
@@ -434,7 +455,7 @@ def test_revert_sample_keeps_train_pairs_only_and_caps_at_n() -> None:
             speaker="spk-h",
             paraphrase=f"para-h{i}",
             original=f"line-h{i}",
-            slot="slot-1",
+            slot=1,
             model="model-m",
             split="heldout",
         )
@@ -444,6 +465,22 @@ def test_revert_sample_keeps_train_pairs_only_and_caps_at_n() -> None:
     assert len(sample) == 4
     assert all(pair.split == "train" for pair in sample)
     assert sample == heldout_sample(train)[:4]
+
+
+def test_revert_sample_leaves_out_null_speaker_train_pairs() -> None:
+    train = [make_train_pair(0), make_train_pair(1), make_train_pair(2)]
+    train[1] = Pair(
+        scene="scene-x",
+        speaker=None,
+        paraphrase="para-001",
+        original="line-001",
+        slot=1,
+        model="model-m",
+        split="train",
+    )
+    sample = revert_sample(train)
+    assert {pair.original for pair in sample} == {"line-000", "line-002"}
+    assert all(pair.speaker is not None for pair in sample)
 
 
 def test_revert_sample_defaults_to_two_hundred_inputs() -> None:
@@ -606,6 +643,27 @@ def test_revert_renders_happen_before_holds_many() -> None:
     assert hold_inputs == [[("R:altered-0", "line-000"), ("R:altered-1", "line-001"), ("R:altered-2", "line-002")]]
 
 
+def test_revert_metrics_never_passes_a_null_speaker_to_the_renderer() -> None:
+    null_pair = Pair(
+        scene="scene-x",
+        speaker=None,
+        paraphrase="para-000",
+        original="line-000",
+        slot=1,
+        model="model-m",
+        split="train",
+    )
+    renders: list[str] = []
+    with pytest.raises(Fail):
+        revert_metrics(
+            [make_train_pair(1), null_pair],
+            ["altered-1", "altered-0"],
+            lambda speaker, text: renders.append(text) or text,
+            lambda pairs: [],
+        )
+    assert renders == []
+
+
 def test_revert_metrics_of_nothing_raises_before_any_render() -> None:
     renders: list[str] = []
     with pytest.raises(Fail):
@@ -735,6 +793,19 @@ def test_classifier_scored_labels_distinct_originals_and_differing_paraphrases()
         Scored(label=1, words=3, score=0.9),
         Scored(label=1, words=2, score=0.8),
         Scored(label=0, words=3, score=0.2),
+        Scored(label=0, words=3, score=0.1),
+    ]
+
+
+def test_classifier_scored_keeps_null_speaker_pairs() -> None:
+    pairs = [make_pair("Alpha one two", "Alpha one four", None)]
+    table = {"Alpha one two": 0.9, "Alpha one four": 0.1}
+
+    def score_many(texts: Sequence[str]) -> list[float]:
+        return [table[text] for text in texts]
+
+    assert classifier_scored(pairs, score_many) == [
+        Scored(label=1, words=3, score=0.9),
         Scored(label=0, words=3, score=0.1),
     ]
 
