@@ -18,8 +18,10 @@ Each table has exactly two fields:
   `vanilla_hash` in `ffrd/game.py`.
 - `text` is your replacement line.
 
-Edits are keyed by namespace and key, and matched by `vanilla` hash. Files never contain
-the vanilla line itself.
+Edits are keyed by namespace and key, and matched by `vanilla` hash. A stub from
+`ffrd find` sets `text` to the vanilla line, so replace it with your line before
+building. `ffrd build` rejects an unedited stub, and `ffrd leak-check` fails if a
+vanilla line of 20 or more characters is committed.
 
 ## Example
 

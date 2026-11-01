@@ -10,7 +10,9 @@ namespace and key, and by `vanilla_hash` (the first 16 hex characters of the
 SHA-256 of the English text, `ffrd/game.py`) when a fingerprint is needed.
 
 To check whether game text has leaked into history, run `ffrd leak-check`. It
-prints only a count.
+prints `0` when history is clean. Otherwise it prints one line per match, giving
+the commit and path (or `message`), the language, and the namespace and key, never
+the matched text. It then exits 1.
 
 ## Vanilla text
 
