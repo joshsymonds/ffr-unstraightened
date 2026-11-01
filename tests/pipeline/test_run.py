@@ -416,7 +416,7 @@ class FakeClaude:
         self.batches = 0
         self.calls: list[tuple[str, list[str], Mapping[str, Any]]] = []
         self.bible: dict[int, dict[str, Any] | Unfinished] = {1: CHAPTER_ONE_BIBLE}
-        self.unplaced: list[dict[str, Any]] = []
+        self.unplaced: dict[str, dict[str, Any]] = {}
         self.screen_failure: Unfinished | None = None
         self.flags: dict[tuple[str, str], list[str]] = {}
         self.rescreen_flags: dict[tuple[str, str], list[str]] = {}
@@ -440,7 +440,8 @@ class FakeClaude:
         self.calls.append((model, list(parts), schema))
         if schema is bible.SCHEMA:
             if any(part.startswith("Unplaced lines:\n") for part in parts):
-                return self.unplaced.pop(0) if self.unplaced else EMPTY_BIBLE
+                namespace = json.loads(_part(parts, "Unplaced lines:\n"))[0]["namespace"]
+                return self.unplaced.get(namespace, EMPTY_BIBLE)
             number = int(_part(parts, "Chapter ").split()[0])
             return self.bible.get(number, EMPTY_BIBLE)
         if schema is bible.SETUP_SCHEMA:
@@ -1010,20 +1011,26 @@ def test_unplaced_lines_are_one_bible_per_namespace_after_numbered_chapters_in_n
     claude = _claude()
     claude.bible = {}
     claude.flags = {}
-    claude.unplaced = [UNPLACED_BIBLE]
+    claude.unplaced = {UNPLACED_EARLIER: UNPLACED_BIBLE}
     _run(tmp_path, claude, [], jev=None, scenes=(LATE_SCENE, EARLY_SCENE, UNPLACED_SCENE))
     bible_calls = [parts for _, parts, schema in claude.calls if schema is bible.SCHEMA]
     assert len(bible_calls) == 4
     assert any(part.startswith("Chapter 1 lines:\n") for part in bible_calls[0])
     assert any(part.startswith("Chapter 2 lines:\n") for part in bible_calls[1])
-    assert json.loads(_part(bible_calls[2], "Unplaced lines:\n")) == [
+    # The two unplaced chunks run concurrently, so they are told apart by their namespace, not by call order.
+    unplaced = {json.loads(_part(parts, "Unplaced lines:\n"))[0]["namespace"]: parts for parts in bible_calls[2:]}
+    assert set(unplaced) == {UNPLACED_EARLIER, UNPLACED_LATER}
+    assert json.loads(_part(unplaced[UNPLACED_EARLIER], "Unplaced lines:\n")) == [
         {"namespace": UNPLACED_EARLIER, "key": "1", "speaker": "made-up-speaker-a", "text": EN_OUT},
     ]
-    assert json.loads(_part(bible_calls[3], "Unplaced lines:\n")) == [
+    assert json.loads(_part(unplaced[UNPLACED_LATER], "Unplaced lines:\n")) == [
         {"namespace": UNPLACED_LATER, "key": "1", "speaker": "", "text": EN_C1},
         {"namespace": UNPLACED_LATER, "key": "2", "speaker": "", "text": EN_B2},
     ]
-    assert "Made-up callback meaning unplaced. Not game text." in "\n".join(bible_calls[3])
+    # Each unplaced chunk reads exactly the two numbered chapter bibles, never the other unplaced chunk's bible.
+    for parts in unplaced.values():
+        assert [bible_["chapter"] for bible_ in json.loads(_part(parts, "Earlier bibles:\n"))] == [1, 2]
+    assert "Made-up callback meaning unplaced. Not game text." not in "\n".join(unplaced[UNPLACED_LATER])
 
 
 def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:
