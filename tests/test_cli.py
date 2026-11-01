@@ -11,6 +11,7 @@ from pylocres import Entry, LocresFile, Namespace
 
 from ffrd import cli, extract, install, probe, scenes
 from ffrd.game import LOCRES, MOD_NAME, vanilla_hash
+from ffrd.pipeline import smoke
 from ffrd.scenes import SceneLine
 from ffrd.voice import cli as voice_cli
 from ffrd.voice import pairs
@@ -390,6 +391,7 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.pipeline.run",
         "ffrd.scenes",
         "ffrd.voice.cli",
+        "ffrd.pipeline.smoke",
         "ffrd.probe",
     ]
     with pytest.raises(SystemExit) as exit_info:
@@ -498,6 +500,18 @@ def test_run_no_jev_through_the_cli_exits_1_before_any_work_is_written(
     assert capsys.readouterr().err == "ffrd: no vanilla text yet; run `ffrd extract`\n"
     assert not (repo / "work").exists()
     assert not (repo / "dialog").exists()
+
+
+def test_smoke_is_registered_just_before_probe_with_its_help(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert cli.COMMANDS[-2] is smoke
+    assert cli.COMMANDS[-1] is probe
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "run one scene through every stage under work/smoke/ and fail when a stage produced no result" in capsys.readouterr().out
 
 
 def test_probe_is_registered_last_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

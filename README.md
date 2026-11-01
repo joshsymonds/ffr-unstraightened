@@ -91,7 +91,8 @@ Set the game's Text Language to English before you play.
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
 | `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `arcs: N, M with changes` from `work/<name>/arcs.json` and one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
-| `ffrd run --lens <name> [--no-jev]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene, then runs the Jev recall check unless `--no-jev` skips it. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. Fails until the pipeline is bound. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd run --lens <name> [--no-jev]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene, then runs the Jev recall check unless `--no-jev` skips it. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
 | `ffrd probe [--shape {target,full,partial,ue4ss}]` | Checks which text shape the game honours, by running the game on the probe host. Without `--shape`, it tries `target`, then `full`. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
 | `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
@@ -132,8 +133,8 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
 A line is in scope when the scene source yields it from the game's scene table. That
 covers event dialogue, including unnumbered side events, which count under the chapter
 that unlocks them, and the `ST_DialogChoice`, `ST_MainSummary` and `ST_UnitDescription`
-namespaces. Without a scene table, which is the case before the real source is bound
-and in tests, a fallback allowlist applies instead. It matches the `ST_C<n>_`,
+namespaces. The bound source always has a scene table. A source without one, such as a
+test fixture, uses a fallback allowlist. It matches the `ST_C<n>_`,
 `ST_SubEv`, `ST_ChrEv`, `ST_FEV`, `ST_LegendEV`, `ST_GimEv`, `ST_BtlEv` and `ST_EV`
 prefixes, plus the same three namespaces. Hard exclusions apply in every case:
 `ST_Tutorial*`, `ST_UI*`, any namespace ending in `Name` or `SkillDescription`, and
@@ -155,9 +156,11 @@ the screen criteria, with the cast notes from the bibles. Jev scores the scene f
 triage question. For each triage id that scores 0.5 or more and that the screen flagged
 on no line, Opus rechecks the scene for that id, and the lines it flags join the screen's
 flags. Opus then writes an intent for each flagged line, and one draft call writes the
-drafts for all the flagged lines in the scene. Each draft is also rendered in the voice,
-and both versions go through the gates in this order: placeholders, tags, length (within
+drafts for all the flagged lines in the scene. Each draft is also rendered in the voice.
+A line with no speaker is not voiced, so its voiced version is its draft unchanged.
+Both versions go through the gates in this order: placeholders, tags, length (within
 120% of vanilla, with the same line breaks), the classifier, and the scene judge. The
+classifier fails a candidate that scores below 0.5, the bar the voice evaluation uses. The
 scene judge checks meaning, plot, minimal change, callback and fixed. A line with
 callbacks also goes to the cross-scene judge, which runs only after the scene judge
 passes. If no candidate passes, the line gets one more draft, told which gate failed.
@@ -186,6 +189,74 @@ Progress prints scene keys and counts only. Every model result is saved under
 `work/<name>/` as it arrives, so a rerun resumes where it stopped. Claude calls run
 through `cswap`, which picks the least-used account. `ffrd run` needs `TYPESAFE_API_KEY`
 unless `--no-jev` is given.
+
+### Smoke run
+
+`ffrd smoke` runs one scene through every stage of `ffrd run`, with live models. It
+picks the first in-scope scene that has at least two lines with a speaker. `ffrd smoke
+--scene <key>` picks the in-scope scene with that key, and fails when no in-scope scene
+has it.
+
+It needs the scene table from `ffrd scenes`, `TYPESAFE_API_KEY` (Jev is always on in
+smoke), `cswap`, and `ffrd voice serve` running on the GPU host. The classifier and the
+renderer reach that host over `ssh` on first use. The renderer runs through the
+llama-server that `ffrd voice serve` started there.
+
+Smoke writes only under `work/smoke/`. Its lens is built into `ffrd/pipeline/smoke.py`,
+so its rewrites go to `work/smoke/dialog/smoke/` and never reach `dialog/`. The story
+bibles are built from the chosen scene's lines alone.
+
+Smoke first prints one count per fallback family, then one count for the lines in
+scope only through the scene table, and one for the hard-excluded lines. Counts only:
+
+```
+prefix ST_C<n>_: 412
+prefix ST_SubEv: 38
+prefix ST_ChrEv: 0
+prefix ST_FEV: 7
+prefix ST_LegendEV: 0
+prefix ST_GimEv: 15
+prefix ST_BtlEv: 3
+prefix ST_EV: 22
+prefix ST_DialogChoice: 9
+prefix ST_MainSummary: 4
+prefix ST_UnitDescription: 11
+prefix outside fallback: 130
+prefix hard excluded: 96
+```
+
+`run` then prints its progress, with scene keys and counts only. Last, smoke prints one
+line per required stage with its result count:
+
+```
+stage bible: 1
+stage bible_setups: 1
+stage screen: 1
+stage triage: 1
+stage rescreen: 1 (exercised)
+stage intent: 2
+stage draft: 1
+stage render: 2
+stage classifier: 4
+stage judge: 3
+stage cross_judge: 3
+stage scene_coherence: 1 (exercised)
+stage arc_judge: 1
+stage selection: 9
+```
+
+Some stages depend on model answers that no lens can force: `rescreen`, `classifier`,
+`judge`, `cross_judge`, `scene_coherence` and `arc_judge`. When `run` leaves one of them
+without a result, smoke calls it once on the chosen scene, from the inputs `run`
+recorded. It stores that result under `work/smoke/` and changes no outcome. Its stage
+line then says `(exercised)`. The screen, intent, draft and render stages run as usual,
+because smoke's lens makes the screen flag the first two spoken lines.
+
+Smoke exits 0 only when every stage above has a result. A scene whose lines all stay
+vanilla still passes, because `selection` counts a result when every line has an outcome
+and none is unfinished. When a stage has no result, smoke still prints every stage line,
+then fails with `ffrd: smoke: no result from <stage>, ...` and exits 1.
+
 ### Scene data
 
 `ffrd scenes` needs `ffrd extract`, for `vanilla/BUILDID` and the English text, and
@@ -214,19 +285,9 @@ differs from `vanilla/BUILDID`, or when less than 95% of lines are attributed.
 | `FFR_PROGRESS` | `$XDG_STATE_HOME/ffrd/progress`, else `~/.local/state/ffrd/progress` | The file holding the recorded chapter. |
 | `FFR_DECK_HOST` | `deck` | The `ssh` host for `--deck`. |
 | `FFR_DECK_PAKS` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE/FFRS/Content/Paks` | The Steam Deck's game Paks folder for `--deck`. |
-| `TYPESAFE_API_KEY` | none | The Jev API key. `ffrd run` requires it unless `--no-jev` is given. |
+| `TYPESAFE_API_KEY` | none | The Jev API key. `ffrd run` requires it unless `--no-jev` is given. `ffrd smoke` always requires it. |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | The Jev endpoint. |
 | `TYPESAFE_MODEL` | `jev-latest` | The Jev model. |
-
-## Limits
-
-- **`ffrd run` fails until the pipeline is bound.** It needs a scene source, a
-  classifier and a renderer. None is bound yet, so it cannot run.
-- **The default build is partial, and its loading is unproven.** `ffrd build` writes
-  `en/Unstraightened.locres`, which holds only the edited entries. It relies on the
-  game honouring a second `en/*.locres` over `Game.locres`. That behaviour is not
-  confirmed. If the game ignores the partial table, use `ffrd build --full`. It packs
-  the whole English table with the edits applied, and it replaces the game's table.
 | `FFR_PROBE_HOST` | `gnomon` | The `ssh` host for `ffrd probe` and `ffrd usmap`. |
 | `FFR_PROBE_GAME` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE` | The installed game on the probe host. |
 | `FFR_OODLE` | Set by devenv | The Oodle library the `ffrd scenes` extractor loads. |
@@ -286,6 +347,8 @@ after a game update to re-check.
 
 ## Limits
 
+- **`ffrd smoke` needs `ffrd voice serve` running on the GPU host.** Its render stage
+  fails without a running llama-server.
 - **`--partial` does not work for edited entries.** `ffrd build --partial` writes
   `en/Unstraightened.locres`, which holds only the edited entries. The game was seen to
   ignore a second `en/*.locres` for an entry `Game.locres` already holds, so the edits
