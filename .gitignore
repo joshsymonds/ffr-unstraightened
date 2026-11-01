@@ -2,3 +2,10 @@
 /vanilla/
 /build/
 result*
+.devenv/
+.devenv.flake.nix
+.direnv/
+devenv.local.nix
+__pycache__/
+.pytest_cache/
+.ruff_cache/

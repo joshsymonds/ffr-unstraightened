@@ -1,0 +1,27 @@
+[project]
+name = "ffrd"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "BLE", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.basedpyright]
+include = ["ffrd", "tests"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.12"
+extraPaths = ["."]
+typeCheckingMode = "standard"
+reportMissingTypeArgument = "error"
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
