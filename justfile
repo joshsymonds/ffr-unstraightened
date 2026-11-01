@@ -37,3 +37,9 @@ docs:
         mmdc -i "$f" -o "$dest" || status=1
     done
     exit "$status"
+
+# Build, probe in game, then zip the release for tag (default v1.0.0).
+release tag="v1.0.0":
+    ffrd build
+    ffrd probe
+    python3 -m ffrd.release {{tag}}

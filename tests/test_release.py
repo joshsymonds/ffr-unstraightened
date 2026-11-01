@@ -170,3 +170,14 @@ def test_failed_push_removes_local_tag(release_repo: tuple[Path, Path], capsys: 
     assert resolve(clone, f"refs/tags/{TAG}") is None
     assert resolve(origin, f"refs/tags/{TAG}") is None
     assert resolve(origin, "refs/heads/main") == origin_before
+
+
+def test_release_recipe_runs_build_probe_then_release_at_default_tag() -> None:
+    done = subprocess.run(["just", "--dry-run", "release"], cwd=WORKSPACE, check=True, capture_output=True, text=True)
+    lines = [line.strip() for line in done.stderr.splitlines() if line.strip()]
+    assert lines == ["ffrd build", "ffrd probe", f"python3 -m ffrd.release {TAG}"]
+
+
+def test_release_zip_is_git_ignored() -> None:
+    done = subprocess.run(["git", "check-ignore", "-q", f"dist/{ZIP_NAME}"], cwd=WORKSPACE, capture_output=True)
+    assert done.returncode == 0
