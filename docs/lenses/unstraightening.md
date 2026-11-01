@@ -130,7 +130,10 @@ A change that touches a protection is rejected by the judge.
 - `act-on-clear-hits`. Change every flagged line that clearly hits a rule. A clear
   hit stays vanilla only when an exemption applies, when it does not really hit the
   rule, when every fix would touch a protection, or under `leave-for-plot`. The
-  screen flags mild and brief hits too.
+  intent stage keeps a flagged line only for one of these reasons that it can
+  name. The screen flags mild and brief hits too, and flags a plausible hit when
+  unsure whether a protection covers it; the protections still hold at intent
+  and judge.
 - `minimal-fix`. Change each changed line minimally: only the words the fix needs,
   and never a neighboring line. Each changed line must be fully fixed.
 - `leave-for-plot`. A line that needs a plot change stays vanilla.
