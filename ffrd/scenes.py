@@ -20,6 +20,7 @@ from ffrd.probe import USMAP_NAME
 
 TABLE_NAME = "scenes.json"
 THRESHOLD = 95
+UNREADABLE = "the scene table is unreadable; run `ffrd scenes`"
 DESCRIPTION = (
     "A story line is a keyed line of a line table that event data references, with non-empty English text. "
     "attributed counts story lines with a speaker; with cue counts story lines matched to exactly one voice cue."
@@ -60,11 +61,18 @@ def load() -> list[SceneLine]:
     path = table_path()
     if not path.exists():
         raise Fail("no scene table; run `ffrd scenes`")
-    table = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        table = json.loads(path.read_text(encoding="utf-8"))
+        build = table["build"]
+    except (ValueError, KeyError, TypeError) as e:
+        raise Fail(UNREADABLE) from e
     local = _vanilla_build()
-    if table["build"] != local:
-        raise Fail(f"the scene table is for build {table['build']}, not vanilla build {local}; run `ffrd scenes`")
-    return [_line(row) for row in table["lines"]]
+    if build != local:
+        raise Fail(f"the scene table is for build {build}, not vanilla build {local}; run `ffrd scenes`")
+    try:
+        return [_line(row) for row in table["lines"]]
+    except (KeyError, TypeError) as e:
+        raise Fail(UNREADABLE) from e
 
 
 def _line(row: dict[str, Any]) -> SceneLine:

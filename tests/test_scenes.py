@@ -338,6 +338,45 @@ def test_load_with_a_stale_build_raises(scene_vanilla: Path, extractor: FakeExtr
         scenes.load()
 
 
+def unreadable_tables() -> dict[str, str]:
+    good = row(0, "SynSpeakerA")
+    voiced = {**good, "voice": {"sheet": "SynSheetA", "index": 0}}
+    tables = {
+        "invalid-json": "{",
+        "missing-build": json.dumps({"lines": [good]}),
+        "missing-lines": json.dumps({"build": "424242"}),
+        "table-not-object": "[]",
+        "table-null": "null",
+        "lines-null": json.dumps({"build": "424242", "lines": None}),
+        "row-not-object": json.dumps({"build": "424242", "lines": [1]}),
+    }
+    for field in ("scene", "order", "namespace", "key", "speaker", "voice"):
+        tables[f"row-missing-{field}"] = json.dumps({"build": "424242", "lines": [{k: v for k, v in good.items() if k != field}]})
+    for field in ("sheet", "index"):
+        voice = {k: v for k, v in voiced["voice"].items() if k != field}
+        tables[f"voice-missing-{field}"] = json.dumps({"build": "424242", "lines": [{**voiced, "voice": voice}]})
+    return tables
+
+
+UNREADABLE_TABLES = unreadable_tables()
+
+
+def test_check_with_an_unreadable_table_exits_1(scene_vanilla: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    scenes.table_path().write_text("{", encoding="utf-8")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["scenes", "--check"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: the scene table is unreadable; run `ffrd scenes`\n"
+
+
+@pytest.mark.parametrize("text", list(UNREADABLE_TABLES.values()), ids=list(UNREADABLE_TABLES))
+def test_load_with_an_unreadable_table_raises(scene_vanilla: Path, text: str) -> None:
+    scenes.table_path().write_text(text, encoding="utf-8")
+    with pytest.raises(Fail) as exit_info:
+        scenes.load()
+    assert str(exit_info.value) == "the scene table is unreadable; run `ffrd scenes`"
+
+
 def test_missing_usmap_fails_and_names_the_fix(scene_vanilla: Path, extractor: FakeExtractor, capsys: pytest.CaptureFixture[str]) -> None:
     (scene_vanilla / USMAP_NAME).unlink()
     with pytest.raises(SystemExit) as exit_info:
