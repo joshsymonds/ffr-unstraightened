@@ -1,5 +1,8 @@
+import argparse
+import io
 import json
 import socket
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -10,7 +13,7 @@ from typing import Any
 import pytest
 
 from ffrd.game import Fail
-from ffrd.voice import render
+from ffrd.voice import remote, render
 from ffrd.voice.render import PROMPT, Renderer, prompt
 
 # Made-up strings. Not game text.
@@ -171,3 +174,99 @@ def test_module_constants() -> None:
     assert render.N_PREDICT == 256
     assert render.TEMPERATURE == 0.2
     assert render.TIMEOUT == 300.0
+
+
+def parse(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    render.register(parser.add_subparsers(required=True))
+    return parser.parse_args(argv)
+
+
+@pytest.fixture
+def tunnel(stub: Stub, monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+    # Replaces remote.tunnel with a stub that yields the stub llama-server's port and logs open and close.
+    log: list[tuple[object, ...]] = []
+    local = int(stub.base_url.rsplit(":", 1)[1])
+
+    @contextmanager
+    def fake_tunnel(remote_port: int) -> Iterator[int]:
+        log.append(("open", remote_port))
+        try:
+            yield local
+        finally:
+            log.append(("close", remote_port))
+
+    monkeypatch.setattr(remote, "tunnel", fake_tunnel)
+    return log
+
+
+def test_default_port_is_llama_server_port() -> None:
+    assert render.PORT == 8737
+
+
+def test_rendering_yields_renderer_reaching_completion_through_tunnel(stub: Stub, tunnel: list[tuple[object, ...]]) -> None:
+    stub.body = _reply(REPLY)
+    with render.rendering() as render_line:
+        assert render_line(SPEAKER, TEXT) == REPLY
+    assert tunnel == [("open", 8737), ("close", 8737)]
+    assert [(hit.method, hit.path) for hit in stub.hits] == [("POST", "/completion")]
+    assert json.loads(stub.hits[0].body)["prompt"] == prompt(SPEAKER, TEXT)
+
+
+def test_rendering_passes_port_to_tunnel(stub: Stub, tunnel: list[tuple[object, ...]]) -> None:
+    stub.body = _reply(REPLY)
+    with render.rendering(9001):
+        pass
+    assert tunnel == [("open", 9001), ("close", 9001)]
+
+
+def test_rendering_closes_tunnel_when_body_raises(tunnel: list[tuple[object, ...]]) -> None:
+    with pytest.raises(RuntimeError, match="synthetic body failure"), render.rendering():
+        raise RuntimeError("synthetic body failure")
+    assert tunnel == [("open", 8737), ("close", 8737)]
+
+
+def test_render_command_prints_stripped_reply_for_stdin_text(
+    stub: Stub, tunnel: list[tuple[object, ...]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub.body = _reply(f"  {REPLY}\n")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{TEXT}\n"))
+    args = parse(["render", "--speaker", SPEAKER])
+    args.fn(args)
+    assert capsys.readouterr().out == f"{REPLY}\n"
+    assert len(stub.hits) == 1
+    assert json.loads(stub.hits[0].body)["prompt"] == prompt(SPEAKER, TEXT)
+    assert tunnel == [("open", 8737), ("close", 8737)]
+
+
+@pytest.mark.parametrize(
+    ("stdin", "expected"),
+    [
+        pytest.param(TEXT, TEXT, id="no-newline"),
+        pytest.param(f"{TEXT}\n", TEXT, id="one-newline"),
+        pytest.param(f"{TEXT}\n\n", f"{TEXT}\n", id="two-newlines"),
+    ],
+)
+def test_render_command_strips_exactly_one_trailing_newline(
+    stub: Stub, tunnel: list[tuple[object, ...]], monkeypatch: pytest.MonkeyPatch, stdin: str, expected: str
+) -> None:
+    stub.body = _reply(REPLY)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
+    args = parse(["render", "--speaker", SPEAKER])
+    args.fn(args)
+    assert json.loads(stub.hits[0].body)["prompt"] == prompt(SPEAKER, expected)
+
+
+def test_render_command_port_flag_reaches_tunnel(
+    stub: Stub, tunnel: list[tuple[object, ...]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub.body = _reply(REPLY)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(TEXT))
+    args = parse(["render", "--speaker", SPEAKER, "--port", "9001"])
+    args.fn(args)
+    assert tunnel == [("open", 9001), ("close", 9001)]
+
+
+def test_render_command_requires_speaker() -> None:
+    with pytest.raises(SystemExit):
+        parse(["render"])
