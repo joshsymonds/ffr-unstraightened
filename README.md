@@ -83,6 +83,8 @@ Set the game's Text Language to English before you play.
 | `ffrd install [--deck]` | Copies the three mod files into `<game>/FFRS/Content/Paks/~mods`. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
+| `ffrd probe` | Checks which text shape the game honours, by running the game on the probe host. Prints only keys and hashes. See [Probe host](#probe-host). |
+| `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
 
 Edits go in any `dialog/**/*.toml` file. Each edit is one table, keyed by namespace
 and key, with `vanilla` (the hash of the current English line) and `text` (your
@@ -113,6 +115,47 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
 | `FFR_PROGRESS` | `$XDG_STATE_HOME/ffrd/progress`, else `~/.local/state/ffrd/progress` | The file holding the recorded chapter. |
 | `FFR_DECK_HOST` | `deck` | The `ssh` host for `--deck`. |
 | `FFR_DECK_PAKS` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE/FFRS/Content/Paks` | The Steam Deck's game Paks folder for `--deck`. |
+| `FFR_PROBE_HOST` | `gnomon` | The `ssh` host for `ffrd probe` and `ffrd usmap`. |
+| `FFR_PROBE_GAME` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE` | The installed game on the probe host. |
+
+`ffrd probe` and `ffrd usmap` also use `FFR_DECK_HOST` for the Deck check.
+
+### Probe host
+
+`ffrd probe` and `ffrd usmap` run the game on a Steam machine that `ssh` reaches, the
+probe host. They use UE4SS, a Lua mod loader for Unreal Engine games. The probe host needs:
+
+- Steam running, with FFR installed.
+- UE4SS 3.0.1 experimental (tested as build 1195), installed as
+  `FFRS/Binaries/Win64/dwmapi.dll` and `FFRS/Binaries/Win64/ue4ss/`. Disable UE4SS's
+  bundled mods. In `UE4SS-settings.ini`, set `MajorVersion = 5` and `MinorVersion = 6`.
+- `dwmapi` set to `native,builtin` in the game's Proton prefix, or
+  `WINEDLLOVERRIDES="dwmapi=n,b"` in the Steam launch options.
+- If the session sets `d3dcompiler_47=n`, UE4SS hangs at start. Allow the builtin
+  fallback for this game, for example with a protonfixes local fix for app 3259780.
+- Nothing else in the game folder changes.
+
+Both commands refuse while FFR runs on the Steam Deck named by `FFR_DECK_HOST`. If the
+Deck cannot be reached, they print a note and go on.
+
+`ffrd probe` checks which shape the game honours. It tries the partial shape first, and
+the full shape only when the partial one is not honoured. For each shape, it packs one
+edited line of `ST_UI_TitleMenu,UI_Title_Copyright`, installs the pak in the probe host's
+`Paks/~mods` with `.utoc` and `.ucas` copied from its `global` container, and launches
+the game. The UE4SS mod `ue4ss/UnstraightenedProbe` reads that key's hash from the
+running game. Then the
+command quits the game and removes the paks and the mod. It exits 0 and names the honoured
+shape, for example `shape honoured: full`. It refuses while FFR runs on the probe host, and
+when the probe host's game build differs from `vanilla/BUILDID`.
+
+`ffrd usmap` runs `ue4ss/UnstraightenedUsmap` on the probe host to dump the game's
+mappings. It saves them to `vanilla/Mappings.usmap`, which git ignores. Re-run it after
+each game update.
+
+A launch that stalls at start is killed and relaunched, up to 4 launches in all.
+
+The last `ffrd probe` run found the partial shape not honoured and the full shape
+honoured. Run `ffrd probe` again after a game update to re-check.
 
 ## Limits
 
@@ -120,7 +163,8 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
   `en/Unstraightened.locres`, which holds only the edited entries. The game was seen to
   ignore a second `en/*.locres` for an entry `Game.locres` already holds, so the edits
   have no effect. The default build replaces `Game.locres` with the whole English table
-  and the edits applied, which the game was seen to honour.
+  and the edits applied, which the game was seen to honour. Run `ffrd probe` to re-check
+  this.
 - **Game updates block builds.** `ffrd build` refuses to run when the game has
   updated since `ffrd extract`. The error says to run `ffrd extract` and rebuild.
 - **Edits fail on changed lines.** An edit whose `vanilla` hash no longer matches the

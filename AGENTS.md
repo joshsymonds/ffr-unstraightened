@@ -20,6 +20,8 @@ Never read, grep, list or print anything in the gitignored `vanilla/` directory
 or in the game install. The only permitted way to see game text is
 `ffrd find`, which is progress-gated.
 
+Probe-host logs are read only through `ffrd probe` and `ffrd usmap`, never directly.
+
 ## Tests
 
 Tests use synthetic fixtures only. Write made-up lines and keep them in the
