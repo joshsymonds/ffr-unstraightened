@@ -11,7 +11,7 @@ COMMANDS: tuple[ModuleType, ...] = (extract, progress, find, build, install, lea
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="ffrd", description="Build a FINAL FANTASY RESONANCE dialogue mod from .po overrides.")
+    p = argparse.ArgumentParser(prog="ffrd", description="Build a FINAL FANTASY RESONANCE dialogue mod from dialog/**/*.toml edits.")
     sub = p.add_subparsers(required=True)
     for module in COMMANDS:
         module.register(sub)

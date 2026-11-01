@@ -101,7 +101,7 @@ def test_commands_register_install_and_uninstall(repo: Path, monkeypatch: pytest
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     assert "usage: ffrd" in out
-    assert "Build a FINAL FANTASY RESONANCE dialogue mod from .po overrides." in out
+    assert "Build a FINAL FANTASY RESONANCE dialogue mod from dialog/**/*.toml edits." in out
     assert "copy the built mod into the game's Paks/~mods" in out
     assert "remove the mod from Paks/~mods" in out
 
