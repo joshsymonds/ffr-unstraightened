@@ -8,8 +8,27 @@ from ffrd.game import Fail
 from ffrd.pipeline import accounts, claude
 from ffrd.pipeline.accounts import Account
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
+from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.stages import SCREEN_SCHEMA, Batch, Scene, SceneLine, bindings, scene_text, screen, triage
+from ffrd.pipeline.stages import (
+    CROSS_SCHEMA,
+    DRAFT_SCHEMA,
+    INTENT_SCHEMA,
+    JUDGE_SCHEMA,
+    SCREEN_SCHEMA,
+    Batch,
+    Scene,
+    SceneLine,
+    bindings,
+    cross_judge,
+    draft,
+    intent,
+    judge,
+    render,
+    scene_text,
+    screen,
+    triage,
+)
 from ffrd.pipeline.store import Store
 
 # Made-up scene, lens and answers. Not game text.
@@ -24,8 +43,8 @@ LENS = Lens(
         TriageQuestion("made-up-beta", "Made-up question beta. Not game text."),
     ),
     screen_criteria=("Made-up criterion one. Not game text.",),
-    intent_rule="",
-    judge_rubric="",
+    intent_rule="Made-up intent rule. Not game text.",
+    judge_rubric="Made-up judge rubric. Not game text.",
 )
 
 PROBABILITIES = {"made-up-alpha": 0.25, "made-up-beta": 0.75}
@@ -259,3 +278,321 @@ def test_bindings_fails_until_a_later_effort_binds_them() -> None:
         bindings()
 
     assert str(excinfo.value) == "no scene source, classifier and renderer are bound yet"
+
+
+# Made-up line-stage fixtures. Not game text.
+CALLBACK = {"line": {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, "depends": [], "chapter": 1}
+REASONS = ("made-up-alpha",)
+INTENT_ANSWER = {"intent": "Made-up intent. Not game text."}
+DRAFT_ANSWER = {"drafts": ["Made-up draft one. Not game text.", "Made-up draft two. Not game text."]}
+JUDGE_ANSWER = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "restores_japanese": False}
+JUDGMENT = Judgment(meaning=True, plot=True, minimal_change=True, callback=True, restores_japanese=False)
+CROSS_ANSWER = {"consistent": True}
+
+
+class FakeRenderer:
+    """Stands in for a voice renderer: answers render calls from a queue, recording each call's arguments."""
+
+    def __init__(self, *answers: Any) -> None:
+        self.fake = Fake(*answers)
+
+    def render(self, speaker: str | None, text: str) -> str:
+        return self.fake(speaker, text)
+
+
+def test_intent_schema_requires_intent_and_forbids_extra_properties() -> None:
+    assert INTENT_SCHEMA["type"] == "object"
+    assert INTENT_SCHEMA["required"] == ["intent"]
+    assert INTENT_SCHEMA["properties"]["intent"]["type"] == "string"
+    assert INTENT_SCHEMA["additionalProperties"] is False
+
+
+def test_intent_asks_opus_with_schema_and_returns_intent(tmp_path: Path) -> None:
+    ask = Fake(INTENT_ANSWER)
+
+    result = intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], ask)
+
+    assert result == "Made-up intent. Not game text."
+    model, _parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == INTENT_SCHEMA
+
+
+def test_intent_prompt_carries_rule_callbacks_japanese_lines_and_target_reasons(tmp_path: Path) -> None:
+    ask = Fake(INTENT_ANSWER)
+
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], ask)
+
+    prompt = "\n".join(ask.calls[0][1])
+    assert "Made-up intent rule. Not game text." in prompt
+    assert '"chapter": 1' in prompt
+    assert '"japanese": "Made-up Japanese one. Not game text."' in prompt
+    assert '"reasons": ["made-up-alpha"]' in prompt
+
+
+def test_fresh_store_on_same_root_returns_stored_intent_without_asking(tmp_path: Path) -> None:
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], Fake(INTENT_ANSWER))
+    ask = Fake()
+
+    assert intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], ask) == "Made-up intent. Not game text."
+    assert ask.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_intent_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, INTENT_ANSWER)
+
+    assert intent(store, LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], ask) == failure
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert intent(store, LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], ask) == "Made-up intent. Not game text."
+    assert len(ask.calls) == 2
+    assert store.unfinished() == []
+
+
+def test_editing_intent_rule_reruns_intent(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(INTENT_ANSWER, INTENT_ANSWER)
+    intent(store, LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], ask)
+    edited = replace(LENS, intent_rule="Edited intent rule. Not game text.")
+
+    intent(store, edited, SCENE, LINE_ONE, REASONS, [CALLBACK], ask)
+
+    assert len(ask.calls) == 2
+
+
+def test_draft_schema_requires_nonempty_drafts_and_forbids_extra_properties() -> None:
+    assert DRAFT_SCHEMA["type"] == "object"
+    assert DRAFT_SCHEMA["required"] == ["drafts"]
+    assert DRAFT_SCHEMA["properties"]["drafts"]["type"] == "array"
+    assert DRAFT_SCHEMA["properties"]["drafts"]["items"] == {"type": "string"}
+    assert DRAFT_SCHEMA["properties"]["drafts"]["minItems"] == 1
+    assert DRAFT_SCHEMA["additionalProperties"] is False
+
+
+def test_draft_asks_opus_with_schema_and_returns_drafts_in_answer_order(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_ANSWER)
+
+    result = draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask)
+
+    assert result == ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == DRAFT_SCHEMA
+    prompt = "\n".join(parts)
+    assert "Made-up intent rule. Not game text." in prompt
+    assert "Made-up intent." in prompt
+    assert "{...}" in prompt
+    assert "<text ...>" in prompt
+
+
+def test_draft_names_the_retry_gate_only_on_retry(tmp_path: Path) -> None:
+    first = Fake(DRAFT_ANSWER)
+    draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, first)
+    retry = Fake(DRAFT_ANSWER)
+    draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], "classifier", retry)
+
+    assert "classifier" not in "\n".join(first.calls[0][1])
+    assert "classifier" in "\n".join(retry.calls[0][1])
+
+
+def test_draft_retry_is_part_of_its_key(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(DRAFT_ANSWER, DRAFT_ANSWER)
+    draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask)
+
+    draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], "classifier", ask)
+
+    assert len(ask.calls) == 2
+
+
+def test_fresh_store_on_same_root_returns_stored_drafts_without_asking(tmp_path: Path) -> None:
+    expected = ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
+    draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, Fake(DRAFT_ANSWER))
+    ask = Fake()
+
+    assert draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask) == expected
+    assert ask.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_draft_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, DRAFT_ANSWER)
+
+    assert draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask) == failure
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask) == tuple(DRAFT_ANSWER["drafts"])
+    assert len(ask.calls) == 2
+
+
+def test_editing_intent_rule_reruns_draft(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(DRAFT_ANSWER, DRAFT_ANSWER)
+    draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask)
+    edited = replace(LENS, intent_rule="Edited intent rule. Not game text.")
+
+    draft(store, edited, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, ask)
+
+    assert len(ask.calls) == 2
+
+
+def test_render_stores_the_renderer_text_and_does_not_call_it_twice(tmp_path: Path) -> None:
+    renderer = FakeRenderer("Made-up rendered. Not game text.")
+    store = Store(tmp_path)
+
+    assert render(store, renderer, "Ash", "Made-up first line. Not game text.") == "Made-up rendered. Not game text."
+    assert renderer.fake.calls == [("Ash", "Made-up first line. Not game text.")]
+
+    assert render(Store(tmp_path), renderer, "Ash", "Made-up first line. Not game text.") == "Made-up rendered. Not game text."
+    assert len(renderer.fake.calls) == 1
+
+
+def test_render_exception_propagates_and_stores_nothing(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    renderer = FakeRenderer(RuntimeError("Made-up renderer failure. Not game text."))
+
+    with pytest.raises(RuntimeError, match="Made-up renderer failure"):
+        render(store, renderer, None, "Made-up narration. Not game text.")
+
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+def test_judge_schema_requires_the_five_verdicts_and_forbids_extra_properties() -> None:
+    verdicts = ["meaning", "plot", "minimal_change", "callback", "restores_japanese"]
+
+    assert JUDGE_SCHEMA["type"] == "object"
+    assert JUDGE_SCHEMA["required"] == verdicts
+    assert set(JUDGE_SCHEMA["properties"]) == set(verdicts)
+    assert all(JUDGE_SCHEMA["properties"][verdict] == {"type": "boolean"} for verdict in verdicts)
+    assert JUDGE_SCHEMA["additionalProperties"] is False
+
+
+def test_judge_asks_opus_with_schema_and_returns_judgment(tmp_path: Path) -> None:
+    ask = Fake(JUDGE_ANSWER)
+
+    result = judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+
+    assert result == Judgment(meaning=True, plot=True, minimal_change=True, callback=True, restores_japanese=False)
+    model, _parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == JUDGE_SCHEMA
+
+
+def test_judge_prompt_carries_the_japanese_line_candidate_and_rubric(tmp_path: Path) -> None:
+    ask = Fake(JUDGE_ANSWER)
+
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+
+    prompt = "\n".join(ask.calls[0][1])
+    assert "Made-up Japanese one. Not game text." in prompt
+    assert "Made-up candidate. Not game text." in prompt
+    assert "Made-up judge rubric. Not game text." in prompt
+    assert '"japanese": "Made-up Japanese two. Not game text."' in prompt
+
+
+def test_fresh_store_on_same_root_returns_stored_judgment_without_asking(tmp_path: Path) -> None:
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], Fake(JUDGE_ANSWER))
+    ask = Fake()
+
+    assert judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask) == JUDGMENT
+    assert ask.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_judge_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, JUDGE_ANSWER)
+
+    assert judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask) == failure
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask) == JUDGMENT
+    assert len(ask.calls) == 2
+
+
+def test_editing_judge_rubric_reruns_judge(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(JUDGE_ANSWER, JUDGE_ANSWER)
+    judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+    edited = replace(LENS, judge_rubric="Edited judge rubric. Not game text.")
+
+    judge(store, edited, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+
+    assert len(ask.calls) == 2
+
+
+def test_cross_judge_schema_requires_consistent_and_forbids_extra_properties() -> None:
+    assert CROSS_SCHEMA["type"] == "object"
+    assert CROSS_SCHEMA["required"] == ["consistent"]
+    assert CROSS_SCHEMA["properties"]["consistent"] == {"type": "boolean"}
+    assert CROSS_SCHEMA["additionalProperties"] is False
+
+
+def test_cross_judge_asks_opus_with_schema_and_returns_consistent(tmp_path: Path) -> None:
+    ask = Fake(CROSS_ANSWER)
+
+    result = cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+
+    assert result is True
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == CROSS_SCHEMA
+    prompt = "\n".join(parts)
+    assert "Made-up candidate. Not game text." in prompt
+    assert "Made-up judge rubric. Not game text." in prompt
+    assert "Made-up narration. Not game text." in prompt
+
+
+def test_fresh_store_on_same_root_returns_stored_cross_judge_without_asking(tmp_path: Path) -> None:
+    cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), Fake(CROSS_ANSWER))
+    ask = Fake()
+
+    assert cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask) is True
+    assert ask.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_cross_judge_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, CROSS_ANSWER)
+
+    assert cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask) == failure
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask) is True
+    assert len(ask.calls) == 2
+
+
+def test_editing_judge_rubric_reruns_cross_judge(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(CROSS_ANSWER, CROSS_ANSWER)
+    cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+    edited = replace(LENS, judge_rubric="Edited judge rubric. Not game text.")
+
+    cross_judge(store, edited, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+
+    assert len(ask.calls) == 2
