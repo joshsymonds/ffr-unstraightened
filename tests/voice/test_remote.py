@@ -24,11 +24,10 @@ DEVENV = "env -C tools/voice devenv shell --profile cuda -- env -C ../.."
 
 
 class Ssh:
-    """Stands in for subprocess.run. Records each call and plays back a prepared return code and stdout."""
+    """Stands in for subprocess.run. Records each call and plays back a prepared return code."""
 
     def __init__(self) -> None:
         self.returncode = 0
-        self.payload = b""
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.sent: bytes | None = None
 
@@ -39,9 +38,6 @@ class Ssh:
             self.sent = stdin.read()
         if "input" in kwargs:
             self.sent = kwargs["input"]
-        stdout = kwargs.get("stdout")
-        if isinstance(stdout, io.IOBase):
-            stdout.write(self.payload)
         return subprocess.CompletedProcess(args, self.returncode, stdout=b"")
 
 
@@ -412,36 +408,13 @@ def test_push_sends_file_bytes_to_name_under_scratch(ssh: Ssh, tmp_path: Path) -
     assert ssh.sent == b"synthetic-bytes"
 
 
-def test_pull_creates_parents_and_writes_local_after_full_copy(ssh: Ssh, tmp_path: Path) -> None:
-    ssh.payload = b"synthetic-model"
-    local = tmp_path / "nested" / "out.bin"
-    remote.pull("runs/out.bin", local)
-    assert local.read_bytes() == b"synthetic-model"
-    assert ssh.calls[0][0] == ["ssh", "gnomon", f"{PREFIX} && cat -- runs/out.bin"]
-    assert sorted(p.name for p in local.parent.iterdir()) == ["out.bin"]
-
-
-def test_pull_leaves_existing_local_untouched_when_copy_fails(ssh: Ssh, tmp_path: Path) -> None:
-    ssh.payload = b"partial"
-    ssh.returncode = 1
-    local = tmp_path / "out.bin"
-    local.write_bytes(b"old")
-    with pytest.raises(Fail, match="gnomon pull exited 1"):
-        remote.pull("runs/out.bin", local)
-    assert local.read_bytes() == b"old"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.bin"]
-
-
 @pytest.mark.parametrize("name", ["", "/abs/x", "../x", "a/../b", "a//b", "a/"])
-def test_push_and_pull_reject_names_outside_scratch_before_ssh(ssh: Ssh, tmp_path: Path, name: str) -> None:
+def test_push_rejects_names_outside_scratch_before_ssh(ssh: Ssh, tmp_path: Path, name: str) -> None:
     local = tmp_path / "f"
     local.write_bytes(b"x")
     with pytest.raises(Fail):
         remote.push(local, name)
-    with pytest.raises(Fail):
-        remote.pull(name, tmp_path / "out")
     assert ssh.calls == []
-    assert not (tmp_path / "out").exists()
 
 
 def test_worker_ask_round_trips_one_json_line(monkeypatch: pytest.MonkeyPatch) -> None:

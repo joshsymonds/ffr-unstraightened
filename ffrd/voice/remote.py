@@ -176,20 +176,6 @@ def stage(rows: Iterable[Mapping[str, Any]], name: str) -> int:
     return count
 
 
-def pull(name: str, local: Path) -> None:
-    _check_name(name)
-    local.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=local.parent, prefix=f".{local.name}.")
-    try:
-        with os.fdopen(fd, "wb") as out:
-            code = _ssh(f"{_prefix()} && cat -- {shlex.quote(name)}", stdout=out).returncode
-        _require_ok(code, "pull")
-        os.replace(tmp, local)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
 @contextlib.contextmanager
 def tunnel(remote_port: int) -> Iterator[int]:
     with socket.socket() as probe:
