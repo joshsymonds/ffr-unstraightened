@@ -91,7 +91,7 @@ Set the game's Text Language to English before you play.
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
 | `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `arcs: N, M with changes` from `work/<name>/arcs.json` and one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
-| `ffrd run --lens <name> [--no-jev]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene, then runs the Jev recall check unless `--no-jev` skips it. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd run --lens <name> [--no-jev] [--concurrency N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene, then runs the Jev recall check unless `--no-jev` skips it. Keeps up to `N` Claude calls in flight at once, 8 by default. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
 | `ffrd probe [--shape {target,full,partial,ue4ss}]` | Checks which text shape the game honours, by running the game on the probe host. Without `--shape`, it tries `target`, then `full`. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
@@ -152,37 +152,38 @@ Names, menus, items, skills and tutorials never change.
 `ffrd run` works in three stages.
 
 First, Opus writes a story bible for each chapter, in script order. A bible lists the
-characters with their gender and notes, the facts, the callbacks, and the arcs. Each
-arc has an id, its characters, its state in that chapter, and beats. A beat sits on a
-line and has a kind (setup, escalation, declaration, payoff or other) and an earned
-flag. Lines that name no chapter are read after the last chapter, one chunk per
-namespace. Then a backward pass runs over the chapters in reverse order. It adds the
-setups that later bibles rely on to each chapter's callbacks.
+characters with their gender and notes, the facts, the callbacks, and the arcs. Each arc
+has an id, its characters, its state in that chapter, and beats. A beat sits on a line
+and has a kind (setup, escalation, declaration, payoff or other) and an earned flag.
+Lines that name no chapter are read after the last chapter, one chunk per namespace, and
+those chunks run at the same time. Then a backward pass runs over the chapters in
+reverse order. It adds the setups that later bibles rely on to each chapter's callbacks.
 
-Second, the scenes run in order. Sonnet screens every line of the scene against
-the screen criteria, with the cast notes from the bibles. Jev scores the scene for each
-triage question. For each triage id that scores 0.5 or more and that the screen flagged
-on no line, Opus rechecks the scene for that id, and the lines it flags join the screen's
-flags. Opus then writes an intent for each flagged line, and one draft call writes the
-drafts for all the flagged lines in the scene. Each draft is also rendered in the voice.
-A line with no speaker is not voiced, so its voiced version is its draft unchanged.
-Both versions go through the gates in this order: placeholders, tags, length (within
-120% of vanilla, with the same line breaks), the classifier, and the scene judge. The
-classifier fails a candidate that scores below 0.5, the bar the voice evaluation uses. The
-scene judge checks meaning, plot, minimal change, callback and fixed. A line with
-callbacks also goes to the cross-scene judge, which runs only after the scene judge
-passes. If no candidate passes, the line gets one more draft, told which gate failed.
-If that also fails, the line stays vanilla. It counts as kept for plot when the plot gate
-failed, and as gate failed otherwise. Among the passing candidates, the one that restores
-the Japanese meaning ranks first, then the one with the smallest edit distance from the
-English line. A scene with two or more changed lines then goes through the coherence
-check. It reads the scene with its rewrites applied, against the arcs and the judge
-rubric.
+Second, the scenes run at the same time, each as its own batch. Sonnet screens every
+line of the scene against the screen criteria, with the cast notes from the bibles. Jev
+scores the scene for each triage question. For each triage id that scores 0.5 or more
+and that the screen flagged on no line, Opus rechecks the scene for that id, and the
+lines it flags join the screen's flags. Opus then writes an intent for each flagged
+line, and one draft call writes the drafts for all the flagged lines in the scene. Each
+draft is also rendered in the voice. A line with no speaker is not voiced, so its voiced
+version is its draft unchanged. Both versions go through the gates in this order:
+placeholders, tags, length (within 120% of vanilla, with the same line breaks), the
+classifier, and the scene judge. The classifier fails a candidate that scores below 0.5,
+the bar the voice evaluation uses. The scene judge checks meaning, plot, minimal change,
+callback and fixed. A line with callbacks also goes to the cross-scene judge, which runs
+only after the scene judge passes. If no candidate passes, the line gets one more draft,
+told which gate failed. If that also fails, the line stays vanilla. It counts as kept
+for plot when the plot gate failed, and as gate failed otherwise. Among the passing
+candidates, the one that restores the Japanese meaning ranks first, then the one with
+the smallest edit distance from the English line. A scene with two or more changed lines
+then goes through the coherence check. It reads the scene with its rewrites applied,
+against the arcs and the judge rubric.
 
 Third, after all scenes, the arc judge reads each arc that has a changed line, its lines
-in story order, with the rewrites applied. Each check works the same way. Opus names the
-lines it would revert. If it finds a problem, a recheck sees those proposals and names
-only the ones that must revert. A line reverts only when both passes name it.
+in story order, with the rewrites applied. The arcs are judged at the same time. Each
+check works the same way. Opus names the lines it would revert. If it finds a problem, a
+recheck sees those proposals and names only the ones that must revert. A line reverts
+only when both passes name it.
 
 Each changed line goes to `dialog/<name>/chapter-NN.toml`, or to
 `dialog/<name>/unattributed.toml` when it names no chapter. Each table records the vanilla
@@ -193,10 +194,12 @@ how many arcs have a change, and `recall.json` with, for each triage id, how man
 Jev disagreed with the screen on and how many of those the recheck confirmed. With
 `--no-jev`, Jev is never called and every recall count is zero.
 
-Progress prints scene keys and counts only. Every model result is saved under
-`work/<name>/` as it arrives, so a rerun resumes where it stopped. Claude calls run
-through `cswap`, which picks the least-used account. `ffrd run` needs `TYPESAFE_API_KEY`
-unless `--no-jev` is given.
+Progress prints scene keys and counts only, one line as each scene finishes. Every model
+result is saved under `work/<name>/` as it arrives, so a rerun resumes where it stopped.
+Claude calls run through `cswap`, which picks the least-used account. `--concurrency N`
+sets how many Claude calls run at once across the bible, the scenes and the arc judges.
+It defaults to 8 and must be at least 1. The written files are the same whatever the
+concurrency. `ffrd run` needs `TYPESAFE_API_KEY` unless `--no-jev` is given.
 
 ### Smoke run
 

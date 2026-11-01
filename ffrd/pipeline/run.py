@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -494,16 +495,24 @@ def run(
         arcs=arcs.consolidate(built),
         lines=_first_lines(scenes),
     )
+    progress = threading.Lock()
+
+    def scene_pass(item: tuple[Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall]:
+        scene, ask = item
+        scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, ask)
+        with progress:
+            out(f"scene {scene.key}: {_counts(scene_outcomes)}")
+        return scene_outcomes, scene_changes, scene_recall
+
+    scene_results = claude.fan_out(scene_pass, [(scene, batch()) for scene in scenes])
     outcomes: list[Outcome] = []
     changes: list[Change] = []
     recall = _Recall()
-    for scene in scenes:
-        scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, batch())
+    for scene_outcomes, scene_changes, scene_recall in scene_results:
         outcomes += scene_outcomes
         changes += scene_changes
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
-        out(f"scene {scene.key}: {_counts(scene_outcomes)}")
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
@@ -519,6 +528,7 @@ def _batch() -> Ask:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
+    claude.set_concurrency(args.concurrency)
     root = repo_root()
     lens = load_lens(root / "lenses" / f"{args.lens}.toml")
     directory = work_dir(args.lens)
@@ -545,4 +555,11 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     )
     p.add_argument("--lens", required=True, help="name of the lens to run, read from lenses/<name>.toml and work/<name>/")
     p.add_argument("--no-jev", action="store_true", help="skip the Jev recall check")
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=claude.DEFAULT_CONCURRENCY,
+        metavar="N",
+        help="Claude calls in flight at once across the bible, the scenes and the arc judges (default 8, at least 1)",
+    )
     p.set_defaults(fn=cmd_run)
