@@ -62,6 +62,7 @@ in
     pkgs.ruff
     pkgs.basedpyright
     pkgs.just
+    pkgs.lua5_4
     pkgs.mermaid-cli
     (pkgs.python3.withPackages (_: [
       pylocres
