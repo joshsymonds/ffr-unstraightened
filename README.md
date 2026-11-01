@@ -93,6 +93,14 @@ Set the game's Text Language to English before you play.
 | `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
 | `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
+| `ffrd voice pairs [--check] [--limit N]` | Writes four paraphrases per story line to `work/voice/train.jsonl`, `heldout.jsonl` and `calls.jsonl`: two from Opus, one from Sonnet and one from Haiku. Makes eight calls at a time, spread across the configured Claude accounts. A tenth of the scenes are held out. A rerun resumes from saved results. `--limit N` paraphrases only the first N scenes. `--check` prints the split and the call counts without calling Claude. Prints counts only. See [Voice models](#voice-models). |
+| `ffrd voice pilot [--scenes N]` | Runs the first N scenes (default 50) through `pairs` and both trainings. Prints calls, tokens, account usage, steps and seconds per step, and projected totals that include waits for account resets. |
+| `ffrd voice classifier train [--epochs N]` | Stages the classifier examples and trains the classifier on the GPU host. `--epochs` sets the passes over the examples (default 1). |
+| `ffrd voice lora train [--epochs N]` | Stages the train pairs and finetunes the LoRA adapter on the GPU host. `--epochs` sets the passes over the training records (default 1). |
+| `ffrd voice lora export` | Exports the finetuned adapter to GGUF on the GPU host. |
+| `ffrd voice serve [--stop] [--port P]` | Starts llama-server on the GPU host's 127.0.0.1, or stops the running one with `--stop`. |
+| `ffrd voice render --speaker NAME [--port P]` | Reads one line on stdin and voices it through the GPU host's llama-server, over an ssh tunnel. It is the rewrite pipeline's tool. Do not use it to read lines by hand. |
+| `ffrd voice eval classifier`, `ffrd voice eval render`, `ffrd voice eval revert` | Prints voice-model metrics and nothing else. See [Voice models](#voice-models). |
 
 Edits go in any `dialog/**/*.toml` file. Each edit is one table, keyed by namespace
 and key, with `vanilla` (the hash of the current English line) and `text` (your
@@ -145,6 +153,8 @@ differs from `vanilla/BUILDID`, or when less than 95% of lines are attributed.
 | `FFR_PROBE_HOST` | `gnomon` | The `ssh` host for `ffrd probe` and `ffrd usmap`. |
 | `FFR_PROBE_GAME` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE` | The installed game on the probe host. |
 | `FFR_OODLE` | Set by devenv | The Oodle library the `ffrd scenes` extractor loads. |
+| `FFR_VOICE_HOST` | `gnomon` | The `ssh` host where `ffrd voice` runs the GPU work. |
+| `FFR_VOICE_SCRATCH` | `~/.local/share/ffr-unstraightened/voice` | The GPU host's scratch directory for the voice tools and model outputs. |
 
 `ffrd probe` and `ffrd usmap` also use `FFR_DECK_HOST` for the Deck check.
 
@@ -184,6 +194,40 @@ A launch that stalls at start is killed and relaunched, up to 4 launches in all.
 
 The last `ffrd probe` run found the partial shape not honoured and the full shape
 honoured. Run `ffrd probe` again after a game update to re-check.
+
+### Voice models
+
+The `ffrd voice` commands build the training data for the voice models, train them,
+and measure them. The GPU work runs on the GPU host, not on your machine. The commands
+are listed in [Use](#use).
+
+The GPU host needs:
+
+- `ssh` access at `FFR_VOICE_HOST` (default `gnomon`).
+- Nix with devenv, and an NVIDIA GPU. The models were sized for 16 GB.
+- A scratch directory at `FFR_VOICE_SCRATCH`. The commands sync `tools/voice/` into it.
+  The host's devenv state stays there and is never synced.
+
+The GPU work runs in the `cuda` profile of `tools/voice/devenv.nix`. The default profile
+is CPU. To run the voice tool tests:
+
+```sh
+cd tools/voice && devenv shell -- env -C ../.. pytest tools/voice
+```
+
+`ffrd voice eval` prints three gates:
+
+- `eval classifier`: the classifier's AUROC on held-out game lines against paraphrases,
+  overall and under 8 words. The bar is 0.90.
+- `eval render`: the median game-likeness score of renders is at least 0.5 and above the
+  paraphrases' median. The share of renders that keep the meaning is at most 0.03 below
+  the pairs' two-way entailment rate.
+- `eval revert`: at least 90% of renders keep a meaning change that Opus made, over about
+  200 training inputs.
+
+Pairs, staged records, weights, GGUF files, renders and samples stay in the gitignored
+`work/voice/` directory and in the GPU host's scratch directory. They are never committed
+or published. Anyone with the game can retrain the models from this repository's code.
 
 ## Limits
 

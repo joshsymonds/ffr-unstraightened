@@ -25,6 +25,17 @@ or in the game install. The only permitted way to see game text is
 
 Probe-host logs are read only through `ffrd probe` and `ffrd usmap`, never directly.
 
+## Voice data
+
+Never read, grep, list or print anything under the gitignored `work/` directory,
+including `work/voice/`, or anything in the GPU host's scratch directory
+(`FFR_VOICE_SCRATCH`). Those hold pairs, staged records, weights, GGUF files, renders
+and samples. Reading them directly is not allowed, not even through `ssh`.
+
+The only permitted way to see that data is through `ffrd voice` commands that print
+counts and metrics: `ffrd voice pairs --check`, `ffrd voice pilot` and `ffrd voice eval`.
+Never run `ffrd voice render` to look at output, since it prints a voiced line.
+
 ## Tests
 
 Tests use synthetic fixtures only. Write made-up lines and keep them in the
