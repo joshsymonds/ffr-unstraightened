@@ -12,6 +12,8 @@ from ffrd.game import Fail
 
 WEEKLY_LIMIT = 90.0
 MIN_WAIT = 60.0
+TRANSIENT_BACKOFF = 30.0
+TRANSIENT_BOUND = 300.0
 
 
 @dataclass(frozen=True)
@@ -65,10 +67,17 @@ def choose(
     now: Callable[[], datetime] = _utc_now,
 ) -> Account:
     excluded = exclude
+    absent_since: datetime | None = None
     while True:
         accounts = read()
         if not accounts:
-            raise Fail("no usable cswap account")
+            if absent_since is None:
+                absent_since = now()
+            elif (now() - absent_since).total_seconds() >= TRANSIENT_BOUND:
+                raise Fail("no usable cswap account")
+            sleep(TRANSIENT_BACKOFF)
+            continue
+        absent_since = None
         picked = _least_used(accounts, excluded)
         if picked is not None:
             return picked
