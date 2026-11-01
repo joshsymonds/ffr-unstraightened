@@ -124,7 +124,7 @@ def _order(c: Change) -> tuple[list[int | str], str, list[int | str], str]:
     return (natural(c.namespace), c.namespace, natural(c.key), c.key)
 
 
-def write_dialog(directory: Path, changes: Sequence[Change]) -> None:
+def _check_changes(changes: Sequence[Change]) -> None:
     seen: set[tuple[str, str]] = set()
     for c in changes:
         if vanilla_hash(c.text) == c.vanilla:
@@ -133,6 +133,9 @@ def write_dialog(directory: Path, changes: Sequence[Change]) -> None:
             raise Fail(f"{c.namespace} {c.key}: more than one change for this line")
         seen.add((c.namespace, c.key))
 
+
+def write_dialog(directory: Path, changes: Sequence[Change]) -> None:
+    _check_changes(changes)
     files: dict[str, list[Change]] = {}
     for c in sorted(changes, key=_order):
         files.setdefault(_file_name(c.chapter), []).append(c)
@@ -502,6 +505,7 @@ def run(
         recall.confirmed.update(scene_recall.confirmed)
         out(f"scene {scene.key}: {_counts(scene_outcomes)}")
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
+    _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)
     _write_arcs(store.root / ARCS, ctx.arcs, scenes, changes)

@@ -1467,3 +1467,18 @@ def test_arcs_json_and_the_report_line_show_the_arcs_left_with_changes_after_rev
     assert json.loads((lens_repo / "work" / LENS / report.ARCS).read_text(encoding="utf-8")) == {"arcs": 2, "with_changes": 0}
     report.cmd_report(argparse.Namespace(lens=LENS))
     assert "arcs: 2, 0 with changes" in capsys.readouterr().out.splitlines()
+
+
+def test_line_changed_in_two_scenes_is_refused_by_run_and_nothing_is_written(tmp_path: Path) -> None:
+    # Made-up second scene that carries scene a's first line. Not game text.
+    shared = Scene("made-up-scene-d", (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),))
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), scenes=(SCENE_A, shared))
+    message = str(raised.value)
+    assert f"{NS_A} 1" in message
+    assert not any(text in message for text in (EN_A1, VOICE_A1, OPUS_A1))
+    work = tmp_path / "work" / LENS
+    assert not (work / report.OUTCOMES).exists()
+    assert not (work / report.ARCS).exists()
+    assert not (work / report.RECALL).exists()
+    assert not (tmp_path / "repo" / "dialog" / LENS).exists()
