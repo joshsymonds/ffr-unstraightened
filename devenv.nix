@@ -62,6 +62,7 @@ in
     pkgs.ruff
     pkgs.basedpyright
     pkgs.just
+    pkgs.mermaid-cli
     (pkgs.python3.withPackages (_: [
       pylocres
       py.polib

@@ -23,3 +23,17 @@ test *args:
 
 check-provenance:
     python3 -m ffrd.provenance
+
+# Render every Mermaid block in tracked Markdown to SVG under build/docs/.
+docs:
+    #!/usr/bin/env bash
+    set -u
+    mapfile -d '' -t files < <(git ls-files -z -- '*.md')
+    wait $! || exit 1
+    status=0
+    for f in "${files[@]}"; do
+        dest="build/docs/$f"
+        mkdir -p "$(dirname "$dest")"
+        mmdc -i "$f" -o "$dest" || status=1
+    done
+    exit "$status"
