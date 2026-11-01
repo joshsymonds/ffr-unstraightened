@@ -1,4 +1,4 @@
-"""smoke: run one in-scope scene through every pipeline stage under work/smoke/, print the DL38 prefix report and each required stage's result count, and fail when a required stage produced no result. Prints keys, labels and counts, never scene text."""
+"""smoke: run one in-scope scene through every pipeline stage under work/smoke/, call each data-conditional stage the run left without a result once, print the DL38 prefix report and each required stage's result count, and fail when a required stage produced no result. Prints keys, labels and counts, never scene text."""
 
 import argparse
 import re
@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from ffrd.game import Fail
-from ffrd.pipeline import arcs, bible, coherence, stages
+from ffrd.pipeline import arcs, bible, claude, coherence, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.run import Outcome, run
+from ffrd.pipeline.run import Outcome, _chapters, run
 from ffrd.pipeline.scope import in_scope, scoped
 from ffrd.pipeline.stages import Ask, Classifier, Scene
 from ffrd.pipeline.store import Result, Store, work_dir
@@ -31,6 +31,9 @@ SMOKE = Lens(
 
 CLASSIFIER = "classifier"
 SELECTION = "selection"
+EXERCISED = "(exercised)"
+# Stages whose run reaches depends on model answers, so smoke calls one itself when the run left it at zero.
+EXERCISABLE: tuple[str, ...] = ("rescreen", CLASSIFIER, "judge", "cross_judge", coherence.STAGE, arcs.STAGE)
 REQUIRED_STAGES: tuple[str, ...] = (
     bible.STAGE,
     bible.SETUP_STAGE,
@@ -68,16 +71,22 @@ PREFIX_LABELS: tuple[str, ...] = (*(label for label, _ in _FAMILIES), OUTSIDE_FA
 
 
 class _CountingStore(Store):
-    """The run's store, counting each stage once its result is returned, whether computed now or reused from an earlier run."""
+    """The run's store, counting each stage once its result is returned, whether computed now or reused from an earlier run, and keeping each returned result's inputs and value."""
 
     def __init__(self, root: Path, counts: Counter[str]) -> None:
         super().__init__(root)
         self._counts = counts
+        self._returned: dict[str, list[tuple[Any, Any]]] = {}
 
     def run(self, stage: str, inputs: Any, lens: str | None, call: Callable[[], Any]) -> Result:
         result = super().run(stage, inputs, lens, call)
         self._counts[result.stage] += 1
+        self._returned.setdefault(result.stage, []).append((inputs, result.value))
         return result
+
+    def returned(self, stage: str) -> list[tuple[Any, Any]]:
+        """The (inputs, value) pairs of the stage's returned results, in the order the run returned them."""
+        return self._returned.get(stage, [])
 
 
 class _CountingClassifier:
@@ -132,6 +141,66 @@ def _batch() -> Ask:
     return stages.Batch().ask
 
 
+def _bibles(root: Path, scene: Scene, ask: Ask) -> list[dict[str, Any]]:
+    # A plain store: the run already stored these bibles, so reading them back counts no stage a second time.
+    built = bible.build(Store(root), _chapters([scene]), lambda parts, schema: ask(claude.OPUS, parts, schema))
+    if not isinstance(built, list):
+        raise Fail("story bible unfinished; rerun ffrd smoke")
+    return built
+
+
+def _rewrites(store: _CountingStore) -> dict[tuple[str, str], str]:
+    """The first draft of each drafted line, from the first draft result the run returned."""
+    returned = store.returned("draft")
+    if not returned:
+        return {}
+    _, entries = returned[0]
+    return {(entry["namespace"], entry["key"]): entry["drafts"][0] for entry in entries}
+
+
+def _intent(store: _CountingStore, ref: tuple[str, str]) -> tuple[dict[str, Any], str] | None:
+    """The inputs and value of the intent the run returned for the line, if it returned one."""
+    for inputs, intent in store.returned("intent"):
+        if (inputs["line"]["namespace"], inputs["line"]["key"]) == ref:
+            return inputs, intent
+    return None
+
+
+def _exercise(store: _CountingStore, classifier: _CountingClassifier, counts: Counter[str], scene: Scene) -> set[str]:
+    """Calls each exercisable stage the run left at zero once, from the inputs and values the run returned. Changes no outcome; returns the stages a call produced a result for."""
+    pending = {stage for stage in EXERCISABLE if counts[stage] == 0}
+    if not pending:
+        return set()
+    ask = _batch()
+    bibles = _bibles(store.root, scene, ask)
+    speakers = {line.speaker for line in scene.lines}
+    if counts["rescreen"] == 0:
+        stages.rescreen(store, SMOKE, scene, SMOKE.triage[0], arcs.cast(bibles, speakers), ask)
+    rewrites = _rewrites(store)
+    if rewrites:
+        ref = next(iter(rewrites))
+        text = rewrites[ref]
+        if counts[CLASSIFIER] == 0:
+            classifier.score(text)
+        intended = _intent(store, ref)
+        if intended is not None:
+            inputs, intent = intended
+            line = next(line for line in scene.lines if (line.namespace, line.key) == ref)
+            if counts["judge"] == 0:
+                stages.judge(store, SMOKE, scene, line, text, inputs["callbacks"], inputs["reasons"], intent, inputs["context"], ask)
+            if counts["cross_judge"] == 0:
+                related = [other for other in scene.lines if (other.namespace, other.key) != ref]
+                stages.cross_judge(
+                    store, SMOKE, line, text, inputs["callbacks"], related, inputs["reasons"], intent, inputs["context"], ask
+                )
+        if counts[coherence.STAGE] == 0:
+            scene_arcs = arcs.context(arcs.consolidate(bibles), bibles, speakers, None)["arcs"]
+            coherence.check(store, SMOKE, scene, rewrites, scene_arcs, ask)
+        if counts[arcs.STAGE] == 0:
+            arcs.judge(store, SMOKE, arcs.consolidate(bibles), [scene], rewrites, ask)
+    return {stage for stage in pending if counts[stage] > 0}
+
+
 def cmd_smoke(args: argparse.Namespace) -> None:
     bound = stages.bindings()
     scenes = bound.scenes.scenes()
@@ -139,12 +208,14 @@ def cmd_smoke(args: argparse.Namespace) -> None:
     picked = _pick(scoped(scenes, scene_table=bound.scenes.scene_table), args.scene)
     root = work_dir(SMOKE.name)
     counts: Counter[str] = Counter()
+    store = _CountingStore(root, counts)
+    classifier = _CountingClassifier(bound.classifier, counts)
     outcomes = run(
         root,
         SMOKE,
-        _CountingStore(root, counts),
+        store,
         [picked],
-        classifier=_CountingClassifier(bound.classifier, counts),
+        classifier=classifier,
         renderer=bound.renderer,
         jev=jev_client.triage,
         run_id=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
@@ -153,9 +224,11 @@ def cmd_smoke(args: argparse.Namespace) -> None:
         out=print,
     )
     counts[SELECTION] = _selected(outcomes, picked)
+    exercised = _exercise(store, classifier, counts, picked)
     missing: list[str] = []
     for stage in REQUIRED_STAGES:
-        print(f"stage {stage}: {counts[stage]}")
+        mark = f" {EXERCISED}" if stage in exercised else ""
+        print(f"stage {stage}: {counts[stage]}{mark}")
         if counts[stage] == 0:
             missing.append(stage)
     if missing:

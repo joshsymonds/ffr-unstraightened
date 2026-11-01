@@ -64,9 +64,20 @@ def _section(parts: Sequence[str], heading: str) -> Any:
 class FakeClaude:
     """Answers every stage from the prompt it is given, so a full smoke run reaches every stage. Not game text."""
 
-    def __init__(self, *, arcs_in_bible: bool = True, unfinished_intent: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *,
+        arcs_in_bible: bool = True,
+        unfinished_intent: frozenset[str] = frozenset(),
+        unfinished_judge: bool = False,
+        flag_none: bool = False,
+        overlong_draft: bool = False,
+    ) -> None:
         self.arcs_in_bible = arcs_in_bible
         self.unfinished_intent = unfinished_intent
+        self.unfinished_judge = unfinished_judge
+        self.flag_none = flag_none
+        self.overlong_draft = overlong_draft
 
     def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> Any:
         if schema is bible.SCHEMA:
@@ -74,6 +85,8 @@ class FakeClaude:
         if schema is bible.SETUP_SCHEMA:
             return {"setups": []}
         if schema is SCREEN_SCHEMA:
+            if self.flag_none:
+                return {"flagged": []}
             speakers = [line for line in _section(parts, "Scene lines:\n") if line["speaker"]][:2]
             return {"flagged": [{"namespace": s["namespace"], "key": s["key"], "reasons": ["smoke-fixable"]} for s in speakers]}
         if schema is RESCREEN_SCHEMA:
@@ -87,10 +100,13 @@ class FakeClaude:
             english = {(line["namespace"], line["key"]): line["english"] for line in _section(parts, "Scene lines:\n")}
             targets = _section(parts, "Targets:\n")
             entries = [
-                {"namespace": t["namespace"], "key": t["key"], "drafts": [_reworded(english[(t["namespace"], t["key"])])]} for t in targets
+                {"namespace": t["namespace"], "key": t["key"], "drafts": [self._draft(english[(t["namespace"], t["key"])])]}
+                for t in targets
             ]
             return {"drafts": entries}
         if schema is JUDGE_SCHEMA:
+            if self.unfinished_judge:
+                return Unfinished("Made-up judge failure. Not game text.")
             return {verdict: True for verdict in JUDGE_VERDICTS}
         if schema is CROSS_SCHEMA:
             return {"consistent": True}
@@ -99,6 +115,10 @@ class FakeClaude:
         if schema is arcs.SCHEMA:
             return {"holds": True, "revert": []}
         raise AssertionError("unexpected schema")
+
+    def _draft(self, english: str) -> str:
+        # Overlong drafts fail the length gate, so no candidate reaches the classifier or the judge in a run. Not game text.
+        return english * 2 if self.overlong_draft else _reworded(english)
 
     def _bible(self, parts: Sequence[str]) -> dict[str, Any]:
         lines = [line for line in _section(parts, "Chapter 1 lines:\n") if line["speaker"]]
@@ -157,6 +177,8 @@ class FakeSource:
 
 
 JEV_HIGH = {"smoke-fixable": 0.9, "smoke-second": 0.9}
+# Below the recheck bar for both questions, so a run makes no rescreen call.
+JEV_LOW = {"smoke-fixable": 0.1, "smoke-second": 0.1}
 
 FULL_STAGE_LINES = [
     "stage bible: 1",
@@ -282,11 +304,12 @@ def test_an_unfinished_outcome_fails_the_selection_stage(
         [_speaker_scene(SCENE_A, NS_A)],
     )
 
-    with pytest.raises(Fail, match=r"^smoke: no result from scene_coherence, selection$"):
+    with pytest.raises(Fail, match=r"^smoke: no result from selection$"):
         cmd_smoke(_parse(["smoke"]))
 
     out = capsys.readouterr().out.splitlines()
     assert "total: 1 changed, 0 kept for plot, 0 gate failed, 1 unfinished, 1 untouched" in out
+    assert "stage scene_coherence: 1 (exercised)" in out
     assert "stage selection: 0" in out
 
 
@@ -366,3 +389,76 @@ def test_prefix_report_counts_each_family_once_and_the_table_only_and_hard_exclu
         "prefix outside fallback: 5",
         "prefix hard excluded: 2",
     ]
+
+
+def test_stages_a_run_leaves_empty_are_exercised_and_change_no_outcome(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(overlong_draft=True), FakeJev(JEV_LOW), [_speaker_scene(SCENE_A, NS_A)])
+    before = _files(smoke_repo)
+
+    cmd_smoke(_parse(["smoke"]))
+
+    printed = capsys.readouterr().out.splitlines()
+    assert f"scene {SCENE_A}: 0 changed, 0 kept for plot, 2 gate failed, 0 unfinished, 1 untouched" in printed
+    assert [line for line in printed if line.startswith("stage ")] == [
+        "stage bible: 1",
+        "stage bible_setups: 1",
+        "stage screen: 1",
+        "stage triage: 1",
+        "stage rescreen: 1 (exercised)",
+        "stage intent: 2",
+        "stage draft: 3",
+        "stage render: 4",
+        "stage classifier: 1 (exercised)",
+        "stage judge: 1 (exercised)",
+        "stage cross_judge: 1 (exercised)",
+        "stage scene_coherence: 1 (exercised)",
+        "stage arc_judge: 1 (exercised)",
+        "stage selection: 3",
+    ]
+    work = smoke_repo / "work" / "smoke"
+    outcomes = [json.loads(line) for line in (work / "outcomes.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(o["key"], o["outcome"], o["gate"]) for o in outcomes] == [
+        ("1", "gate_failed", "length"),
+        ("2", "gate_failed", "length"),
+        ("3", "untouched", None),
+    ]
+    assert list((work / "dialog" / "smoke").iterdir()) == []
+    new = _files(smoke_repo) - before
+    assert new, "the run wrote nothing"
+    assert all(path.parts[:2] == ("work", "smoke") for path in new)
+
+
+def test_an_exercise_call_answering_unfinished_fails_naming_its_stage(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(
+        monkeypatch,
+        FakeClaude(overlong_draft=True, unfinished_judge=True),
+        FakeJev(JEV_LOW),
+        [_speaker_scene(SCENE_A, NS_A)],
+    )
+
+    with pytest.raises(Fail, match=r"^smoke: no result from judge$"):
+        cmd_smoke(_parse(["smoke"]))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "stage judge: 0" in out
+    assert "stage cross_judge: 1 (exercised)" in out
+
+
+def test_a_screen_that_flags_nothing_fails_naming_the_stages_that_need_a_draft(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(flag_none=True), FakeJev(JEV_HIGH), [_speaker_scene(SCENE_A, NS_A)])
+
+    with pytest.raises(
+        Fail,
+        match=r"^smoke: no result from intent, draft, render, classifier, judge, cross_judge, scene_coherence, arc_judge$",
+    ):
+        cmd_smoke(_parse(["smoke"]))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "stage selection: 3" in out
+    assert not any(line.endswith("(exercised)") for line in out)
