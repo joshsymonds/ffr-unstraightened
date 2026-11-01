@@ -9,7 +9,7 @@ from typing import Any, Literal
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import bible, coherence, report, stages
+from ffrd.pipeline import arcs, bible, coherence, report, stages
 from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
@@ -429,6 +429,8 @@ class FakeClaude:
         self.cross_failures: dict[str, Unfinished | Rejected] = {}
         # Answers for coherence calls in order, first pass then recheck; an empty queue answers coherent. Not game text.
         self.coherence: list[dict[str, Any] | Unfinished | Rejected] = []
+        # Answers for arc judge calls in order, first pass then recheck; an empty queue answers holds with no reverts. Not game text.
+        self.arc: list[dict[str, Any] | Unfinished | Rejected] = []
 
     def start_batch(self) -> Ask:
         self.batches += 1
@@ -469,6 +471,8 @@ class FakeClaude:
             return {"consistent": self.consistent.get(candidate, True)}
         if schema is coherence.SCHEMA:
             return self.coherence.pop(0) if self.coherence else {"coherent": True, "revert": []}
+        if schema is arcs.SCHEMA:
+            return self.arc.pop(0) if self.arc else {"holds": True, "revert": []}
         raise AssertionError("unexpected schema")
 
     def _screen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished:
@@ -613,10 +617,10 @@ def test_out_of_scope_line_has_no_record_and_reaches_no_prompt(tmp_path: Path) -
     assert NS_OUT not in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
 
 
-def test_one_batch_for_the_bible_and_one_per_scene(tmp_path: Path) -> None:
+def test_one_batch_for_the_bible_one_per_scene_and_one_for_the_arc_judge(tmp_path: Path) -> None:
     claude = _claude()
     _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
-    assert claude.batches == 1 + len(SCENES)
+    assert claude.batches == 2 + len(SCENES)
 
 
 def test_one_setup_call_per_bible_chapter(tmp_path: Path) -> None:
@@ -1347,3 +1351,107 @@ def test_scene_with_one_change_makes_no_coherence_call(tmp_path: Path) -> None:
         Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "opus"),
         Outcome(NS_C, "3", 3, None, (), "untouched", None, None),
     ]
+
+
+# Made-up arc scenes: one arc character speaks a changed line in each scene, and a second arc has no lines. Not game text.
+ARC_C = "made-up-arc-c"
+ARC_C_ENTRY = {"id": ARC_C, "characters": ["made-up-speaker-c"], "state": "Made-up state of arc c. Not game text.", "beats": []}
+ARC_BIBLE: dict[str, Any] = {**EMPTY_BIBLE, "arcs": [ARC_A_ENTRY, ARC_C_ENTRY]}
+SCENE_X = Scene("made-up-scene-x", (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1), _line(NS_A, "2", "made-up-speaker-c", EN_A2, 1)))
+SCENE_Y = Scene("made-up-scene-y", (_line(NS_B, "1", "made-up-speaker-a", EN_B1, 2),))
+ARC_SCENES = (SCENE_X, SCENE_Y)
+ARC_REFS = [(NS_A, "1"), (NS_B, "1")]
+
+
+def _arc_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.bible = {1: ARC_BIBLE}
+    claude.flags = {(NS_A, "1"): [ALPHA], (NS_B, "1"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_B, "1"): [OPUS_B1]}
+    return claude
+
+
+def _arc_verdict(holds: bool, *refs: tuple[str, str]) -> dict[str, Any]:
+    return {"holds": holds, "revert": [{"namespace": namespace, "key": key} for namespace, key in refs]}
+
+
+def _arc_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is arcs.SCHEMA]
+
+
+def _arc_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
+    return [(line["namespace"], line["key"]) for line in json.loads(_part(parts, "Arc lines:\n"))]
+
+
+def _outcome_of(outcomes: Sequence[Outcome], ref: tuple[str, str]) -> Outcome:
+    return next(o for o in outcomes if (o.namespace, o.key) == ref)
+
+
+def test_arc_judge_runs_once_with_every_changed_line_of_the_arc_in_story_order(tmp_path: Path) -> None:
+    claude = _arc_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=ARC_SCENES)
+    calls = _arc_calls(claude)
+    assert len(calls) == 1
+    assert _arc_refs(calls[0]) == ARC_REFS
+
+
+def test_no_arc_and_no_changed_arc_line_makes_no_arc_call(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert _arc_calls(claude) == []
+
+
+def test_line_named_on_both_arc_passes_ends_gate_failed_arc_with_no_dialog_entry(tmp_path: Path) -> None:
+    claude = _arc_claude()
+    claude.arc = [_arc_verdict(False, (NS_A, "1")), _arc_verdict(False, (NS_A, "1"))]
+    printed: list[str] = []
+    outcomes = _run(tmp_path, claude, printed, jev=None, scenes=ARC_SCENES)
+    assert json.loads(_part(_arc_calls(claude)[1], "Proposed reverts:\n")) == [{"namespace": NS_A, "key": "1"}]
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None)
+    assert _outcome_of(outcomes, (NS_B, "1")).outcome == "changed"
+    assert _dialog_entries(tmp_path) == {(NS_B, "1")}
+    assert printed == [
+        "scene made-up-scene-x: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
+        "scene made-up-scene-y: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+        "total: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1 untouched",
+    ]
+
+
+def test_unfinished_arc_judge_leaves_its_changed_lines_unfinished_with_no_dialog_entry(tmp_path: Path) -> None:
+    claude = _arc_claude()
+    claude.arc = [Unfinished("Made-up arc failure. Not game text.")]
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=ARC_SCENES)
+    assert outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (), "untouched", None, None),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "unfinished", None, None),
+    ]
+    assert _dialog_entries(tmp_path) == set()
+
+
+def test_arcs_json_counts_the_arcs_and_the_arcs_with_changes_left_after_the_arc_judge(tmp_path: Path) -> None:
+    _run(tmp_path, _arc_claude(), [], jev=None, scenes=ARC_SCENES)
+    assert json.loads((tmp_path / "work" / LENS / report.ARCS).read_text(encoding="utf-8")) == {"arcs": 2, "with_changes": 1}
+
+
+def test_arcs_json_and_the_report_line_show_the_arcs_left_with_changes_after_reverts(
+    lens_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    claude = _arc_claude()
+    claude.arc = [_arc_verdict(False, (NS_A, "1"), (NS_B, "1")), _arc_verdict(False, (NS_A, "1"), (NS_B, "1"))]
+    run(
+        lens_repo,
+        LENS_OBJ,
+        Store(lens_repo / "work" / LENS),
+        ARC_SCENES,
+        classifier=FakeClassifier(),
+        renderer=FakeRenderer({}),
+        run_id=RUN,
+        jev=None,
+        batch=claude.start_batch,
+        scene_table=False,
+        out=lambda _: None,
+    )
+    assert json.loads((lens_repo / "work" / LENS / report.ARCS).read_text(encoding="utf-8")) == {"arcs": 2, "with_changes": 0}
+    report.cmd_report(argparse.Namespace(lens=LENS))
+    assert "arcs: 2, 0 with changes" in capsys.readouterr().out.splitlines()

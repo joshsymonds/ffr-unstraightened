@@ -19,7 +19,7 @@ from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, gate_line
 from ffrd.pipeline.lens import Lens, load_lens
-from ffrd.pipeline.report import OUTCOME_LABELS, OUTCOMES, RECALL
+from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose
 from ffrd.pipeline.stages import Ask, Classifier, Renderer, Scene, SceneLine, Triage
@@ -376,6 +376,35 @@ def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: lis
     )
 
 
+def _arc_outcome(outcome: Outcome, verdicts: arcs.Verdicts) -> Outcome:
+    ref = (outcome.namespace, outcome.key)
+    if outcome.outcome != "changed":
+        return outcome
+    if ref in verdicts.reverted:
+        return replace(outcome, outcome="gate_failed", gate="arc", writer=None)
+    if ref in verdicts.unfinished:
+        return replace(outcome, outcome="unfinished", writer=None)
+    return outcome
+
+
+def _arc_judged(
+    ctx: _Context, scenes: Sequence[Scene], outcomes: list[Outcome], changes: list[Change], ask: Ask
+) -> tuple[list[Outcome], list[Change]]:
+    rewrites = {(change.namespace, change.key): change.text for change in changes}
+    verdicts = arcs.judge(ctx.store, ctx.lens, ctx.arcs, scenes, rewrites, ask)
+    dropped = verdicts.reverted | verdicts.unfinished
+    return (
+        [_arc_outcome(outcome, verdicts) for outcome in outcomes],
+        [change for change in changes if (change.namespace, change.key) not in dropped],
+    )
+
+
+def _write_arcs(path: Path, consolidated: Sequence[Mapping[str, Any]], scenes: Sequence[Scene], changes: Sequence[Change]) -> None:
+    rewrites = {(change.namespace, change.key): change.text for change in changes}
+    record = {"arcs": len(consolidated), "with_changes": arcs.with_changes(consolidated, scenes, rewrites)}
+    _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall]:
     cast = arcs.cast(ctx.bibles, _speakers(scene))
     flagged = stages.screen(ctx.store, ctx.lens, scene, cast, ask)
@@ -472,8 +501,10 @@ def run(
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
         out(f"scene {scene.key}: {_counts(scene_outcomes)}")
+    outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)
+    _write_arcs(store.root / ARCS, ctx.arcs, scenes, changes)
     _write_recall(store.root / RECALL, lens, recall)
     write_dialog(root / "dialog" / lens.name, changes)
     return outcomes
