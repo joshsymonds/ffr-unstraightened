@@ -402,6 +402,7 @@ class FakeClaude:
         self.batches = 0
         self.calls: list[tuple[str, list[str], Mapping[str, Any]]] = []
         self.bible: dict[int, dict[str, Any] | Unfinished] = {1: CHAPTER_ONE_BIBLE}
+        self.unplaced: list[dict[str, Any]] = []
         self.screen_failure: Unfinished | None = None
         self.flags: dict[tuple[str, str], list[str]] = {}
         self.intents: dict[tuple[str, str], str | Unfinished] = {}
@@ -418,6 +419,8 @@ class FakeClaude:
     def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
         self.calls.append((model, list(parts), schema))
         if schema is bible.SCHEMA:
+            if any(part.startswith("Unplaced lines:\n") for part in parts):
+                return self.unplaced.pop(0) if self.unplaced else EMPTY_BIBLE
             number = int(_part(parts, "Chapter ").split()[0])
             return self.bible.get(number, EMPTY_BIBLE)
         if schema is SCREEN_SCHEMA:
@@ -791,6 +794,51 @@ def test_bible_runs_chapters_ascending_with_first_occurrence_lines_and_empty_spe
     assert json.loads(_part(bible_calls[1], "Chapter 2 lines:\n")) == [
         {"namespace": NS_B, "key": "1", "speaker": "made-up-speaker-b", "text": EN_B1},
     ]
+
+
+# Made-up unplaced lines of two namespaces, the one that sorts later as plain text first in the scene.
+# Not game text.
+UNPLACED_LATER = "ST_SubEv_10"
+UNPLACED_EARLIER = "ST_SubEv_2"
+UNPLACED_SCENE = Scene(
+    "made-up-scene-unplaced",
+    (
+        _line(UNPLACED_LATER, "1", None, EN_C1, None),
+        _line(UNPLACED_EARLIER, "1", "made-up-speaker-a", EN_OUT, None),
+        _line(UNPLACED_LATER, "2", None, EN_B2, None),
+    ),
+)
+UNPLACED_BIBLE: dict[str, Any] = {
+    "characters": [],
+    "facts": [],
+    "callbacks": [
+        {
+            "line": {"namespace": UNPLACED_EARLIER, "key": "1"},
+            "depends": [{"namespace": NS_B, "key": "1"}],
+            "meaning": "Made-up callback meaning unplaced. Not game text.",
+        }
+    ],
+}
+
+
+def test_unplaced_lines_are_one_bible_per_namespace_after_numbered_chapters_in_natural_order(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.bible = {}
+    claude.flags = {}
+    claude.unplaced = [UNPLACED_BIBLE]
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None, scenes=(LATE_SCENE, EARLY_SCENE, UNPLACED_SCENE))
+    bible_calls = [parts for _, parts, schema in claude.calls if schema is bible.SCHEMA]
+    assert len(bible_calls) == 4
+    assert any(part.startswith("Chapter 1 lines:\n") for part in bible_calls[0])
+    assert any(part.startswith("Chapter 2 lines:\n") for part in bible_calls[1])
+    assert json.loads(_part(bible_calls[2], "Unplaced lines:\n")) == [
+        {"namespace": UNPLACED_EARLIER, "key": "1", "speaker": "made-up-speaker-a", "text": EN_OUT},
+    ]
+    assert json.loads(_part(bible_calls[3], "Unplaced lines:\n")) == [
+        {"namespace": UNPLACED_LATER, "key": "1", "speaker": "", "text": EN_C1},
+        {"namespace": UNPLACED_LATER, "key": "2", "speaker": "", "text": EN_B2},
+    ]
+    assert "Made-up callback meaning unplaced. Not game text." in "\n".join(bible_calls[3])
 
 
 def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:

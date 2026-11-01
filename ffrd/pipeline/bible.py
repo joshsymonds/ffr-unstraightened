@@ -1,7 +1,7 @@
 """Story bible stage: per chapter, the characters, facts and callbacks the model reads from the script, checked and stored so reruns resume."""
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -96,32 +96,39 @@ def _refs(bible: Mapping[str, Any]) -> list[tuple[str, str]]:
     return refs
 
 
-def _check(output: Mapping[str, Any], number: int, lines: Sequence[Line], earlier: Sequence[Mapping[str, Any]]) -> Rejected | None:
+def _label(number: int | None) -> str:
+    return "unplaced" if number is None else f"chapter {number}"
+
+
+def _check(output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]]) -> Rejected | None:
     speakers = {line.speaker for line in lines}
     for character in output["characters"]:
         if character["speaker"] not in speakers:
-            return Rejected(f"chapter {number} character speaker {character['speaker']!r} speaks no line of this chapter")
-    known = {(line.namespace, line.key) for line in lines}
-    for bible in earlier:
-        known.update(_refs(bible))
+            return Rejected(f"{_label(number)} character speaker {character['speaker']!r} speaks no line of this chapter")
     for namespace, key in _refs(output):
-        if (namespace, key) not in known:
-            return Rejected(f"chapter {number} ref {namespace}/{key} names no line of this chapter or an earlier bible")
+        if (namespace, key) not in scope:
+            return Rejected(f"{_label(number)} ref {namespace}/{key} names no line passed to the story bible")
     return None
 
 
 def chapter(
-    store: Store, number: int, lines: Sequence[Line], earlier: Sequence[Mapping[str, Any]], ask: Ask
+    store: Store,
+    number: int | None,
+    lines: Sequence[Line],
+    earlier: Sequence[Mapping[str, Any]],
+    scope: Set[tuple[str, str]],
+    ask: Ask,
 ) -> dict[str, Any] | Unfinished | Rejected:
     line_json = json.dumps([asdict(line) for line in lines], sort_keys=True, ensure_ascii=False)
     earlier_json = json.dumps(list(earlier), sort_keys=True, ensure_ascii=False)
-    parts = [INSTRUCTIONS, f"Earlier bibles:\n{earlier_json}", f"Chapter {number} lines:\n{line_json}"]
+    heading = "Unplaced lines:" if number is None else f"Chapter {number} lines:"
+    parts = [INSTRUCTIONS, f"Earlier bibles:\n{earlier_json}", f"{heading}\n{line_json}"]
 
     def call() -> dict[str, Any]:
         output = ask(parts, SCHEMA)
         if isinstance(output, Unfinished | Rejected):
             raise _Refused(output)
-        problem = _check(output, number, lines, earlier)
+        problem = _check(output, number, lines, scope)
         if problem is not None:
             raise _Refused(problem)
         return {**output, "chapter": number}
@@ -133,10 +140,11 @@ def chapter(
         return refused.failure
 
 
-def build(store: Store, chapters: Sequence[tuple[int, Sequence[Line]]], ask: Ask) -> list[dict[str, Any]] | Unfinished | Rejected:
+def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], ask: Ask) -> list[dict[str, Any]] | Unfinished | Rejected:
+    scope = {(line.namespace, line.key) for _, lines in chapters for line in lines}
     bibles: list[dict[str, Any]] = []
     for number, lines in chapters:
-        result = chapter(store, number, lines, bibles, ask)
+        result = chapter(store, number, lines, bibles, scope, ask)
         if not isinstance(result, dict):
             return result
         bibles.append(result)

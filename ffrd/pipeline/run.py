@@ -167,14 +167,17 @@ class _Context:
     lines: Mapping[tuple[str, str], SceneLine]
 
 
-def _chapters(scenes: Sequence[Scene]) -> list[tuple[int, list[bible.Line]]]:
+def _chapters(scenes: Sequence[Scene]) -> list[tuple[int | None, list[bible.Line]]]:
     by_chapter: dict[int, dict[tuple[str, str], bible.Line]] = {}
+    unplaced: dict[str, dict[tuple[str, str], bible.Line]] = {}
     for scene in scenes:
         for line in scene.lines:
-            if line.chapter is not None:
-                seen = by_chapter.setdefault(line.chapter, {})
-                seen.setdefault((line.namespace, line.key), bible.Line(line.namespace, line.key, line.speaker or "", line.english))
-    return [(number, list(seen.values())) for number, seen in sorted(by_chapter.items())]
+            bible_line = bible.Line(line.namespace, line.key, line.speaker or "", line.english)
+            seen = unplaced.setdefault(line.namespace, {}) if line.chapter is None else by_chapter.setdefault(line.chapter, {})
+            seen.setdefault((line.namespace, line.key), bible_line)
+    numbered: list[tuple[int | None, list[bible.Line]]] = [(number, list(seen.values())) for number, seen in sorted(by_chapter.items())]
+    loose = [(None, list(unplaced[namespace].values())) for namespace in sorted(unplaced, key=lambda ns: (natural(ns), ns))]
+    return numbered + loose
 
 
 def _first_lines(scenes: Sequence[Scene]) -> dict[tuple[str, str], SceneLine]:
