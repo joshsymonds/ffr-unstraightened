@@ -110,7 +110,8 @@ def _write(path: str, data: bytes) -> None:
 def _launch(log: str) -> list[str] | None:
     # A log left by an earlier launch could already end in done, so it goes before every launch.
     deck.ssh(host(), f"rm -f {deck.remote(log)}")
-    deck.ssh(host(), f"timeout 30 steam steam://rungameid/{APP_ID}")
+    # -RenderOffscreen keeps the game thread ticking while the game window is unfocused on the gnomon desktop.
+    deck.ssh(host(), f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen")
     _wait_for_exe()
     started = time.monotonic()
     while True:

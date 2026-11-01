@@ -186,7 +186,7 @@ DEST = f"{GAME}/FFRS/Binaries/Win64/ue4ss/Mods/UnstraightenedProbe"
 LOG = "probe.log"
 FILES = {"keys.txt": b"ST_SYNTH_001,1\n"}
 SYNTH_LINE = "ST_SYNTH_001,1 0123456789abcdef"
-LAUNCH_CMD = f"timeout 30 steam steam://rungameid/{APP_ID}"
+LAUNCH_CMD = f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen"
 GAME_PGREP = "pgrep -f 'FINAL FANTASY RESONANC[E]'"
 EXE_PGREP = "pgrep -f 'FFRS-Win64-Shippin[g]'"
 EXE_PKILL = "pkill -KILL -f 'FFRS-Win64-Shippin[g]'"
@@ -431,6 +431,12 @@ def test_run_mod_returns_log_lines_on_healthy_launch(make_remote: Callable[..., 
     fake = make_remote([HEALTHY])
     assert gnomon.run_mod(mod, FILES, LOG) == [SYNTH_LINE, "done"]
     assert fake.launch_count == 1
+
+
+def test_launch_sends_offscreen_render_command(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    fake = make_remote([HEALTHY])
+    gnomon.run_mod(mod, FILES, LOG)
+    assert f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen" in fake.commands
 
 
 def test_run_mod_installs_tree_enabled_txt_and_files(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
