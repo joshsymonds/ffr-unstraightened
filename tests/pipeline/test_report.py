@@ -42,7 +42,8 @@ SUMMARY = (
 )
 DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
-LINE = re.compile(f"{SUMMARY}|{DETAIL}|{ARCS_LINE}")
+RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
+LINE = re.compile(f"{SUMMARY}|{DETAIL}|{ARCS_LINE}|{RECALL_LINE}")
 
 # Made-up arcs totals. Not game text.
 ARCS_VALID = b'{"arcs": 3, "with_changes": 2}\n'
@@ -72,6 +73,10 @@ def _lines(*records: dict[str, object]) -> bytes:
 def _without(field: str) -> bytes:
     record = {k: v for k, v in _record().items() if k != field}
     return json.dumps(record).encode("utf-8") + b"\n"
+
+
+def _bytes(obj: object) -> bytes:
+    return json.dumps(obj).encode("utf-8") + b"\n"
 
 
 MULTI = (
@@ -106,7 +111,13 @@ total: 4 changed, 1 kept for plot, 1 gate failed, 1 unfinished, 1 untouched
   no speaker: 1
   gate made-up-gate: 1
 arcs: 3, 2 with changes
+recall made-up-first-id: 4 disagreements, 1 confirmed
+recall made-up-second-id: 0 disagreements, 0 confirmed
 """
+
+# Made-up recall counts. Not game text.
+RECALL_VALID = _bytes({FIRST: {"disagreements": 4, "confirmed": 1}, SECOND: {"disagreements": 0, "confirmed": 0}})
+GOOD_ENTRY = {"disagreements": 1, "confirmed": 0}
 
 
 @pytest.fixture
@@ -134,6 +145,13 @@ def _write_arcs(repo: Path, content: bytes = ARCS_VALID) -> Path:
     return path.resolve()
 
 
+def _write_recall(repo: Path, content: bytes = RECALL_VALID) -> Path:
+    path = repo / "work" / LENS / "recall.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path.resolve()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ffrd")
     report.register(parser.add_subparsers(required=True))
@@ -148,6 +166,7 @@ def _invoke() -> None:
 def test_prints_exact_counts_per_chapter(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write(repo, _lines(*MULTI))
     _write_arcs(repo)
+    _write_recall(repo)
     _invoke()
     assert capsys.readouterr().out == EXPECTED_MULTI
 
@@ -155,6 +174,7 @@ def test_prints_exact_counts_per_chapter(repo: Path, capsys: pytest.CaptureFixtu
 def test_every_line_matches_grammar_and_shows_no_text_keys_or_speakers(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write(repo, _lines(*MULTI))
     _write_arcs(repo)
+    _write_recall(repo)
     _invoke()
     out = capsys.readouterr().out
     for line in out.splitlines():
@@ -166,6 +186,7 @@ def test_every_line_matches_grammar_and_shows_no_text_keys_or_speakers(repo: Pat
 def test_character_numbers_do_not_move_when_an_outcome_changes(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # SPEAKER_TWO appears only as untouched, so it is numbered 1 but not printed; SPEAKER_TEN is numbered 2.
     _write_arcs(repo)
+    _write_recall(repo)
     _write(
         repo,
         _lines(
@@ -211,6 +232,7 @@ def test_gate_lines_name_scene_and_arc_in_chapter_and_total_blocks(repo: Path, c
         ),
     )
     _write_arcs(repo)
+    _write_recall(repo)
     _invoke()
     assert (
         capsys.readouterr().out
@@ -224,6 +246,8 @@ total: 0 changed, 0 kept for plot, 3 gate failed, 0 unfinished, 0 untouched
   gate arc: 2
   gate scene: 1
 arcs: 3, 2 with changes
+recall made-up-first-id: 4 disagreements, 1 confirmed
+recall made-up-second-id: 0 disagreements, 0 confirmed
 """
     )
 
@@ -231,8 +255,9 @@ arcs: 3, 2 with changes
 def test_arcs_line_accepts_zero_totals(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write(repo, _lines(*MULTI))
     _write_arcs(repo, b'{"arcs": 0, "with_changes": 0}\n')
+    _write_recall(repo)
     _invoke()
-    assert capsys.readouterr().out.splitlines()[-1] == "arcs: 0, 0 with changes"
+    assert "arcs: 0, 0 with changes" in capsys.readouterr().out.splitlines()
 
 
 def test_missing_arcs_file_fails_naming_the_file(repo: Path) -> None:
@@ -241,6 +266,100 @@ def test_missing_arcs_file_fails_naming_the_file(repo: Path) -> None:
         _invoke()
     message = str(raised.value)
     assert "arcs.json" in message
+    assert "SENTINEL" not in message
+
+
+def test_recall_lines_follow_arcs_in_lens_order(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    # Made-up recall counts with the second id first in the file. Not game text.
+    _write_recall(repo, _bytes({SECOND: {"disagreements": 2, "confirmed": 2}, FIRST: {"disagreements": 5, "confirmed": 3}}))
+    _invoke()
+    assert capsys.readouterr().out.splitlines()[-3:] == [
+        "arcs: 3, 2 with changes",
+        "recall made-up-first-id: 5 disagreements, 3 confirmed",
+        "recall made-up-second-id: 2 disagreements, 2 confirmed",
+    ]
+
+
+def test_missing_recall_file_fails_naming_the_file(repo: Path) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert "recall.json" in message
+    assert "SENTINEL" not in message
+
+
+BAD_RECALL = [
+    pytest.param(b"SENTINEL-NOT-JSON {\n", "is not valid JSON", id="not-json"),
+    pytest.param(b'["SENTINEL-ARRAY"]\n', "is not a JSON object", id="not-object"),
+    pytest.param(_bytes({FIRST: GOOD_ENTRY}), f"triage id {SECOND} is missing", id="id-missing"),
+    pytest.param(
+        _bytes({FIRST: GOOD_ENTRY, SECOND: GOOD_ENTRY, "SENTINEL-UNKNOWN": GOOD_ENTRY}),
+        "has a key that is not a triage id of the lens",
+        id="id-unknown",
+    ),
+    pytest.param(_bytes({FIRST: "SENTINEL-ENTRY", SECOND: GOOD_ENTRY}), f"triage id {FIRST} is not an object", id="entry-type"),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": 1}, SECOND: GOOD_ENTRY}),
+        f"triage id {FIRST}: field confirmed is missing",
+        id="field-missing",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": 1, "confirmed": 0, "SENTINEL-EXTRA": 1}, SECOND: GOOD_ENTRY}),
+        f"triage id {FIRST}: has a field that is not disagreements or confirmed",
+        id="field-extra",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": "SENTINEL-COUNT", "confirmed": 0}, SECOND: GOOD_ENTRY}),
+        "field disagreements must be a non-negative integer",
+        id="disagreements-type",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": 1.5, "confirmed": 0}, SECOND: GOOD_ENTRY}),
+        "field disagreements must be a non-negative integer",
+        id="disagreements-float",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": True, "confirmed": 0}, SECOND: GOOD_ENTRY}),
+        "field disagreements must be a non-negative integer",
+        id="disagreements-bool",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": -1, "confirmed": 0}, SECOND: GOOD_ENTRY}),
+        "field disagreements must be a non-negative integer",
+        id="disagreements-negative",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": 1, "confirmed": "SENTINEL-COUNT"}, SECOND: GOOD_ENTRY}),
+        "field confirmed must be a non-negative integer",
+        id="confirmed-type",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": 1, "confirmed": -1}, SECOND: GOOD_ENTRY}),
+        "field confirmed must be a non-negative integer",
+        id="confirmed-negative",
+    ),
+    pytest.param(
+        _bytes({FIRST: {"disagreements": 1, "confirmed": 2}, SECOND: GOOD_ENTRY}),
+        "field confirmed must not exceed disagreements",
+        id="confirmed-above-disagreements",
+    ),
+]
+
+
+@pytest.mark.parametrize(("bad", "fragment"), BAD_RECALL)
+def test_invalid_recall_fails_naming_file_and_field_but_not_the_value(repo: Path, bad: bytes, fragment: str) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    path = _write_recall(repo, bad)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert str(path) in message
+    assert fragment in message
     assert "SENTINEL" not in message
 
 

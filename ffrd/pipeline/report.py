@@ -13,6 +13,8 @@ from ffrd.pipeline.store import work_dir
 
 OUTCOMES = "outcomes.jsonl"
 ARCS = "arcs.json"
+RECALL = "recall.json"
+RECALL_FIELDS = frozenset({"disagreements", "confirmed"})
 OUTCOME_LABELS = {
     "changed": "changed",
     "kept_for_plot": "kept for plot",
@@ -155,6 +157,41 @@ def _arcs(path: Path) -> tuple[int, int]:
     return arcs, with_changes
 
 
+def _pair(entry: object, where: str) -> tuple[int, int]:
+    if not isinstance(entry, dict):
+        raise Fail(f"{where} is not an object")
+    if not RECALL_FIELDS.issuperset(entry):
+        raise Fail(f"{where}: has a field that is not disagreements or confirmed")
+    disagreements = _count(entry, "disagreements", where)
+    confirmed = _count(entry, "confirmed", where)
+    if confirmed > disagreements:
+        raise Fail(f"{where}: field confirmed must not exceed disagreements")
+    return disagreements, confirmed
+
+
+def _recall(path: Path, triage_ids: list[str]) -> dict[str, tuple[int, int]]:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as e:
+        raise Fail(f"no recall at {path}; run the lens first") from e
+    except OSError as e:
+        raise Fail(f"cannot read recall {path}: {e.strerror}") from e
+    try:
+        obj = json.loads(raw)
+    except ValueError as e:
+        raise Fail(f"{path}: is not valid JSON") from e
+    if not isinstance(obj, dict):
+        raise Fail(f"{path}: is not a JSON object")
+    if any(key not in triage_ids for key in obj):
+        raise Fail(f"{path}: has a key that is not a triage id of the lens")
+    recall: dict[str, tuple[int, int]] = {}
+    for rid in triage_ids:
+        if rid not in obj:
+            raise Fail(f"{path}: triage id {rid} is missing")
+        recall[rid] = _pair(obj[rid], f"{path}: triage id {rid}")
+    return recall
+
+
 def _block(label: str, records: list[Record], numbers: dict[str, int], triage_ids: list[str]) -> list[str]:
     counts = Counter(r.outcome for r in records)
     summary = ", ".join(f"{counts[outcome]} {text}" for outcome, text in OUTCOME_LABELS.items())
@@ -196,9 +233,13 @@ def cmd_report(args: argparse.Namespace) -> None:
     triage_ids = [q.id for q in lens.triage]
     records = _records(lens_dir / OUTCOMES, frozenset(triage_ids))
     arcs, with_changes = _arcs(lens_dir / ARCS)
+    recall = _recall(lens_dir / RECALL, triage_ids)
     for line in render(records, triage_ids):
         print(line)
     print(f"arcs: {arcs}, {with_changes} with changes")
+    for rid in triage_ids:
+        disagreements, confirmed = recall[rid]
+        print(f"recall {rid}: {disagreements} disagreements, {confirmed} confirmed")
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
