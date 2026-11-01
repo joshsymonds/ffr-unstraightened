@@ -77,7 +77,7 @@ def _change(
     chapter: int | None = 1,
     vanilla: str | None = None,
     text: str = TEXT_ONE,
-    reason: str = "made-up-first-id",
+    reasons: tuple[str, ...] = ("made-up-first-id",),
     writer: Literal["voice", "opus"] = "voice",
 ) -> Change:
     # Made-up change. Not game text.
@@ -88,7 +88,7 @@ def _change(
         vanilla=vanilla_hash(EN_ONE) if vanilla is None else vanilla,
         text=text,
         lens=LENS,
-        reason=reason,
+        reasons=reasons,
         writer=writer,
         run=RUN,
     )
@@ -151,7 +151,7 @@ def test_dialog_entries_round_trip_through_tomllib(tmp_path: Path) -> None:
     write_dialog(
         directory,
         [
-            _change(namespace="made-up-scene-a", key="2", reason="made-up-second-id", writer="opus"),
+            _change(namespace="made-up-scene-a", key="2", reasons=("made-up-second-id",), writer="opus"),
             _change(namespace="made-up-scene-b", key='made-up "quoted" key', chapter=12, vanilla=vanilla_hash(EN_TRICKY), text=TEXT_TRICKY),
         ],
     )
@@ -161,7 +161,7 @@ def test_dialog_entries_round_trip_through_tomllib(tmp_path: Path) -> None:
         "vanilla": vanilla_hash(EN_ONE),
         "text": TEXT_ONE,
         "lens": LENS,
-        "reason": "made-up-second-id",
+        "reason": ["made-up-second-id"],
         "writer": "opus",
         "verdict": "passed",
         "run": RUN,
@@ -172,7 +172,7 @@ def test_dialog_entries_round_trip_through_tomllib(tmp_path: Path) -> None:
         "vanilla": vanilla_hash(EN_TRICKY),
         "text": TEXT_TRICKY,
         "lens": LENS,
-        "reason": "made-up-first-id",
+        "reason": ["made-up-first-id"],
         "writer": "voice",
         "verdict": "passed",
         "run": RUN,
@@ -196,7 +196,7 @@ def test_chapter_and_unattributed_placement_and_table_order(tmp_path: Path) -> N
             _change(namespace="made-up-scene-2", key="10"),
             _change(namespace="made-up-scene-2", key="2"),
             _change(namespace="made-up-scene-3", key='made-up "quoted" key', chapter=12),
-            _change(namespace="made-up-scene-4", key="1", chapter=None, reason="made-up-second-id", writer="opus"),
+            _change(namespace="made-up-scene-4", key="1", chapter=None, reasons=("made-up-second-id",), writer="opus"),
         ],
     )
     assert _dialog_files(directory) == ["chapter-01.toml", "chapter-12.toml", "unattributed.toml"]
@@ -692,6 +692,18 @@ def test_recheck_flags_join_the_screen_reasons_in_lens_order(tmp_path: Path) -> 
     ]
 
 
+def test_a_changed_line_with_two_reasons_writes_both_ids_in_lens_order(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.flags = {(NS_B, "2"): [BETA]}
+    claude.intents = {}
+    claude.drafts[(NS_B, "2")] = [OPUS_B2]
+    claude.rescreen_flags = {(NS_B, "2"): [ALPHA]}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    chapter_two = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-02.toml").read_text(encoding="utf-8"))
+    assert list(chapter_two[NS_B]["2"]) == FIELD_ORDER
+    assert chapter_two[NS_B]["2"]["reason"] == [ALPHA, BETA]
+
+
 def test_recall_counts_are_exact_and_parse_through_report(tmp_path: Path) -> None:
     claude = _claude()
     claude.flags = dict(ALPHA_FLAGGED_ONLY)
@@ -1036,7 +1048,7 @@ def test_outcomes_and_dialog_are_written_and_hold_no_english(tmp_path: Path) -> 
         "vanilla": vanilla_hash(EN_A1),
         "text": VOICE_A1,
         "lens": LENS,
-        "reason": ALPHA,
+        "reason": [ALPHA],
         "writer": "voice",
         "verdict": "passed",
         "run": RUN,

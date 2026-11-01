@@ -53,7 +53,7 @@ class Change:
     vanilla: str
     text: str
     lens: str
-    reason: str
+    reasons: tuple[str, ...]
     writer: WriterName
     run: str
 
@@ -105,7 +105,7 @@ def _table(c: Change) -> str:
         f"vanilla = {toml_string(c.vanilla)}\n"
         f"text = {toml_string(c.text)}\n"
         f"lens = {toml_string(c.lens)}\n"
-        f"reason = {toml_string(c.reason)}\n"
+        f"reason = [{', '.join(toml_string(reason) for reason in c.reasons)}]\n"
         f"writer = {toml_string(c.writer)}\n"
         'verdict = "passed"\n'
         f"run = {toml_string(c.run)}\n\n"
@@ -343,7 +343,7 @@ def _line(
         vanilla=vanilla_hash(line.english),
         text=text,
         lens=ctx.lens.name,
-        reason=reasons[0],
+        reasons=reasons,
         writer=writer,
         run=ctx.run_id,
     )
