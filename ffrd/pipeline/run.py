@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from ffrd.find import BARE_KEY, toml_string
 from ffrd.game import Fail, natural, repo_root, vanilla_hash
-from ffrd.pipeline import arcs, bible, claude, stages
+from ffrd.pipeline import arcs, bible, claude, coherence, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, gate_line
@@ -362,6 +362,20 @@ def _join(
     return joined
 
 
+def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: list[Change], ask: Ask) -> tuple[list[Outcome], list[Change]]:
+    if len(changes) < 2:
+        return outcomes, changes
+    rewrites = {(change.namespace, change.key): change.text for change in changes}
+    scene_arcs = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), None)["arcs"]
+    verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, scene_arcs, ask)
+    if isinstance(verdict, Unfinished | Rejected):
+        return [replace(o, outcome="unfinished", writer=None) if (o.namespace, o.key) in rewrites else o for o in outcomes], []
+    return (
+        [replace(o, outcome="gate_failed", gate="scene", writer=None) if (o.namespace, o.key) in verdict else o for o in outcomes],
+        [change for change in changes if (change.namespace, change.key) not in verdict],
+    )
+
+
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall]:
     cast = arcs.cast(ctx.bibles, _speakers(scene))
     flagged = stages.screen(ctx.store, ctx.lens, scene, cast, ask)
@@ -405,6 +419,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         outcomes.append(outcome)
         if change is not None:
             changes.append(change)
+    outcomes, changes = _coherent(ctx, scene, outcomes, changes, ask)
     return outcomes, changes, recall
 
 

@@ -9,7 +9,7 @@ from typing import Any, Literal
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import bible, report, stages
+from ffrd.pipeline import bible, coherence, report, stages
 from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
@@ -427,6 +427,8 @@ class FakeClaude:
         self.judge_failures: dict[str, Unfinished | Rejected] = {}
         self.consistent: dict[str, bool] = {}
         self.cross_failures: dict[str, Unfinished | Rejected] = {}
+        # Answers for coherence calls in order, first pass then recheck; an empty queue answers coherent. Not game text.
+        self.coherence: list[dict[str, Any] | Unfinished | Rejected] = []
 
     def start_batch(self) -> Ask:
         self.batches += 1
@@ -465,6 +467,8 @@ class FakeClaude:
             if candidate in self.cross_failures:
                 return self.cross_failures[candidate]
             return {"consistent": self.consistent.get(candidate, True)}
+        if schema is coherence.SCHEMA:
+            return self.coherence.pop(0) if self.coherence else {"coherent": True, "revert": []}
         raise AssertionError("unexpected schema")
 
     def _screen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished:
@@ -1251,3 +1255,95 @@ def test_rescreen_receives_the_scene_cast(tmp_path: Path) -> None:
     assert rescreens
     for parts in rescreens:
         assert json.loads(_part(parts, "Cast:\n")) == [CAST_A]
+
+
+# Made-up coherence scene: two flagged lines, both shipping unless the coherence check reverts them. Not game text.
+EN_D1 = "Made-up line one of scene d. Not game text."
+EN_D2 = "Made-up line two of scene d. Not game text."
+OPUS_D1 = "Made-up opus rewrite of d one. Not game text."
+OPUS_D2 = "Made-up opus rewrite of d two. Not game text."
+D1 = (NS_C, "2")
+D2 = (NS_C, "3")
+SCENE_D = Scene("made-up-scene-d", (_line(NS_C, "2", None, EN_D1, 3), _line(NS_C, "3", None, EN_D2, 3)))
+
+
+def _coherence_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.flags = {D1: [ALPHA], D2: [ALPHA]}
+    claude.drafts = {D1: [OPUS_D1], D2: [OPUS_D2]}
+    return claude
+
+
+def _verdict(coherent: bool, *refs: tuple[str, str]) -> dict[str, Any]:
+    return {"coherent": coherent, "revert": [{"namespace": namespace, "key": key} for namespace, key in refs]}
+
+
+def _coherence_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is coherence.SCHEMA]
+
+
+def test_scene_with_two_changes_makes_one_coherence_call_and_keeps_both_when_coherent(tmp_path: Path) -> None:
+    claude = _coherence_claude()
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,))
+    assert len(_coherence_calls(claude)) == 1
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "opus"),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "opus"),
+    ]
+    assert _dialog_entries(tmp_path) == {D1, D2}
+
+
+def test_line_named_on_both_passes_reverts_to_gate_failed_scene_and_its_sibling_ships(tmp_path: Path) -> None:
+    claude = _coherence_claude()
+    claude.coherence = [_verdict(False, D1), _verdict(False, D1)]
+    printed: list[str] = []
+    outcomes = _run(tmp_path, claude, printed, jev=None, scenes=(SCENE_D,))
+    recheck = _coherence_calls(claude)[1]
+    assert json.loads(_part(recheck, "Proposed reverts:\n")) == [{"namespace": NS_C, "key": "2"}]
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "opus"),
+    ]
+    assert _dialog_entries(tmp_path) == {D2}
+    assert printed == [
+        "scene made-up-scene-d: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched",
+        "total: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched",
+    ]
+
+
+def test_line_named_only_on_the_first_pass_ships(tmp_path: Path) -> None:
+    claude = _coherence_claude()
+    claude.coherence = [_verdict(False, D1), _verdict(False)]
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,))
+    assert len(_coherence_calls(claude)) == 2
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "opus"),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "opus"),
+    ]
+    assert _dialog_entries(tmp_path) == {D1, D2}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up coherence failure. Not game text."), Rejected("Made-up coherence rejection. Not game text.")],
+)
+def test_coherence_failure_leaves_every_changed_line_of_the_scene_unfinished(tmp_path: Path, failure: Unfinished | Rejected) -> None:
+    claude = _coherence_claude()
+    claude.coherence = [failure]
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,))
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "unfinished", None, None),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "unfinished", None, None),
+    ]
+    assert _dialog_entries(tmp_path) == set()
+
+
+def test_scene_with_one_change_makes_no_coherence_call(tmp_path: Path) -> None:
+    claude = _coherence_claude()
+    claude.flags = {D1: [ALPHA]}
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,))
+    assert _coherence_calls(claude) == []
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "opus"),
+        Outcome(NS_C, "3", 3, None, (), "untouched", None, None),
+    ]
