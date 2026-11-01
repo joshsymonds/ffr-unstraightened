@@ -520,7 +520,7 @@ def test_probe_is_registered_last_with_its_help(repo: Path, monkeypatch: pytest.
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--help"])
     assert exit_info.value.code == 0
-    assert "run the UE4SS probe on the gnomon host to see which text shape FFR honours" in capsys.readouterr().out
+    assert "run the built mod on the gnomon host beside a probe marker pak and check FFR honours the marker" in capsys.readouterr().out
 
 
 def test_voice_is_registered_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

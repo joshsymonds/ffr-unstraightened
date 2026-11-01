@@ -93,7 +93,7 @@ Set the game's Text Language to English before you play.
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
 | `ffrd run --lens <name> [--no-jev] [--concurrency N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. Keeps up to `N` Claude calls in flight at once, 8 by default. `--through N` keeps only the lines in chapters at or below `N`. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
-| `ffrd probe [--shape {target,full,partial,ue4ss}]` | Checks which text shape the game honours, by running the game on the probe host. Without `--shape`, it tries `target`, then `full`. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
+| `ffrd probe [--shape {target,full,partial,ue4ss}]` | Installs the built mod with a probe-only marker pak beside it on the probe host, and passes when the game honours the marker. Removes both afterwards. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
 | `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
 | `ffrd voice pairs [--check] [--limit N]` | Writes four paraphrases per story line to `work/voice/train.jsonl`, `heldout.jsonl` and `calls.jsonl`: two from Opus, one from Sonnet and one from Haiku. Makes eight calls at a time, spread across the configured Claude accounts. A tenth of the scenes are held out. A rerun resumes from saved results. `--limit N` paraphrases only the first N scenes. `--check` prints the split and the call counts without calling Claude. Prints counts only. See [Voice models](#voice-models). |
@@ -202,8 +202,10 @@ how many arcs have a change, and `recall.json` with, for each triage id, how man
 Jev disagreed with the screen on and how many of those the recheck confirmed. With
 `--no-jev`, Jev is never called and every recall count is zero.
 
-Progress prints scene keys and counts only, one line as each scene finishes. Every model
-result is saved under `work/<name>/` as it arrives, so a rerun resumes where it stopped.
+Progress prints opaque scene labels and counts only, one line as each scene finishes, in
+the form `scene i/n <hash>`, where `<hash>` is an 8-digit hex label of the scene key.
+Every model result is saved under `work/<name>/` as it arrives, so a rerun resumes where
+it stopped.
 Claude calls run through `cswap`, which picks the least-used account. `--concurrency N`
 sets how many Claude calls run at once across the bible, the scenes and the arc judges.
 It defaults to 8 and must be at least 1. The written files are the same whatever the
@@ -257,7 +259,7 @@ prefix outside fallback: 130
 prefix hard excluded: 96
 ```
 
-`run` then prints its progress, with scene keys and counts only. Last, smoke prints one
+`run` then prints its progress, with opaque scene labels and counts only. Last, smoke prints one
 line per required stage with its result count:
 
 ```
@@ -351,20 +353,27 @@ probe host. They use UE4SS, a Lua mod loader for Unreal Engine games. The probe 
 Both commands refuse while FFR runs on the Steam Deck named by `FFR_DECK_HOST`. If the
 Deck cannot be reached, they print a note and go on.
 
-`ffrd probe` checks which shape the game honours. Without `--shape`, it tries `target`
-first, and `full` only when `target` is not honoured. `--shape` probes one of
-`target`, `full`, `partial` or `ue4ss` alone. For each pak shape, it packs one edited
-line of `ST_UI_TitleMenu,UI_Title_Copyright`, installs the pak in the probe host's
-`Paks/~mods` with `.utoc` and `.ucas` copied from its `global` container, and launches
-the game. The `ue4ss` shape installs no pak. It runs the same probe mod beside the
-repo's text mod `ue4ss/UnstraightenedText`, whose `edits.txt` holds the one probe edit.
-The UE4SS mod `ue4ss/UnstraightenedProbe` reads that key's hash from the running game.
-Then the command quits the game and removes the paks and the mods. It exits 0 and names
-the honoured shape, for example `shape honoured: full`. It exits 1 when no shape it
-tried is honoured. When a launch's log holds no observation for the probe key, the run
-is inconclusive: it exits 1 saying the game produced no observation, and tries no
-further shape. It refuses while FFR runs on the probe host, and when the probe
-host's game build differs from `vanilla/BUILDID`.
+`ffrd probe` checks that the game honours the built mod. Without `--shape`, it puts the
+three build files in the probe host's `Paks/~mods` unchanged, beside a probe-only marker
+pak `FFRS-UnstraightenedProbe_P`. The marker is the full shape with one edited line of
+`ST_UI_TitleMenu,UI_Title_Copyright`, and its `.utoc` and `.ucas` are copied from the
+probe host's `global` container. It runs the probe mod and exits 0 when the marker is
+honoured, or 1 when it is not. Then it quits the game and removes every file it put, in
+every outcome.
+
+`--shape` probes one of `target`, `full`, `partial` or `ue4ss` alone. For each pak
+shape, it packs one edited line of the same key, installs the pak in `Paks/~mods` with
+`.utoc` and `.ucas` copied from the `global` container, and launches the game. The
+`ue4ss` shape installs no pak. It runs the same probe mod beside the repo's text mod
+`ue4ss/UnstraightenedText`, whose `edits.txt` holds the one probe edit. The UE4SS mod
+`ue4ss/UnstraightenedProbe` reads that key's hash from the running game. The command
+exits 0 and names the honoured shape, for example `shape honoured: full`. It exits 1
+when the shape is not honoured. When a launch's log holds no observation for the probe
+key, the run is inconclusive: it exits 1 saying the game produced no observation, and
+tries no further shape.
+
+It refuses while FFR runs on the probe host, and when the probe host's game build
+differs from `vanilla/BUILDID`.
 
 `ffrd usmap` runs `ue4ss/UnstraightenedUsmap` on the probe host to dump the game's
 mappings. It saves them to `vanilla/Mappings.usmap`, which git ignores. Re-run it after
@@ -378,6 +387,20 @@ The latest probe runs found the target, full and ue4ss shapes honoured, and the 
 shape not honoured. A plugin localization target, which is not a build shape, was not
 honoured. The ue4ss shape honours edits in English culture only. Run `ffrd probe` again
 after a game update to re-check.
+
+### Release
+
+`just release [tag]` builds the mod, probes it on the probe host, and zips the release.
+The tag defaults to `v1.0.0`. The recipe runs `ffrd build`, then `ffrd probe`, then
+`python3 -m ffrd.release <tag>`. A failing step stops the recipe.
+
+`ffrd.release` refuses a dirty working tree, an invalid tag name, or a tag that already
+exists, before it writes anything. It then writes `dist/FFRS-Unstraightened-<tag>.zip`
+with the three paks and a `NEXUS.md` built from `docs/nexus/description.md`, which takes
+the tag and the game build from `vanilla/BUILDID`. Then it tags HEAD and pushes HEAD and
+the tag to `origin` in one atomic push. If the push fails, it removes the local tag. It
+prints the tag, the file names and the zip path, never game text. Only the maintainer
+runs it, since it pushes to `origin`.
 
 ### Voice models
 

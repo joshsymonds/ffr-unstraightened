@@ -193,7 +193,9 @@ def cmd_usmap(args: argparse.Namespace) -> None:
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    probe = subparsers.add_parser("probe", help="run the UE4SS probe on the gnomon host to see which text shape FFR honours")
+    probe = subparsers.add_parser(
+        "probe", help="run the built mod on the gnomon host beside a probe marker pak and check FFR honours the marker"
+    )
     probe.add_argument(
         "--shape",
         choices=SHAPE_CHOICES,
