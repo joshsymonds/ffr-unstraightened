@@ -328,7 +328,7 @@ LENS_OBJ = Lens(
     intent_rule="Made-up intent rule. Not game text.",
     judge_rubric="Made-up judge rubric. Not game text.",
 )
-ALL_PASS = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "restores_japanese": True}
+ALL_PASS = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "fixed": True, "restores_japanese": True}
 CHAPTER_ONE_BIBLE: dict[str, Any] = {
     "characters": [],
     "facts": [],
@@ -731,6 +731,37 @@ def test_cross_judge_rejecting_every_candidate_fails_the_judge_gate(tmp_path: Pa
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "judge", None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert (NS_A, "1") not in _dialog_entries(tmp_path)
+
+
+def test_unfixed_candidate_fails_the_fixed_gate(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.judgments = {**claude.judgments, OPUS_A1: _judgment(fixed=False), VOICE_A1: _judgment(fixed=False)}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "fixed", None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+
+
+def test_unfixed_japanese_restoring_candidate_never_ships_beside_a_fixed_one(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.judgments = {
+        **claude.judgments,
+        OPUS_A1: _judgment(fixed=False, restores_japanese=True),
+        VOICE_A1: _judgment(restores_japanese=False),
+    }
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice")
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+
+
+def test_both_judges_receive_the_line_reasons_and_intent(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    for schema in (JUDGE_SCHEMA, CROSS_SCHEMA):
+        prompts = [parts for _, parts, called in claude.calls if called is schema and _target(parts) == (NS_A, "1")]
+        assert prompts
+        for parts in prompts:
+            assert _part(parts, "Line reasons:\n") == '[{"id": "made-up-first-id", "question": "Made-up question one. Not game text."}]'
+            assert _part(parts, "Intent:\n") == "Made-up intent. Not game text."
 
 
 def test_rejected_draft_fails_the_writer_gate_after_one_retry_and_is_never_judged(tmp_path: Path) -> None:

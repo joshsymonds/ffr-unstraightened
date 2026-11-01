@@ -6,7 +6,18 @@ from dataclasses import dataclass
 from ffrd.build import PLACEHOLDER, STYLE_OPEN
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 
-GATES: tuple[str, ...] = ("placeholder", "tags", "length", "classifier", "judge", "meaning", "plot", "minimal_change", "callback")
+GATES: tuple[str, ...] = (
+    "placeholder",
+    "tags",
+    "length",
+    "classifier",
+    "judge",
+    "meaning",
+    "plot",
+    "minimal_change",
+    "callback",
+    "fixed",
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +33,7 @@ class Judgment:
     plot: bool
     minimal_change: bool
     callback: bool
+    fixed: bool
     restores_japanese: bool
 
 
@@ -62,6 +74,7 @@ def check(candidate: Candidate, *, classify: Classifier, threshold: float, judge
         ("plot", verdict.plot),
         ("minimal_change", verdict.minimal_change),
         ("callback", verdict.callback),
+        ("fixed", verdict.fixed),
     ):
         if not ok:
             return Failed(candidate, gate)

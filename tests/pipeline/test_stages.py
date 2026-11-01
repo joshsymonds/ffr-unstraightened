@@ -286,10 +286,18 @@ def test_bindings_fails_until_a_later_effort_binds_them() -> None:
 # Made-up line-stage fixtures. Not game text.
 CALLBACK = {"line": {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, "depends": [], "chapter": 1}
 REASONS = ("made-up-alpha",)
+INTENT_TEXT = "Made-up intent. Not game text."
 INTENT_ANSWER = {"intent": "Made-up intent. Not game text."}
 DRAFT_ANSWER = {"drafts": ["Made-up draft one. Not game text.", "Made-up draft two. Not game text."]}
-JUDGE_ANSWER = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "restores_japanese": False}
-JUDGMENT = Judgment(meaning=True, plot=True, minimal_change=True, callback=True, restores_japanese=False)
+JUDGE_ANSWER = {
+    "meaning": True,
+    "plot": True,
+    "minimal_change": True,
+    "callback": True,
+    "fixed": True,
+    "restores_japanese": False,
+}
+JUDGMENT = Judgment(meaning=True, plot=True, minimal_change=True, callback=True, fixed=True, restores_japanese=False)
 CROSS_ANSWER = {"consistent": True}
 
 
@@ -474,8 +482,8 @@ def test_render_exception_propagates_and_stores_nothing(tmp_path: Path) -> None:
     assert len(store.unfinished()) == 1
 
 
-def test_judge_schema_requires_the_five_verdicts_and_forbids_extra_properties() -> None:
-    verdicts = ["meaning", "plot", "minimal_change", "callback", "restores_japanese"]
+def test_judge_schema_requires_the_six_verdicts_and_forbids_extra_properties() -> None:
+    verdicts = ["meaning", "plot", "minimal_change", "callback", "fixed", "restores_japanese"]
 
     assert JUDGE_SCHEMA["type"] == "object"
     assert JUDGE_SCHEMA["required"] == verdicts
@@ -487,9 +495,9 @@ def test_judge_schema_requires_the_five_verdicts_and_forbids_extra_properties() 
 def test_judge_asks_opus_with_schema_and_returns_judgment(tmp_path: Path) -> None:
     ask = Fake(JUDGE_ANSWER)
 
-    result = judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+    result = judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
 
-    assert result == Judgment(meaning=True, plot=True, minimal_change=True, callback=True, restores_japanese=False)
+    assert result == Judgment(meaning=True, plot=True, minimal_change=True, callback=True, fixed=True, restores_japanese=False)
     model, _parts, schema = ask.calls[0]
     assert model == claude.OPUS
     assert schema == JUDGE_SCHEMA
@@ -498,7 +506,7 @@ def test_judge_asks_opus_with_schema_and_returns_judgment(tmp_path: Path) -> Non
 def test_judge_prompt_carries_the_japanese_line_candidate_and_rubric(tmp_path: Path) -> None:
     ask = Fake(JUDGE_ANSWER)
 
-    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
 
     prompt = "\n".join(ask.calls[0][1])
     assert "Made-up Japanese one. Not game text." in prompt
@@ -508,10 +516,13 @@ def test_judge_prompt_carries_the_japanese_line_candidate_and_rubric(tmp_path: P
 
 
 def test_fresh_store_on_same_root_returns_stored_judgment_without_asking(tmp_path: Path) -> None:
-    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], Fake(JUDGE_ANSWER))
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, Fake(JUDGE_ANSWER))
     ask = Fake()
 
-    assert judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask) == JUDGMENT
+    assert (
+        judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
+        == JUDGMENT
+    )
     assert ask.calls == []
 
 
@@ -524,21 +535,21 @@ def test_failed_judge_is_returned_unstored_and_asked_again(tmp_path: Path, failu
     store = Store(tmp_path)
     ask = Fake(failure, JUDGE_ANSWER)
 
-    assert judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask) == failure
+    assert judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask) == failure
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask) == JUDGMENT
+    assert judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask) == JUDGMENT
     assert len(ask.calls) == 2
 
 
 def test_editing_judge_rubric_reruns_judge(tmp_path: Path) -> None:
     store = Store(tmp_path)
     ask = Fake(JUDGE_ANSWER, JUDGE_ANSWER)
-    judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+    judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
     edited = replace(LENS, judge_rubric="Edited judge rubric. Not game text.")
 
-    judge(store, edited, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], ask)
+    judge(store, edited, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
 
     assert len(ask.calls) == 2
 
@@ -553,7 +564,9 @@ def test_cross_judge_schema_requires_consistent_and_forbids_extra_properties() -
 def test_cross_judge_asks_opus_with_schema_and_returns_consistent(tmp_path: Path) -> None:
     ask = Fake(CROSS_ANSWER)
 
-    result = cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+    result = cross_judge(
+        Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask
+    )
 
     assert result is True
     model, parts, schema = ask.calls[0]
@@ -566,10 +579,25 @@ def test_cross_judge_asks_opus_with_schema_and_returns_consistent(tmp_path: Path
 
 
 def test_fresh_store_on_same_root_returns_stored_cross_judge_without_asking(tmp_path: Path) -> None:
-    cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), Fake(CROSS_ANSWER))
+    cross_judge(
+        Store(tmp_path),
+        LENS,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        (LINE_TWO,),
+        REASONS,
+        INTENT_TEXT,
+        Fake(CROSS_ANSWER),
+    )
     ask = Fake()
 
-    assert cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask) is True
+    assert (
+        cross_judge(
+            Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask
+        )
+        is True
+    )
     assert ask.calls == []
 
 
@@ -582,26 +610,87 @@ def test_failed_cross_judge_is_returned_unstored_and_asked_again(tmp_path: Path,
     store = Store(tmp_path)
     ask = Fake(failure, CROSS_ANSWER)
 
-    assert cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask) == failure
+    assert (
+        cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask)
+        == failure
+    )
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask) is True
+    assert (
+        cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask) is True
+    )
     assert len(ask.calls) == 2
 
 
 def test_editing_judge_rubric_reruns_cross_judge(tmp_path: Path) -> None:
     store = Store(tmp_path)
     ask = Fake(CROSS_ANSWER, CROSS_ANSWER)
-    cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+    cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask)
     edited = replace(LENS, judge_rubric="Edited judge rubric. Not game text.")
 
-    cross_judge(store, edited, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+    cross_judge(store, edited, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask)
 
     assert len(ask.calls) == 2
 
 
 # Made-up re-screen fixtures. Not game text.
+
+
+def test_judge_prompt_carries_the_line_reason_questions_and_intent(tmp_path: Path) -> None:
+    ask = Fake(JUDGE_ANSWER)
+
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
+
+    prompt = "\n".join(ask.calls[0][1])
+    assert 'Line reasons:\n[{"id": "made-up-alpha", "question": "Made-up question alpha. Not game text."}]' in prompt
+    assert f"Intent:\n{INTENT_TEXT}" in prompt
+
+
+def test_judge_instructions_say_the_lens_overrides_the_japanese_line(tmp_path: Path) -> None:
+    ask = Fake(JUDGE_ANSWER)
+
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
+
+    instructions = ask.calls[0][1][0]
+    assert "The judge rubric overrides the Japanese line wherever they conflict." in instructions
+
+
+def test_cross_judge_prompt_carries_the_line_reason_questions_and_intent(tmp_path: Path) -> None:
+    ask = Fake(CROSS_ANSWER)
+
+    cross_judge(Store(tmp_path), LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask)
+
+    prompt = "\n".join(ask.calls[0][1])
+    assert 'Line reasons:\n[{"id": "made-up-alpha", "question": "Made-up question alpha. Not game text."}]' in prompt
+    assert f"Intent:\n{INTENT_TEXT}" in prompt
+
+
+def test_different_intent_reruns_judge(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(JUDGE_ANSWER, JUDGE_ANSWER)
+    judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
+
+    judge(
+        store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, "Made-up other intent. Not game text.", ask
+    )
+
+    assert len(ask.calls) == 2
+
+
+def test_editing_triage_question_reruns_judge_and_cross_judge(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(JUDGE_ANSWER, CROSS_ANSWER, JUDGE_ANSWER, CROSS_ANSWER)
+    judge(store, LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
+    cross_judge(store, LENS, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask)
+    edited = replace(LENS, triage=(TriageQuestion("made-up-alpha", "Edited question. Not game text."), LENS.triage[1]))
+
+    judge(store, edited, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, ask)
+    cross_judge(store, edited, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), REASONS, INTENT_TEXT, ask)
+
+    assert len(ask.calls) == 4
+
+
 QUESTION_ALPHA = LENS.triage[0]
 QUESTION_BETA = LENS.triage[1]
 LINE_ONE_REF = {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}

@@ -250,14 +250,18 @@ def _judge(
     line: SceneLine,
     callbacks: Sequence[Mapping[str, Any]],
     candidate: Candidate,
+    reasons: tuple[str, ...],
+    intent: str,
     ask: Ask,
 ) -> Judgment | Unfinished | Rejected:
-    verdict = stages.judge(ctx.store, ctx.lens, scene, line, candidate.text, callbacks, ask)
+    verdict = stages.judge(ctx.store, ctx.lens, scene, line, candidate.text, callbacks, reasons, intent, ask)
     if not isinstance(verdict, Judgment) or not callbacks:
         return verdict
-    if not (verdict.meaning and verdict.plot and verdict.minimal_change and verdict.callback):
+    if not (verdict.meaning and verdict.plot and verdict.minimal_change and verdict.callback and verdict.fixed):
         return verdict
-    consistent = stages.cross_judge(ctx.store, ctx.lens, line, candidate.text, callbacks, _related(ctx, line, callbacks), ask)
+    consistent = stages.cross_judge(
+        ctx.store, ctx.lens, line, candidate.text, callbacks, _related(ctx, line, callbacks), reasons, intent, ask
+    )
     if isinstance(consistent, Unfinished | Rejected):
         return consistent
     return verdict if consistent else replace(verdict, callback=False)
@@ -280,7 +284,7 @@ def _line(
         return _candidates(ctx, scene, line, intended, callbacks, retry, ask, origin)
 
     def judge_candidate(candidate: Candidate) -> Judgment | Unfinished | Rejected:
-        return _judge(ctx, scene, line, callbacks, candidate, ask)
+        return _judge(ctx, scene, line, callbacks, candidate, reasons, intended, ask)
 
     verdict = gate_line(write, classify=ctx.classifier.score, threshold=ctx.classifier.threshold, judge=judge_candidate)
     if isinstance(verdict, Kept):

@@ -8,7 +8,7 @@ ENGLISH = "abc"
 
 
 def _judgment(restores: bool) -> Judgment:
-    return Judgment(meaning=True, plot=True, minimal_change=True, callback=True, restores_japanese=restores)
+    return Judgment(meaning=True, plot=True, minimal_change=True, callback=True, fixed=True, restores_japanese=restores)
 
 
 def _passed(text: str, restores: bool, english: str = ENGLISH) -> Passed:

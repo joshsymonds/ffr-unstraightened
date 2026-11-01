@@ -13,7 +13,7 @@ THRESHOLD = 0.5
 
 
 def _judgment(**overrides: bool) -> Judgment:
-    fields = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "restores_japanese": True}
+    fields = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "fixed": True, "restores_japanese": True}
     fields.update(overrides)
     return Judgment(**fields)
 
@@ -69,11 +69,12 @@ FAILING: dict[str, tuple[Candidate, float, Judgment | Rejected]] = {
     "plot": (_candidate(TEXT_OK), 1.0, _judgment(plot=False)),
     "minimal_change": (_candidate(TEXT_OK), 1.0, _judgment(minimal_change=False)),
     "callback": (_candidate(TEXT_OK), 1.0, _judgment(callback=False)),
+    "fixed": (_candidate(TEXT_OK), 1.0, _judgment(fixed=False)),
 }
 
 
 def test_gate_names_are_the_chain_order() -> None:
-    assert GATES == ("placeholder", "tags", "length", "classifier", "judge", "meaning", "plot", "minimal_change", "callback")
+    assert GATES == ("placeholder", "tags", "length", "classifier", "judge", "meaning", "plot", "minimal_change", "callback", "fixed")
 
 
 def test_clean_candidate_passes_with_its_judgment() -> None:
@@ -193,8 +194,9 @@ def test_text_failing_two_validators_names_the_earlier(text: str, gate: str) -> 
     [
         (_judgment(plot=False, minimal_change=False), "plot"),
         (_judgment(minimal_change=False, callback=False), "minimal_change"),
+        (_judgment(callback=False, fixed=False), "callback"),
     ],
-    ids=["plot-before-minimal-change", "minimal-change-before-callback"],
+    ids=["plot-before-minimal-change", "minimal-change-before-callback", "callback-before-fixed"],
 )
 def test_judgment_failing_two_checks_names_the_earlier(judgment: Judgment, gate: str) -> None:
     candidate = _candidate(TEXT_OK)

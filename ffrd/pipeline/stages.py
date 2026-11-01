@@ -374,14 +374,16 @@ def render(store: Store, renderer: Renderer, speaker: str | None, text: str) -> 
 
 
 JUDGE_INSTRUCTIONS = (
-    "Judge a candidate rewrite of the target line. Return JSON with five booleans. meaning: the candidate keeps the "
-    "meaning of the English line. plot: the plot is unchanged. minimal_change: the candidate changes no more than it "
-    "must; moving toward the Japanese line counts as minimal change. callback: every callback still holds. "
-    "restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese line is the meaning "
-    "reference. Refer to lines only by namespace and key."
+    "Judge a candidate rewrite of the target line. Return JSON with six booleans. meaning: the candidate keeps "
+    "everything the judge rubric protects: the plot facts, who loves whom, the character traits and the beat. plot: "
+    "the plot is unchanged. minimal_change: the candidate changes no more than it must; moving toward the Japanese "
+    "line counts as minimal change. callback: every callback still holds. fixed: the candidate answers no to every "
+    "line reason question. restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese "
+    "line is the meaning reference. The judge rubric overrides the Japanese line wherever they conflict. Refer to "
+    "lines only by namespace and key."
 )
 
-JUDGE_VERDICTS = ("meaning", "plot", "minimal_change", "callback", "restores_japanese")
+JUDGE_VERDICTS = ("meaning", "plot", "minimal_change", "callback", "fixed", "restores_japanese")
 
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -391,6 +393,14 @@ JUDGE_SCHEMA: dict[str, Any] = {
 }
 
 
+def _judge_lens_text(lens: Lens) -> str:
+    return lens.stage_text("judge") + "\n" + lens.stage_text("triage")
+
+
+def _reason_questions(lens: Lens, reasons: Sequence[str]) -> list[dict[str, str]]:
+    return [{"id": question.id, "question": question.question} for question in lens.triage if question.id in reasons]
+
+
 def judge(
     store: Store,
     lens: Lens,
@@ -398,11 +408,15 @@ def judge(
     line: SceneLine,
     text: str,
     callbacks: Sequence[Mapping[str, Any]],
+    reasons: Sequence[str],
+    intent: str,
     ask: Ask,
 ) -> Judgment | Unfinished | Rejected:
     parts = [
         JUDGE_INSTRUCTIONS,
         f"Judge rubric:\n{lens.stage_text('judge')}",
+        f"Line reasons:\n{_json(_reason_questions(lens, reasons))}",
+        f"Intent:\n{intent}",
         f"Target line:\n{_json({**_line_ref(line), 'english': line.english, 'japanese': line.japanese})}",
         f"Candidate:\n{text}",
         f"Callbacks:\n{_json(list(callbacks))}",
@@ -415,17 +429,25 @@ def judge(
             raise _Unanswered(answer)
         return asdict(Judgment(**answer))
 
-    inputs = {**_inputs(scene), "line": _line_ref(line), "text": text, "callbacks": list(callbacks)}
+    inputs = {
+        **_inputs(scene),
+        "line": _line_ref(line),
+        "text": text,
+        "callbacks": list(callbacks),
+        "reasons": list(reasons),
+        "intent": intent,
+    }
     try:
-        return Judgment(**store.run("judge", inputs, lens.stage_text("judge"), call).value)
+        return Judgment(**store.run("judge", inputs, _judge_lens_text(lens), call).value)
     except _Unanswered as unanswered:
         return unanswered.failure
 
 
 CROSS_INSTRUCTIONS = (
     "Decide whether the candidate rewrite of the target line stays consistent with every callback and with the "
-    "related lines, which may come from any scene. Follow the judge rubric. Return JSON with consistent, true only "
-    "if the candidate is consistent with all of them. Refer to lines only by namespace and key."
+    "related lines, which may come from any scene. Follow the judge rubric. The line reasons and the intent say what "
+    "the rewrite must do. Return JSON with consistent, true only if the candidate is consistent with all of them. "
+    "Refer to lines only by namespace and key."
 )
 
 CROSS_SCHEMA: dict[str, Any] = {
@@ -443,11 +465,15 @@ def cross_judge(
     text: str,
     callbacks: Sequence[Mapping[str, Any]],
     related: Sequence[SceneLine],
+    reasons: Sequence[str],
+    intent: str,
     ask: Ask,
 ) -> bool | Unfinished | Rejected:
     parts = [
         CROSS_INSTRUCTIONS,
         f"Judge rubric:\n{lens.stage_text('judge')}",
+        f"Line reasons:\n{_json(_reason_questions(lens, reasons))}",
+        f"Intent:\n{intent}",
         f"Target line:\n{_json({**_line_ref(line), 'english': line.english})}",
         f"Candidate:\n{text}",
         f"Callbacks:\n{_json(list(callbacks))}",
@@ -465,8 +491,10 @@ def cross_judge(
         "text": text,
         "callbacks": list(callbacks),
         "related": _line_dicts(related),
+        "reasons": list(reasons),
+        "intent": intent,
     }
     try:
-        return store.run("cross_judge", inputs, lens.stage_text("judge"), call).value
+        return store.run("cross_judge", inputs, _judge_lens_text(lens), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
