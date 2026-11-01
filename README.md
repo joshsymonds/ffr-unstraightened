@@ -170,6 +170,11 @@ probe host. They use UE4SS, a Lua mod loader for Unreal Engine games. The probe 
   `WINEDLLOVERRIDES="dwmapi=n,b"` in the Steam launch options.
 - If the session sets `d3dcompiler_47=n`, UE4SS hangs at start. Allow the builtin
   fallback for this game, for example with a protonfixes local fix for app 3259780.
+- With no monitor connected, the game hangs at start under Proton's native Wayland
+  driver, which is the host-wide default (`PROTON_USE_WAYLAND=1`). Probe launches need
+  the X11 driver. The same protonfixes local fix for app 3259780 switches launches that
+  pass `-RenderOffscreen` to X11. Only probe launches pass that flag, so the player's own
+  launches keep their driver.
 - Nothing else in the game folder changes.
 
 Both commands refuse while FFR runs on the Steam Deck named by `FFR_DECK_HOST`. If the
