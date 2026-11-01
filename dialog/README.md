@@ -11,12 +11,21 @@ Each edit is one table. The header names the namespace and the key:
 - The namespace is quoted.
 - The key is bare when it is a valid bare TOML key. Otherwise quote it.
 
-Each table has exactly two fields:
+`ffrd run` writes each table with seven fields, in this order:
 
 - `vanilla` is the `vanilla_hash` of the game's current English line for that key. It is
   the first 16 lowercase hex characters of the SHA-256 of the UTF-8 line. The function is
   `vanilla_hash` in `ffrd/game.py`.
-- `text` is your replacement line.
+- `text` is the replacement line.
+- `lens` is the lens name, which is the `lenses/<name>.toml` file that screened the line.
+- `reason` is a list of the lens triage ids the screen flagged the line for, in lens
+  order.
+- `writer` is `"voice"` or `"opus"`.
+- `verdict` is always `"passed"`.
+- `run` is the run id, a UTC timestamp in `YYYYMMDDTHHMMSSZ` form.
+
+`ffrd build` reads only `vanilla` and `text` and ignores the other five fields. A hand
+edit needs only `vanilla` and `text`.
 
 Edits are keyed by namespace and key, and matched by `vanilla` hash. A stub from
 `ffrd find` sets `text` to the vanilla line, so replace it with your line before
