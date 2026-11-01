@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import polib
@@ -8,7 +9,7 @@ import pytest
 from pylocres import Entry, LocresFile, Namespace
 
 from ffrd import cli, extract, install
-from ffrd.game import LOCRES, MOD_NAME
+from ffrd.game import LOCRES, MOD_NAME, vanilla_hash
 
 EXTS = ("pak", "utoc", "ucas")
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -123,39 +124,69 @@ def test_python_m_ffrd_runs_cli_main(repo: Path, tmp_path: Path) -> None:
     assert result.stderr == f"ffrd: no game install at {missing} (set FFR_GAME)\n"
 
 
-ENTRY_TWO = '#. ja: 合成テキスト二\nmsgctxt "ST_C01_001_01,2"\nmsgid "Synthetic line two."\nmsgstr ""\n\n'
-ENTRY_TEN = '#. ja: 合成テキスト十\nmsgctxt "ST_C01_001_01,10"\nmsgid "Synthetic line ten."\nmsgstr ""\n\n'
-ENTRY_SAME = 'msgctxt "ST_C03_002_01,1"\nmsgid "Same in both."\nmsgstr ""\n\n'
+STUB_TWO = '["ST_C01_001_01".2]\nvanilla = "dcc4be08fef05464"\ntext = "Synthetic line two."\n\n'
+STUB_TEN = '["ST_C01_001_01".10]\nvanilla = "49c8ad88d95de4f8"\ntext = "Synthetic line ten."\n\n'
+STUB_SAME = '["ST_C03_002_01".1]\nvanilla = "6ff2fc2682a12379"\ntext = "Same in both."\n\n'
 
 
-def test_find_without_arguments_prints_every_non_empty_english_entry_in_scene_order(
+def test_find_without_arguments_prints_every_non_empty_english_stub_in_scene_order(
     fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cli.main(["find"])
     captured = capsys.readouterr()
-    assert captured.out == ENTRY_TWO + ENTRY_TEN + ENTRY_SAME
+    assert captured.out == STUB_TWO + STUB_TEN + STUB_SAME
     assert captured.err == "# 3 entries\n"
 
 
 def test_find_pattern_matches_text_case_insensitively(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "SYNTHETIC LINE TWO"])
     captured = capsys.readouterr()
-    assert captured.out == ENTRY_TWO
+    assert captured.out == STUB_TWO
     assert captured.err == "# 1 entries\n"
 
 
 def test_find_pattern_matches_key(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "^10$"])
     captured = capsys.readouterr()
-    assert captured.out == ENTRY_TEN
+    assert captured.out == STUB_TEN
     assert captured.err == "# 1 entries\n"
 
 
 def test_find_ns_option_filters_namespaces_by_regex(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "--ns", "^ST_C03_"])
     captured = capsys.readouterr()
-    assert captured.out == ENTRY_SAME
+    assert captured.out == STUB_SAME
     assert captured.err == "# 1 entries\n"
+
+
+def test_find_does_not_read_japanese_text(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (fake_vanilla / "pak" / LOCRES / "ja" / "Game.locres").unlink()
+    cli.main(["find", "--ns", "^ST_C03_"])
+    captured = capsys.readouterr()
+    assert captured.out == STUB_SAME
+    assert captured.err == "# 1 entries\n"
+
+
+def test_find_stubs_parse_back_to_the_exact_english_text_and_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines = (
+        ('ST_"T"\\01', 'key "quoted" 1', 'Quote " and backslash \\ here.'),
+        ('ST_"T"\\01', "plain_key-9", "line one\nline two\rthree\tfour"),
+        ("ST_T02_001", "del\x7fchar", "del\x7f, ctrl\x01 and é 日本語 ✓"),
+    )
+    root = tmp_path / "vanilla"
+    path = root / "pak" / LOCRES / "en" / "Game.locres"
+    path.parent.mkdir(parents=True)
+    locres_file(lines).write(str(path))
+    monkeypatch.setenv("FFR_VANILLA", str(root))
+    cli.main(["find"])
+    captured = capsys.readouterr()
+    expected: dict[str, dict[str, dict[str, str]]] = {}
+    for ns, key, text in lines:
+        expected.setdefault(ns, {})[key] = {"vanilla": vanilla_hash(text), "text": text}
+    assert tomllib.loads(captured.out) == expected
+    assert captured.err == "# 3 entries\n"
 
 
 def test_find_skips_empty_english_lines(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -181,7 +212,7 @@ def test_find_is_registered_with_its_help(repo: Path, monkeypatch: pytest.Monkey
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--help"])
     assert exit_info.value.code == 0
-    assert "print vanilla entries as .po, ready to paste into dialog/" in capsys.readouterr().out
+    assert "print vanilla entries as TOML stubs, ready to paste into dialog/" in capsys.readouterr().out
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["find", "--help"])
     assert exit_info.value.code == 0
