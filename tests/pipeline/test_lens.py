@@ -160,3 +160,14 @@ def test_editing_one_stage_changes_only_that_stage_text(tmp_path: Path) -> None:
     assert edited.stage_text("judge") != original.stage_text("judge")
     for stage in ("triage", "screen", "intent"):
         assert edited.stage_text(stage) == original.stage_text(stage)
+
+
+README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
+FENCED_TOML = re.compile(r"^```toml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
+
+
+def test_readme_example_is_a_valid_lens(tmp_path: Path) -> None:
+    blocks = FENCED_TOML.findall(README.read_text(encoding="utf-8"))
+    assert len(blocks) == 1
+    lens = load_lens(write_lens(tmp_path, blocks[0], name="readme-example"))
+    assert [question.id for question in lens.triage] == ["made-up-first-id", "made-up-second-id"]
