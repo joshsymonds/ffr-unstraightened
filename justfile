@@ -20,3 +20,6 @@ typecheck:
 
 test *args:
     pytest {{args}}
+
+check-provenance:
+    python3 -m ffrd.provenance
