@@ -13,7 +13,8 @@ missing from a stage fails the lens test.
 - Keep the story: its plot, relationships and stakes.
 - Do not make a queer rewrite.
 - Dial back romance that is forced to matter, and earnest melodrama.
-- Give every character their own center of gravity. Their goals, fears and worth belong to them.
+- Give women their own center of gravity. Their goals, fears and worth belong to them.
+- Characters supporting themselves and each other is never a defect.
 - Keep character traits.
 - Keep the game's operatic moments.
 - Act on every clear rule hit, and change each changed line minimally and fully.
@@ -54,10 +55,9 @@ allowed.
 
 - Trigger: A character in this scene explains their own goal, fear or worth in terms
   of what another specific character thinks of them or needs from them.
-- Fix: When the line is about that character, return their own stake. Their
-  goal, fear or worth goes back to them, not through the other character. Keep the
-  other character and the relationship; change only the routing.
-- This rule applies to every character, whatever their gender.
+- Fix: When the line is about a woman, return her own stake. Her goal, fear or
+  worth goes back to her, not through a man.
+- The screen applies the woman clause. It receives cast notes with gender.
 
 ### u5-rivalry-over-one-person
 
@@ -103,7 +103,7 @@ allowed.
   who has no partner as incomplete counts. So does treating marriage as what a life
   is for. The same earned and trait exemptions apply.
 - `all-characters`. The rules apply to every character's romance framing, not only
-  women's. u4 applies to every character. Only u5 keeps a woman clause.
+  women's.
 
 ## Protections
 
@@ -111,6 +111,9 @@ A change that touches a protection is rejected by the judge.
 
 - `protect-love-and-couples`. Heterosexual attraction, couples, marriages and
   promises stay as they are. So does who loves whom.
+- `protect-mutual-support`. Characters supporting themselves or each other stay,
+  whatever their genders: relying on, helping, encouraging or drawing strength from
+  another character. This protection wins over every rule, u4 included.
 - `protect-plot`. Plot facts stay as they are.
 - `protect-traits`. Character traits stay, including a character's own straight
   desire. A flirt toned down is a defect.
@@ -126,7 +129,8 @@ A change that touches a protection is rejected by the judge.
 
 - `act-on-clear-hits`. Change every flagged line that clearly hits a rule. A clear
   hit stays vanilla only when an exemption applies, when it does not really hit the
-  rule, or under `leave-for-plot`. The screen flags mild and brief hits too.
+  rule, when every fix would touch a protection, or under `leave-for-plot`. The
+  screen flags mild and brief hits too.
 - `minimal-fix`. Change each changed line minimally: only the words the fix needs,
   and never a neighboring line. Each changed line must be fully fixed.
 - `leave-for-plot`. A line that needs a plot change stays vanilla.

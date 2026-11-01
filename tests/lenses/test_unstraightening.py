@@ -7,7 +7,6 @@ from ffrd.pipeline.lens import Lens, Stage, TriageQuestion, load_lens
 
 LENS = Path(__file__).resolve().parents[2] / "lenses" / "unstraightening.toml"
 LABEL = re.compile(r"\[([a-z0-9]+(?:-[a-z0-9]+)*)\]")
-GENDERED = re.compile(r"\b(?:woman|women|man|men|she|her|hers|he|him|his)\b", re.IGNORECASE)
 U4 = "u4-stake-through-other"
 
 # DL23's seven triage questions, verbatim, in id order u1..u7.
@@ -45,6 +44,7 @@ TRIAGE: tuple[TriageQuestion, ...] = (
 RULES: tuple[str, ...] = tuple(q.id for q in TRIAGE)
 PROTECTIONS: tuple[str, ...] = (
     "protect-love-and-couples",
+    "protect-mutual-support",
     "protect-plot",
     "protect-traits",
     "protect-operatic-stakes",
@@ -135,7 +135,14 @@ def labelled(lens: Lens, stage: Stage, label: str) -> list[str]:
 
 
 @pytest.mark.parametrize("stage", BOUND_STAGES)
-def test_u4_applies_to_every_character_without_a_gender_clause(lens: Lens, stage: Stage) -> None:
+def test_u4_is_a_womans_stake_routed_through_a_man(lens: Lens, stage: Stage) -> None:
     (text,) = labelled(lens, stage, U4)
-    assert GENDERED.findall(text) == []
-    assert "gender" in text
+    assert re.search(r"\bwoman\b", text)
+    assert re.search(r"\bman\b", text)
+
+
+@pytest.mark.parametrize("stage", BOUND_STAGES)
+def test_mutual_support_wins_over_every_rule(lens: Lens, stage: Stage) -> None:
+    (text,) = labelled(lens, stage, "protect-mutual-support")
+    assert "every rule" in text
+    assert U4 in text
