@@ -74,7 +74,8 @@ def test_build_applies_toml_edits_from_nested_dialog_folders(
     cli.main(["build"])
     build = repo / "build"
     original = contents(vanilla())
-    assert contents(packed_locres(repo, "Unstraightened.locres", tmp_path)) == {
+    assert contents(packed_locres(repo, "Game.locres", tmp_path)) == {
+        **original,
         ("ST_C01_001_01", "10"): ("Edited ten.", original[("ST_C01_001_01", "10")][1]),
         ("ST_C01_001_01", "2"): ("Edited two.", original[("ST_C01_001_01", "2")][1]),
     }
@@ -83,11 +84,11 @@ def test_build_applies_toml_edits_from_nested_dialog_folders(
     assert capsys.readouterr().out == f"2 lines overridden -> build/{MOD_NAME}.{OUT}\n"
 
 
-def test_default_build_packs_only_the_edited_entries_into_unstraightened_locres(
+def test_partial_build_packs_only_the_edited_entries_into_unstraightened_locres(
     fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path
 ) -> None:
     write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
-    cli.main(["build"])
+    cli.main(["build", "--partial"])
     listing = pak_listing(repo)
     assert f"{LOCRES}/en/Unstraightened.locres" in listing
     assert f"{LOCRES}/en/Game.locres" not in listing
@@ -96,12 +97,12 @@ def test_default_build_packs_only_the_edited_entries_into_unstraightened_locres(
     }
 
 
-def test_full_build_packs_the_whole_english_table_with_edits_applied(
+def test_default_build_packs_the_whole_english_table_with_edits_applied(
     fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path
 ) -> None:
     write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
     write_edits(repo, "scenes/deep/two.toml", edit("ST_C01_001_01", "2", TWO, "Edited two."))
-    cli.main(["build", "--full"])
+    cli.main(["build"])
     listing = pak_listing(repo)
     assert f"{LOCRES}/en/Game.locres" in listing
     assert "Unstraightened.locres" not in listing
@@ -111,7 +112,14 @@ def test_full_build_packs_the_whole_english_table_with_edits_applied(
     assert contents(packed_locres(repo, "Game.locres", tmp_path)) == expected
 
 
-@pytest.mark.parametrize("argv", [["build"], ["build", "--full"]], ids=["default", "full"])
+def test_full_flag_is_rejected_as_an_unknown_argument(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build", "--full"])
+    assert exit_info.value.code == 2
+    assert "unrecognized arguments: --full" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["build"], ["build", "--partial"]], ids=["default", "partial"])
 def test_build_writes_the_unstraightened_mod_files_in_both_shapes(
     argv: list[str], fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -124,10 +132,10 @@ def test_build_writes_the_unstraightened_mod_files_in_both_shapes(
     assert capsys.readouterr().out == f"1 lines overridden -> build/FFRS-Unstraightened_P.{OUT}\n"
 
 
-def test_zero_edits_full_build_packs_the_vanilla_english_table(
+def test_zero_edits_default_build_packs_the_vanilla_english_table(
     fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cli.main(["build", "--full"])
+    cli.main(["build"])
     assert capsys.readouterr().out == f"0 lines overridden -> build/{MOD_NAME}.{OUT}\n"
     assert contents(packed_locres(repo, "Game.locres", tmp_path)) == contents(vanilla())
 
@@ -231,7 +239,7 @@ def test_build_warns_on_stderr_when_an_edit_drops_a_placeholder_and_still_builds
     captured = capsys.readouterr()
     assert captured.err == "warning: dialog/warn.toml: ST_C01_001_01,10 drops placeholders ['{name}']\n"
     assert captured.out == f"1 lines overridden -> build/{MOD_NAME}.{OUT}\n"
-    assert packed_locres(repo, "Unstraightened.locres", tmp_path)["ST_C01_001_01"]["10"].translation == "Hello there, line ten."
+    assert packed_locres(repo, "Game.locres", tmp_path)["ST_C01_001_01"]["10"].translation == "Hello there, line ten."
 
 
 @pytest.mark.parametrize("make_empty_dialog", [False, True], ids=["missing", "empty"])
@@ -240,7 +248,7 @@ def test_build_with_no_dialog_edits_packs_an_empty_unstraightened_locres(
 ) -> None:
     if make_empty_dialog:
         (repo / "dialog").mkdir()
-    cli.main(["build"])
+    cli.main(["build", "--partial"])
     assert capsys.readouterr().out == f"0 lines overridden -> build/{MOD_NAME}.{OUT}\n"
     assert f"{LOCRES}/en/Unstraightened.locres" in pak_listing(repo)
     assert contents(packed_locres(repo, "Unstraightened.locres", tmp_path)) == {}

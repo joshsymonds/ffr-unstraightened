@@ -5,12 +5,12 @@ inside the legacy .pak. The mod ships its own English locres in the same
 folder, plus a .utoc/.ucas pair the loader requires (copies of the game's
 empty global container). Two shapes:
 
-- default: en/Unstraightened.locres, holding only the edited entries, each
-  under its namespace, key and vanilla source-string hash. It relies on the
-  game honouring a second en/*.locres over Game.locres, which is unproven.
-- --full: en/Game.locres, holding the whole English table with the edits
-  applied. It replaces the game's table and is the fallback if the default
-  is not honoured.
+- default: en/Game.locres, holding the whole English table with the edits
+  applied. It replaces the game's table, and the game was seen to honour it.
+- --partial: en/Unstraightened.locres, holding only the edited entries, each
+  under its namespace, key and vanilla source-string hash. The game was seen
+  to ignore a second en/*.locres for an entry Game.locres already holds, so
+  this shape does not change those entries.
 """
 
 import argparse
@@ -112,12 +112,12 @@ def cmd_build(args: argparse.Namespace) -> None:
     if errors:
         raise Fail("\n".join(errors))
 
-    if args.full:
+    if args.partial:
+        table, name = partial_table(en, overrides), "Unstraightened.locres"
+    else:
         for (ns, key), text in overrides.items():
             en[ns][key].translation = text
         table, name = en, "Game.locres"
-    else:
-        table, name = partial_table(en, overrides), "Unstraightened.locres"
 
     out = root / "build"
     if out.exists():
@@ -144,5 +144,9 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     build = subparsers.add_parser("build", help="apply dialog/**/*.toml edits to vanilla text and pack the mod into build/")
-    build.add_argument("--full", action="store_true", help="pack the whole English table (Game.locres), not only the edited entries")
+    build.add_argument(
+        "--partial",
+        action="store_true",
+        help="pack only the edited entries as en/Unstraightened.locres; the game was seen to ignore it for entries Game.locres holds",
+    )
     build.set_defaults(fn=cmd_build)

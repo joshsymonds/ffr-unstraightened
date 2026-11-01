@@ -79,7 +79,7 @@ Set the game's Text Language to English before you play.
 | `ffrd extract` | Unpacks the English and Japanese `Game.locres` from the installed game's paks into `vanilla/`, later patch paks winning. Writes `vanilla/BUILDID` and a reference `vanilla/en.po`. Run it after install and after every game update. |
 | `ffrd progress <chapter>` | Records the chapter you are on. `ffrd progress` with no argument prints the recorded chapter. |
 | `ffrd find [pattern] [-n NS]` | Prints vanilla entries as TOML stubs for `dialog/`. `pattern` is a case-insensitive regex matched against text or key. `-n` is a regex the namespace must match. Requires recorded progress. Prints `# N shown, M withheld` to stderr. |
-| `ffrd build [--full]` | Checks every `dialog/**/*.toml` edit against the game's text, then writes the mod files to `build/`. `--full` packs the whole English table with the edits applied. |
+| `ffrd build [--partial]` | Checks every `dialog/**/*.toml` edit against the game's text, then writes the mod files to `build/`. By default it packs the whole English table with the edits applied. `--partial` packs only the edited entries, which the game was seen to ignore. |
 | `ffrd install [--deck]` | Copies the three mod files into `<game>/FFRS/Content/Paks/~mods`. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
@@ -94,8 +94,9 @@ Each `ffrd build` writes `build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas`.
 The `.utoc` and `.ucas` files are copies of the game's empty `global` container,
 which the loader requires.
 
-The default build writes `en/Unstraightened.locres`, which holds only the edited
-entries. See [Limits](#limits).
+The default build writes `en/Game.locres`, which holds the whole English table with the
+edits applied. `ffrd build --partial` writes `en/Unstraightened.locres` instead, which
+holds only the edited entries. See [Limits](#limits).
 
 `ffrd find` only shows lines from chapters at or below the chapter you recorded.
 Namespaces that name no chapter are never shown. A namespace names a chapter when it
@@ -115,11 +116,11 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
 
 ## Limits
 
-- **The default build is partial, and its loading is unproven.** `ffrd build` writes
-  `en/Unstraightened.locres`, which holds only the edited entries. It relies on the
-  game honouring a second `en/*.locres` over `Game.locres`. That behaviour is not
-  confirmed. If the game ignores the partial table, use `ffrd build --full`. It packs
-  the whole English table with the edits applied, and it replaces the game's table.
+- **`--partial` does not work for edited entries.** `ffrd build --partial` writes
+  `en/Unstraightened.locres`, which holds only the edited entries. The game was seen to
+  ignore a second `en/*.locres` for an entry `Game.locres` already holds, so the edits
+  have no effect. The default build replaces `Game.locres` with the whole English table
+  and the edits applied, which the game was seen to honour.
 - **Game updates block builds.** `ffrd build` refuses to run when the game has
   updated since `ffrd extract`. The error says to run `ffrd extract` and rebuild.
 - **Edits fail on changed lines.** An edit whose `vanilla` hash no longer matches the
