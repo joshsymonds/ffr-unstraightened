@@ -1,6 +1,4 @@
 import argparse
-import json
-from pathlib import Path
 
 import pytest
 
@@ -25,12 +23,19 @@ def pair(split: str, n: int) -> Pair:
     )
 
 
+STAGED_COUNT = 7
+
+
 @pytest.fixture
-def calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
     log: list[tuple[object, ...]] = []
-    monkeypatch.setattr(lora, "work_dir", lambda lens: tmp_path / "work" / lens)
+
+    def fake_stage(rows: list[dict[str, str]], name: str) -> int:
+        log.append(("stage", list(rows), name))
+        return STAGED_COUNT
+
     monkeypatch.setattr(remote, "sync", lambda: log.append(("sync",)))
-    monkeypatch.setattr(remote, "push", lambda local, name: log.append(("push", name, local.read_text(encoding="utf-8"))))
+    monkeypatch.setattr(remote, "stage", fake_stage)
     monkeypatch.setattr(remote, "run", lambda argv: log.append(("run", list(argv))))
     return log
 
@@ -58,21 +63,17 @@ def test_records_skips_heldout_pairs_entirely() -> None:
     assert lora.records([pair("heldout", 1)]) == []
 
 
-def test_train_stages_records_then_syncs_pushes_and_runs(
-    calls: list[tuple[object, ...]], train_pairs: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_train_syncs_then_stages_train_records_then_runs(
+    calls: list[tuple[object, ...]], train_pairs: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     lora.train()
 
-    staged = tmp_path / "work" / "voice" / "staging" / "lora.jsonl"
-    staged_text = staged.read_text(encoding="utf-8")
-    assert [json.loads(line) for line in staged_text.splitlines()] == lora.records([pair("train", 1)])
-    assert sorted(p.name for p in staged.parent.iterdir()) == ["lora.jsonl"]
     assert calls == [
         ("sync",),
-        ("push", lora.DATA, staged_text),
+        ("stage", lora.records([pair("train", 1)]), lora.DATA),
         ("run", [*TRAIN_ARGV, "1"]),
     ]
-    assert capsys.readouterr().out == "staged 1 lora records\n"
+    assert capsys.readouterr().out == f"staged {STAGED_COUNT} lora records\n"
 
 
 def test_train_passes_epochs_to_the_finetune_job(calls: list[tuple[object, ...]], train_pairs: None) -> None:
