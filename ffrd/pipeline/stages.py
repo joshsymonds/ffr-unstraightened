@@ -3,6 +3,7 @@
 import atexit
 import json
 import re
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
@@ -120,25 +121,31 @@ class _Classifier:
     def __init__(self, stack: ExitStack) -> None:
         self._stack = stack
         self._scorer: classifier.Scorer | None = None
+        self._lock = threading.Lock()
 
     def score(self, text: str) -> float:
-        if self._scorer is None:
-            remote.sync()
-            self._scorer = self._stack.enter_context(classifier.Scorer())
-        return self._scorer.score(text)
+        # The scorer talks over one pipe, so the open and each score run one at a time.
+        with self._lock:
+            if self._scorer is None:
+                remote.sync()
+                self._scorer = self._stack.enter_context(classifier.Scorer())
+            return self._scorer.score(text)
 
 
 class _Renderer:
     def __init__(self, stack: ExitStack) -> None:
         self._stack = stack
         self._render: Callable[[str, str], str] | None = None
+        self._lock = threading.Lock()
 
     def render(self, speaker: str | None, text: str) -> str:
         if speaker is None:
             return text
-        if self._render is None:
-            self._render = self._stack.enter_context(voice_render.rendering())
-        return self._render(speaker, text)
+        with self._lock:
+            if self._render is None:
+                self._render = self._stack.enter_context(voice_render.rendering())
+            render = self._render
+        return render(speaker, text)
 
 
 def bindings() -> Bindings:
@@ -170,12 +177,16 @@ class Batch:
         self._choose = choose
         self._ask = ask
         self._account: int | None = None
+        self._lock = threading.Lock()
 
     def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
-        if self._account is None:
-            self._account = self._choose()
-        account, answer = self._ask(self._account, model, parts, schema)
-        self._account = account
+        with self._lock:
+            if self._account is None:
+                self._account = self._choose()
+            account = self._account
+        answered, answer = self._ask(account, model, parts, schema)
+        with self._lock:
+            self._account = answered
         return answer
 
 

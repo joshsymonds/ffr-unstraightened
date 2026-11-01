@@ -5,8 +5,10 @@ import json
 import os
 import re
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +19,7 @@ from ffrd.game import Fail, natural, repo_root, vanilla_hash
 from ffrd.pipeline import arcs, bible, claude, coherence, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
-from ffrd.pipeline.gates import Candidate, Judgment, Kept, gate_line
+from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line
 from ffrd.pipeline.lens import Lens, load_lens
 from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL
 from ffrd.pipeline.scope import scoped
@@ -238,11 +240,12 @@ def _candidates(
     if isinstance(drafted, Unfinished):
         return drafted
     texts = () if isinstance(drafted, Rejected) else drafted
+    unique = list(dict.fromkeys(texts))
+    voiced = dict(zip(unique, claude.fan_out(lambda text: stages.render(ctx.store, ctx.renderer, line.speaker, text), unique), strict=True))
     candidates: list[Candidate] = []
     seen: set[str] = set()
     for text in texts:
-        voiced = stages.render(ctx.store, ctx.renderer, line.speaker, text)
-        options: tuple[tuple[WriterName, str], ...] = (("opus", text), ("voice", voiced))
+        options: tuple[tuple[WriterName, str], ...] = (("opus", text), ("voice", voiced[text]))
         for writer, option in options:
             if option == line.english or option in seen:
                 continue
@@ -318,16 +321,35 @@ def _line(
 ) -> tuple[Outcome, Change | None]:
     line = target.line
     origin: dict[str, WriterName] = {}
+    scores: dict[str, float] = {}
+    judged: dict[str, Judgment | Unfinished | Rejected] = {}
+
+    def classify(text: str) -> float:
+        if text not in scores:
+            scores[text] = ctx.classifier.score(text)
+        return scores[text]
+
+    def judge_candidate(candidate: Candidate) -> Judgment | Unfinished | Rejected:
+        if candidate.text not in judged:
+            judged[candidate.text] = _judge(ctx, scene, line, target.callbacks, candidate, reasons, target.intent, target.context, ask)
+        return judged[candidate.text]
+
+    def check_round(candidates: Sequence[Candidate]) -> None:
+        # The round's candidates are checked at once and fill the memos above, so gate_line reads each result instead of asking again.
+        claude.fan_out(
+            lambda candidate: check(candidate, classify=classify, threshold=ctx.classifier.threshold, judge=judge_candidate), candidates
+        )
 
     def write(retry: str | None) -> Sequence[Candidate] | Unfinished:
         if retry is None:
-            return _candidates(ctx, line, first, origin)
-        return _candidates(ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line), origin)
+            produced = _candidates(ctx, line, first, origin)
+        else:
+            produced = _candidates(ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line), origin)
+        if not isinstance(produced, Unfinished):
+            check_round(produced)
+        return produced
 
-    def judge_candidate(candidate: Candidate) -> Judgment | Unfinished | Rejected:
-        return _judge(ctx, scene, line, target.callbacks, candidate, reasons, target.intent, target.context, ask)
-
-    verdict = gate_line(write, classify=ctx.classifier.score, threshold=ctx.classifier.threshold, judge=judge_candidate)
+    verdict = gate_line(write, classify=classify, threshold=ctx.classifier.threshold, judge=judge_candidate)
     if isinstance(verdict, Kept):
         if verdict.gate == "plot":
             return _outcome(line, reasons, "kept_for_plot", gate="plot"), None
@@ -408,49 +430,65 @@ def _write_arcs(path: Path, consolidated: Sequence[Mapping[str, Any]], scenes: S
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _both[A, B](first: Callable[[], A], second: Callable[[], B]) -> tuple[A, B]:
+    """Runs two calls at once and returns both answers, each with its own type."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        left = pool.submit(first)
+        right = pool.submit(second)
+        return left.result(), right.result()
+
+
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall]:
     cast = arcs.cast(ctx.bibles, _speakers(scene))
-    flagged = stages.screen(ctx.store, ctx.lens, scene, cast, ask)
+
+    def screen() -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+        return stages.screen(ctx.store, ctx.lens, scene, cast, ask)
+
+    def triage() -> dict[str, float] | RateLimited | Unfinished | Rejected | None:
+        if ctx.jev is None:
+            return None
+        return stages.triage(ctx.store, ctx.lens, scene, ctx.jev)
+
+    flagged, probabilities = _both(screen, triage)
     if not isinstance(flagged, dict):
         return _every_line(scene, "unfinished"), [], _Recall()
     recall = _Recall()
     if ctx.jev is not None:
-        probabilities = stages.triage(ctx.store, ctx.lens, scene, ctx.jev)
         if not isinstance(probabilities, dict):
             return _every_line(scene, "unfinished"), [], _Recall()
-        for question in ctx.lens.triage:
-            if probabilities[question.id] < RECHECK_AT or any(question.id in reasons for reasons in flagged.values()):
-                continue
+        # A disagreement is decided from the screen's flags only. A recheck adds just its own triage id, so it never decides another id.
+        questions = [
+            question
+            for question in ctx.lens.triage
+            if probabilities[question.id] >= RECHECK_AT and not any(question.id in reasons for reasons in flagged.values())
+        ]
+        rechecks = claude.fan_out(lambda question: stages.rescreen(ctx.store, ctx.lens, scene, question, cast, ask), questions)
+        for question, rechecked in zip(questions, rechecks, strict=True):
             recall.disagreements[question.id] += 1
-            rechecked = stages.rescreen(ctx.store, ctx.lens, scene, question, cast, ask)
             if not isinstance(rechecked, dict):
                 return _every_line(scene, "unfinished"), [], _Recall()
             if rechecked:
                 recall.confirmed[question.id] += 1
             flagged = _join(ctx.lens, flagged, rechecked)
-    planned: dict[tuple[str, str], stages.Target | Outcome] = {}
-    for line in scene.lines:
-        reasons = flagged.get((line.namespace, line.key))
-        if reasons is not None:
-            planned[(line.namespace, line.key)] = _intend(ctx, scene, line, reasons, ask)
+    flagged_lines = [line for line in scene.lines if (line.namespace, line.key) in flagged]
+    intended = claude.fan_out(lambda line: _intend(ctx, scene, line, flagged[(line.namespace, line.key)], ask), flagged_lines)
+    planned = {(line.namespace, line.key): plan for line, plan in zip(flagged_lines, intended, strict=True)}
     targets = [plan for plan in planned.values() if isinstance(plan, stages.Target)]
     first = _first_drafts(ctx, scene, targets, ask)
-    outcomes: list[Outcome] = []
-    changes: list[Change] = []
-    for line in scene.lines:
+
+    def gate(line: SceneLine) -> tuple[Outcome, Change | None]:
         ref = (line.namespace, line.key)
         reasons = flagged.get(ref)
         if reasons is None:
-            outcomes.append(_outcome(line, (), "untouched"))
-            continue
+            return _outcome(line, (), "untouched"), None
         plan = planned[ref]
         if isinstance(plan, Outcome):
-            outcomes.append(plan)
-            continue
-        outcome, change = _line(ctx, scene, plan, reasons, first[ref], ask)
-        outcomes.append(outcome)
-        if change is not None:
-            changes.append(change)
+            return plan, None
+        return _line(ctx, scene, plan, reasons, first[ref], ask)
+
+    gated = claude.fan_out(gate, scene.lines)
+    outcomes = [outcome for outcome, _ in gated]
+    changes = [change for _, change in gated if change is not None]
     outcomes, changes = _coherent(ctx, scene, outcomes, changes, ask)
     return outcomes, changes, recall
 
@@ -494,16 +532,24 @@ def run(
         arcs=arcs.consolidate(built),
         lines=_first_lines(scenes),
     )
+    progress = threading.Lock()
+
+    def scene_pass(item: tuple[Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall]:
+        scene, ask = item
+        scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, ask)
+        with progress:
+            out(f"scene {scene.key}: {_counts(scene_outcomes)}")
+        return scene_outcomes, scene_changes, scene_recall
+
+    scene_results = claude.fan_out(scene_pass, [(scene, batch()) for scene in scenes])
     outcomes: list[Outcome] = []
     changes: list[Change] = []
     recall = _Recall()
-    for scene in scenes:
-        scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, batch())
+    for scene_outcomes, scene_changes, scene_recall in scene_results:
         outcomes += scene_outcomes
         changes += scene_changes
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
-        out(f"scene {scene.key}: {_counts(scene_outcomes)}")
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
@@ -519,6 +565,7 @@ def _batch() -> Ask:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
+    claude.set_concurrency(args.concurrency)
     root = repo_root()
     lens = load_lens(root / "lenses" / f"{args.lens}.toml")
     directory = work_dir(args.lens)
@@ -545,4 +592,11 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     )
     p.add_argument("--lens", required=True, help="name of the lens to run, read from lenses/<name>.toml and work/<name>/")
     p.add_argument("--no-jev", action="store_true", help="skip the Jev recall check")
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=claude.DEFAULT_CONCURRENCY,
+        metavar="N",
+        help="Claude calls in flight at once across the bible, the scenes and the arc judges (default 8, at least 1)",
+    )
     p.set_defaults(fn=cmd_run)

@@ -1,8 +1,10 @@
 import argparse
 import json
 import re
+import threading
+import time
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -416,8 +418,13 @@ class FakeClaude:
         self.batches = 0
         self.calls: list[tuple[str, list[str], Mapping[str, Any]]] = []
         self.bible: dict[int, dict[str, Any] | Unfinished] = {1: CHAPTER_ONE_BIBLE}
-        self.unplaced: list[dict[str, Any]] = []
+        self.unplaced: dict[str, dict[str, Any]] = {}
         self.screen_failure: Unfinished | None = None
+        # Screens of the scene holding the line get this transport failure, or raise, and nothing else changes. Not game text.
+        self.screen_failure_refs: dict[tuple[str, str], Unfinished] = {}
+        self.raising: set[tuple[str, str]] = set()
+        # Every screen waits here before it answers, so the scenes start together. Not game text.
+        self.screen_gate: threading.Barrier | None = None
         self.flags: dict[tuple[str, str], list[str]] = {}
         self.rescreen_flags: dict[tuple[str, str], list[str]] = {}
         self.rescreen_failures: dict[str, Unfinished | Rejected] = {}
@@ -440,7 +447,8 @@ class FakeClaude:
         self.calls.append((model, list(parts), schema))
         if schema is bible.SCHEMA:
             if any(part.startswith("Unplaced lines:\n") for part in parts):
-                return self.unplaced.pop(0) if self.unplaced else EMPTY_BIBLE
+                namespace = json.loads(_part(parts, "Unplaced lines:\n"))[0]["namespace"]
+                return self.unplaced.get(namespace, EMPTY_BIBLE)
             number = int(_part(parts, "Chapter ").split()[0])
             return self.bible.get(number, EMPTY_BIBLE)
         if schema is bible.SETUP_SCHEMA:
@@ -476,9 +484,17 @@ class FakeClaude:
         raise AssertionError("unexpected schema")
 
     def _screen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished:
+        if self.screen_gate is not None:
+            self.screen_gate.wait()
         if self.screen_failure is not None:
             return self.screen_failure
         lines = json.loads(_part(parts, "Scene lines:\n"))
+        for line in lines:
+            ref = (line["namespace"], line["key"])
+            if ref in self.screen_failure_refs:
+                return self.screen_failure_refs[ref]
+            if ref in self.raising:
+                raise RuntimeError("Made-up scene failure. Not game text.")
         flagged = [
             {"namespace": line["namespace"], "key": line["key"], "reasons": self.flags[(line["namespace"], line["key"])]}
             for line in lines
@@ -583,6 +599,7 @@ def _run(
     scenes: Sequence[Scene] = SCENES,
     classifier: FakeClassifier | None = None,
     scene_table: bool = False,
+    batch: Callable[[], Ask] | None = None,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
@@ -593,7 +610,7 @@ def _run(
         renderer=FakeRenderer({OPUS_A1: VOICE_A1}) if renderer is None else renderer,
         run_id=RUN,
         jev=jev,
-        batch=claude.start_batch,
+        batch=claude.start_batch if batch is None else batch,
         scene_table=scene_table,
         out=printed.append,
     )
@@ -819,9 +836,13 @@ def test_writer_retry_names_only_its_line_and_the_gate_it_failed(tmp_path: Path)
         for _, parts, schema in claude.calls
         if schema is DRAFT_SCHEMA and any(part.startswith("The previous candidates failed") for part in parts)
     ]
-    assert [_draft_refs(parts) for parts in retries] == [[(NS_A, "2")], [(NS_A, "3")]]
-    assert any(part == "The previous candidates failed the minimal_change gate. Write candidates that pass it." for part in retries[0])
-    assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in retries[1])
+    # The scene's lines are gated concurrently, so the retries are told apart by their line, not by call order.
+    assert sorted(_draft_refs(parts) for parts in retries) == [[(NS_A, "2")], [(NS_A, "3")]]
+    by_line = {_draft_refs(parts)[0]: parts for parts in retries}
+    assert any(
+        part == "The previous candidates failed the minimal_change gate. Write candidates that pass it." for part in by_line[(NS_A, "2")]
+    )
+    assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in by_line[(NS_A, "3")])
     for parts in retries:
         scene_refs = {(line["namespace"], line["key"]) for line in json.loads(_part(parts, "Scene lines:\n"))}
         assert {(NS_A, "1"), (NS_A, "2"), (NS_A, "3"), (NS_A, "4")} <= scene_refs
@@ -1010,26 +1031,38 @@ def test_unplaced_lines_are_one_bible_per_namespace_after_numbered_chapters_in_n
     claude = _claude()
     claude.bible = {}
     claude.flags = {}
-    claude.unplaced = [UNPLACED_BIBLE]
+    claude.unplaced = {UNPLACED_EARLIER: UNPLACED_BIBLE}
     _run(tmp_path, claude, [], jev=None, scenes=(LATE_SCENE, EARLY_SCENE, UNPLACED_SCENE))
     bible_calls = [parts for _, parts, schema in claude.calls if schema is bible.SCHEMA]
     assert len(bible_calls) == 4
     assert any(part.startswith("Chapter 1 lines:\n") for part in bible_calls[0])
     assert any(part.startswith("Chapter 2 lines:\n") for part in bible_calls[1])
-    assert json.loads(_part(bible_calls[2], "Unplaced lines:\n")) == [
+    # The two unplaced chunks run concurrently, so they are told apart by their namespace, not by call order.
+    unplaced = {json.loads(_part(parts, "Unplaced lines:\n"))[0]["namespace"]: parts for parts in bible_calls[2:]}
+    assert set(unplaced) == {UNPLACED_EARLIER, UNPLACED_LATER}
+    assert json.loads(_part(unplaced[UNPLACED_EARLIER], "Unplaced lines:\n")) == [
         {"namespace": UNPLACED_EARLIER, "key": "1", "speaker": "made-up-speaker-a", "text": EN_OUT},
     ]
-    assert json.loads(_part(bible_calls[3], "Unplaced lines:\n")) == [
+    assert json.loads(_part(unplaced[UNPLACED_LATER], "Unplaced lines:\n")) == [
         {"namespace": UNPLACED_LATER, "key": "1", "speaker": "", "text": EN_C1},
         {"namespace": UNPLACED_LATER, "key": "2", "speaker": "", "text": EN_B2},
     ]
-    assert "Made-up callback meaning unplaced. Not game text." in "\n".join(bible_calls[3])
+    # Each unplaced chunk reads exactly the two numbered chapter bibles, never the other unplaced chunk's bible.
+    for parts in unplaced.values():
+        assert [bible_["chapter"] for bible_ in json.loads(_part(parts, "Earlier bibles:\n"))] == [1, 2]
+    assert "Made-up callback meaning unplaced. Not game text." not in "\n".join(unplaced[UNPLACED_LATER])
+
+
+def _assert_printed(printed: Sequence[str]) -> None:
+    # A scene's line prints as that scene finishes, so only the total line has a fixed place.
+    assert sorted(printed[:-1]) == sorted(EXPECTED_PRINTED[:-1])
+    assert printed[-1] == EXPECTED_PRINTED[-1]
 
 
 def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:
     printed: list[str] = []
     _run(tmp_path, _claude(), printed, jev=FakeJev(JEV_HIGH))
-    assert printed == EXPECTED_PRINTED
+    _assert_printed(printed)
     assert all(COUNT_LINE.fullmatch(line) for line in printed)
     assert not any(text in line for line in printed for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_B1))
 
@@ -1144,7 +1177,7 @@ def test_run_command_writes_outcomes_and_dialog_through_the_bound_stages(
 
     args.fn(args)
 
-    assert capsys.readouterr().out.splitlines() == EXPECTED_PRINTED
+    _assert_printed(capsys.readouterr().out.splitlines())
     records = (lens_repo / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()
     assert len(records) == len(EXPECTED_OUTCOMES)
     dialog = lens_repo / "dialog" / LENS
@@ -1165,7 +1198,7 @@ def test_run_command_with_no_jev_never_calls_jev_and_writes_zero_recall(
     args.fn(args)
 
     assert jev.calls == []
-    assert capsys.readouterr().out.splitlines() == EXPECTED_PRINTED
+    _assert_printed(capsys.readouterr().out.splitlines())
     assert (lens_repo / "work" / LENS / report.OUTCOMES).is_file()
     assert json.loads((lens_repo / "work" / LENS / report.RECALL).read_text(encoding="utf-8")) == NO_RECALL
 
@@ -1422,11 +1455,12 @@ def test_line_named_on_both_arc_passes_ends_gate_failed_arc_with_no_dialog_entry
     assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None)
     assert _outcome_of(outcomes, (NS_B, "1")).outcome == "changed"
     assert _dialog_entries(tmp_path) == {(NS_B, "1")}
-    assert printed == [
+    # The two scenes finish in either order, so only the total line has a fixed place.
+    assert sorted(printed[:-1]) == [
         "scene made-up-scene-x: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
         "scene made-up-scene-y: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
-        "total: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1 untouched",
     ]
+    assert printed[-1] == "total: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1 untouched"
 
 
 def test_unfinished_arc_judge_leaves_its_changed_lines_unfinished_with_no_dialog_entry(tmp_path: Path) -> None:
@@ -1482,3 +1516,335 @@ def test_line_changed_in_two_scenes_is_refused_by_run_and_nothing_is_written(tmp
     assert not (work / report.ARCS).exists()
     assert not (work / report.RECALL).exists()
     assert not (tmp_path / "repo" / "dialog" / LENS).exists()
+
+
+# Made-up unplaced lines in two more namespaces, one spoken by the third arc character. Not game text.
+NS_D = "ST_SubEv_005_01"
+NS_E = "ST_SubEv_006_01"
+EN_E1 = "Made-up unplaced line one. Not game text."
+EN_E2 = "Made-up unplaced line two. Not game text."
+OPUS_E1 = "Made-up opus rewrite of e one. Not game text."
+SCENE_E = Scene("made-up-scene-e", (_line(NS_D, "1", "made-up-speaker-c", EN_E1, None), _line(NS_E, "1", None, EN_E2, None)))
+THREE_ARC_BIBLE: dict[str, Any] = {**EMPTY_BIBLE, "arcs": [ARC_A_ENTRY, ARC_B_ENTRY, ARC_C_ENTRY]}
+SLOW = 0.1
+
+
+@pytest.fixture(autouse=True)
+def no_live_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A test that reaches the real claude.ask without installing its own fake call fails here instead of running cswap.
+    def refuse(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("a test reached the live Claude call")
+
+    monkeypatch.setattr(claude_module, "call", refuse)
+
+
+@pytest.fixture(autouse=True)
+def restore_concurrency() -> Iterator[None]:
+    # cmd_run sets the process-wide Claude limit, so every test in this file puts the default back.
+    yield
+    claude_module.set_concurrency(claude_module.DEFAULT_CONCURRENCY)
+
+
+def _stage(schema: Mapping[str, Any]) -> str:
+    if schema is bible.SCHEMA or schema is bible.SETUP_SCHEMA:
+        return "bible"
+    if schema is arcs.SCHEMA:
+        return "arc"
+    return "scene"
+
+
+class SlowCalls:
+    """Stands in for claude.call. Answers from FakeClaude after a delay the prompt picks, and counts the calls in flight. Not game text."""
+
+    def __init__(self, claude: FakeClaude, delay: Callable[[Sequence[str]], float]) -> None:
+        self.claude = claude
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.in_flight = 0
+        self.highest = 0
+        self.peak: dict[str, int] = {}
+        self.calls = 0
+
+    def __call__(
+        self, _account: int, model: str, parts: Sequence[str], schema: Mapping[str, Any]
+    ) -> dict[str, Any] | Unfinished | Rejected:
+        stage = _stage(schema)
+        with self.lock:
+            self.in_flight += 1
+            self.calls += 1
+            self.highest = max(self.highest, self.in_flight)
+            self.peak[stage] = max(self.peak.get(stage, 0), self.in_flight)
+        try:
+            time.sleep(self.delay(parts))
+            return self.claude.ask(model, parts, schema)
+        finally:
+            with self.lock:
+                self.in_flight -= 1
+
+
+def _delay_by_prompt(text: str, *, named: bool) -> Callable[[Sequence[str]], float]:
+    """Delays each prompt that names the English line when named is true, and each prompt that does not when it is false. Not game text."""
+
+    def delay(parts: Sequence[str]) -> float:
+        return SLOW if any(text in part for part in parts) == named else 0.0
+
+    return delay
+
+
+def _through_claude_limit() -> Ask:
+    return stages.Batch(choose=lambda: 1, ask=claude_module.ask).ask
+
+
+# A call that waits this long at a barrier for its partners fails, so a call that runs alone never hangs the suite. Not game text.
+MEET_TIMEOUT = 5
+
+
+class MeetingCalls:
+    """Stands in for claude.call. Calls with the given schema wait at the barrier before they answer from FakeClaude. Not game text."""
+
+    def __init__(self, claude: FakeClaude, schema: Mapping[str, Any], meet: threading.Barrier) -> None:
+        self.claude = claude
+        self.schema = schema
+        self.meet = meet
+
+    def __call__(
+        self, _account: int, model: str, parts: Sequence[str], schema: Mapping[str, Any]
+    ) -> dict[str, Any] | Unfinished | Rejected:
+        if schema is self.schema:
+            self.meet.wait()
+        return self.claude.ask(model, parts, schema)
+
+
+class MeetingJev(FakeJev):
+    """Stands in for the Jev triage call, which waits at the barrier before it answers. Not game text."""
+
+    def __init__(self, answer: dict[str, float] | Unfinished, meet: threading.Barrier) -> None:
+        super().__init__(answer)
+        self.meet = meet
+
+    def __call__(self, scene: str, questions: Sequence[TriageQuestion]) -> dict[str, float] | Unfinished:
+        self.meet.wait()
+        return super().__call__(scene, questions)
+
+
+class MeetingRenderer(FakeRenderer):
+    """Stands in for the voice render, which waits at the barrier before it answers. Not game text."""
+
+    def __init__(self, voiced: Mapping[str, str], meet: threading.Barrier) -> None:
+        super().__init__(voiced)
+        self.meet = meet
+
+    def render(self, speaker: str | None, text: str) -> str:
+        self.meet.wait()
+        return super().render(speaker, text)
+
+
+def _three_arc_claude() -> FakeClaude:
+    claude = _claude()
+    claude.bible = {1: THREE_ARC_BIBLE}
+    claude.flags[(NS_D, "1")] = [ALPHA]
+    claude.drafts[(NS_D, "1")] = [OPUS_E1]
+    return claude
+
+
+def _scene_order(printed: Sequence[str]) -> list[str]:
+    return [line.split()[1].removesuffix(":") for line in printed if line.startswith("scene ")]
+
+
+def test_in_flight_calls_reach_and_never_exceed_the_limit_in_every_stage_and_beat_the_sequential_sum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _three_arc_claude()
+    claude_module.set_concurrency(3)
+    slow = SlowCalls(claude, lambda parts: SLOW)
+    monkeypatch.setattr(claude_module, "call", slow)
+    started = time.monotonic()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(*SCENES, SCENE_E), batch=_through_claude_limit)
+    elapsed = time.monotonic() - started
+    assert slow.highest == 3
+    assert slow.peak == {"bible": 3, "scene": 3, "arc": 3}
+    # The chapter bibles and their setups run in order, so only the rest overlaps. Sequential runs take the whole sum.
+    assert elapsed < slow.calls * SLOW * 0.75
+
+
+def test_outputs_are_byte_identical_whatever_order_the_scenes_finish_in_and_at_one_call_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plans = {
+        "one-at-a-time": (1, lambda parts: 0.0),
+        "scene-a-finishes-last": (8, _delay_by_prompt(EN_A1, named=True)),
+        "scene-a-finishes-first": (8, _delay_by_prompt(EN_A1, named=False)),
+    }
+    snapshots: dict[str, dict[str, bytes]] = {}
+    orders: dict[str, list[str]] = {}
+    for name, (limit, delay) in plans.items():
+        claude = _claude()
+        claude_module.set_concurrency(limit)
+        monkeypatch.setattr(claude_module, "call", SlowCalls(claude, delay))
+        printed: list[str] = []
+        _run(tmp_path / name, claude, printed, jev=FakeJev(JEV_HIGH), batch=_through_claude_limit)
+        snapshots[name] = _snapshot(tmp_path / name)
+        orders[name] = _scene_order(printed)
+
+    assert orders["one-at-a-time"] == ["made-up-scene-a", "made-up-scene-b", "made-up-scene-c"]
+    assert orders["scene-a-finishes-last"][-1] == "made-up-scene-a"
+    assert orders["scene-a-finishes-first"][0] == "made-up-scene-a"
+    assert f"work/{LENS}/{report.OUTCOMES}" in snapshots["one-at-a-time"]
+    assert f"repo/dialog/{LENS}/chapter-01.toml" in snapshots["one-at-a-time"]
+    assert snapshots["scene-a-finishes-last"] == snapshots["one-at-a-time"]
+    assert snapshots["scene-a-finishes-first"] == snapshots["one-at-a-time"]
+
+
+def test_a_scene_that_raises_keeps_the_other_scenes_results_and_a_rerun_calls_only_for_it(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.raising = {(NS_B, "1")}
+    # All three scenes are screening before the failure, so none is cancelled before it starts.
+    claude.screen_gate = threading.Barrier(3, timeout=10)
+    with pytest.raises(RuntimeError, match="Made-up scene failure"):
+        _run(tmp_path / "resumed", claude, [], jev=FakeJev(JEV_HIGH))
+
+    claude.raising = set()
+    claude.screen_gate = None
+    before = len(claude.calls)
+    _run(tmp_path / "resumed", claude, [], jev=FakeJev(JEV_HIGH))
+    rerun = [(parts, schema) for _, parts, schema in claude.calls[before:]]
+    assert sum(1 for _, schema in rerun if schema is SCREEN_SCHEMA) == 1
+    assert not any(EN_A1 in part or EN_C1 in part for parts, schema in rerun if schema is not arcs.SCHEMA for part in parts)
+
+    _run(tmp_path / "clean", _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert _snapshot(tmp_path / "resumed") == _snapshot(tmp_path / "clean")
+
+
+def test_a_transport_failed_scene_stays_unfinished_while_the_others_change(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.screen_failure_refs = {(NS_B, "1"): Unfinished("Made-up transport failure. Not game text.")}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes == [
+        EXPECTED_OUTCOMES[0],
+        EXPECTED_OUTCOMES[1],
+        EXPECTED_OUTCOMES[2],
+        EXPECTED_OUTCOMES[3],
+        Outcome(NS_B, "1", 2, "made-up-speaker-b", (), "unfinished", None, None),
+        Outcome(NS_B, "2", 2, None, (), "unfinished", None, None),
+        EXPECTED_OUTCOMES[6],
+    ]
+    assert _dialog_files(tmp_path / "repo" / "dialog" / LENS) == ["chapter-01.toml", "unattributed.toml"]
+
+
+OPUS_A4 = "Made-up opus rewrite four. Not game text."
+VOICE_A2 = "Made-up voiced rewrite two. Not game text."
+
+
+def test_screen_and_jev_triage_of_a_scene_are_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, SCREEN_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=MeetingJev(JEV_HIGH, meet), scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert outcomes == EXPECTED_OUTCOMES[:4]
+
+
+def test_two_rescreens_of_a_scene_are_in_flight_together_and_join_in_lens_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    claude.flags = {}
+    claude.rescreen_flags = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [BETA]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, RESCREEN_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert _outcome_of(outcomes, (NS_A, "1")).reasons == (ALPHA,)
+    assert _outcome_of(outcomes, (NS_A, "2")).reasons == (BETA,)
+    assert _recall(tmp_path) == {ALPHA: {"disagreements": 1, "confirmed": 1}, BETA: {"disagreements": 1, "confirmed": 1}}
+
+
+def test_the_intents_of_a_scenes_flagged_lines_are_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    meet = threading.Barrier(3, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, INTENT_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert outcomes == EXPECTED_OUTCOMES[:4]
+
+
+def test_the_judges_of_a_scenes_two_flagged_lines_are_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "2"): [BETA], (NS_A, "4"): [BETA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2], (NS_A, "4"): [OPUS_A4]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, JUDGE_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "4")).outcome == "changed"
+
+
+def test_the_two_candidates_of_one_gating_round_are_judged_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "2"): [BETA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, JUDGE_SCHEMA, meet))
+    outcomes = _run(
+        tmp_path, claude, [], jev=None, renderer=FakeRenderer({OPUS_A2: VOICE_A2}), scenes=(SCENE_A,), batch=_through_claude_limit
+    )
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+
+
+def test_the_drafts_of_one_line_are_rendered_in_flight_together(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "2"): [BETA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2, OPUS_A3]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=MeetingRenderer({}, meet), scenes=(SCENE_A,))
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+
+
+def test_each_candidate_text_is_classified_and_judged_once_per_line_even_when_a_retry_repeats_it(tmp_path: Path) -> None:
+    claude = _claude()
+    classifier = FakeClassifier()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), classifier=classifier)
+    judged = _judged(claude, JUDGE_SCHEMA)
+    assert judged.count(((NS_A, "2"), OPUS_A2)) == 1
+    assert len(judged) == len(set(judged))
+    assert len(classifier.scored) == len(set(classifier.scored))
+
+
+def test_concurrency_option_defaults_to_eight() -> None:
+    assert _parse(["run", "--lens", LENS]).concurrency == 8
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_concurrency_below_one_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    def unexpected() -> Bindings:
+        raise AssertionError("the scenes were read before the limit was checked")
+
+    monkeypatch.setattr(stages, "bindings", unexpected)
+    args = _parse(["run", "--lens", LENS, "--concurrency", value])
+    with pytest.raises(Fail, match="concurrency must be at least 1"):
+        args.fn(args)
+    assert claude_module.concurrency() == claude_module.DEFAULT_CONCURRENCY
+
+
+def test_concurrency_option_sets_the_claude_limit_before_the_scenes_are_read(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    _bind(monkeypatch, claude, FakeJev(JEV_HIGH))
+    bound = stages.bindings
+    limits: list[int] = []
+
+    def read_limit() -> Bindings:
+        limits.append(claude_module.concurrency())
+        return bound()
+
+    monkeypatch.setattr(stages, "bindings", read_limit)
+    args = _parse(["run", "--lens", LENS, "--concurrency", "3"])
+    args.fn(args)
+    assert limits == [3]
+    assert claude_module.concurrency() == 3
+
+
+def test_readme_documents_the_concurrency_option_in_the_run_row() -> None:
+    readme = (Path(__file__).parents[2] / "README.md").read_text(encoding="utf-8")
+    row = next(line for line in readme.splitlines() if line.startswith("| `ffrd run --lens"))
+    assert "[--concurrency N]" in row

@@ -2,8 +2,11 @@
 
 import json
 import subprocess
+import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +16,11 @@ from ffrd.pipeline import accounts
 OPUS = "opus"
 SONNET = "sonnet"
 SYSTEM_PROMPT = "You follow the instructions in the user message and answer only through the structured output."
+DEFAULT_CONCURRENCY = 8
+
+_gate = threading.Condition()
+_limit = DEFAULT_CONCURRENCY
+_in_flight = 0
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,34 @@ def _classify(document: dict[str, Any]) -> dict[str, Any] | Failure:
     return output
 
 
+def set_concurrency(limit: int) -> None:
+    global _limit
+    if limit < 1:
+        raise Fail("concurrency must be at least 1")
+    with _gate:
+        _limit = limit
+        _gate.notify_all()
+
+
+def concurrency() -> int:
+    with _gate:
+        return _limit
+
+
+@contextmanager
+def _slot() -> Iterator[None]:
+    global _in_flight
+    with _gate:
+        _gate.wait_for(lambda: _in_flight < _limit)
+        _in_flight += 1
+    try:
+        yield
+    finally:
+        with _gate:
+            _in_flight -= 1
+            _gate.notify()
+
+
 def ask(
     account: int,
     model: str,
@@ -118,8 +154,29 @@ def ask(
     limited: set[int] = set()
     current = account
     while True:
-        outcome = call(current, model, parts, schema)
+        with _slot():
+            outcome = call(current, model, parts, schema)
         if not isinstance(outcome, RateLimited):
             return current, outcome
         limited.add(current)
         current = accounts.choose(limited, sleep=sleep).number
+
+
+def fan_out[T, R](work: Callable[[T], R], items: Sequence[T]) -> list[R]:
+    if not items:
+        return []
+    with ThreadPoolExecutor(max_workers=min(concurrency(), len(items))) as pool:
+        futures = [pool.submit(work, item) for item in items]
+        try:
+            wait(futures, return_when=FIRST_EXCEPTION)
+        finally:
+            # On a failed item or an interrupt (Ctrl-C), unstarted items never start; running items finish.
+            for future in futures:
+                future.cancel()
+    for future in futures:
+        if future.cancelled():
+            continue
+        error = future.exception()
+        if error is not None:
+            raise error
+    return [future.result() for future in futures]

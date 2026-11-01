@@ -5,7 +5,10 @@ Every line, speaker and key here is made up. Not game text. The remote calls are
 
 import atexit
 import json
+import threading
+import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -227,3 +230,101 @@ def test_exit_stack_closes_what_opened(log: list[str], monkeypatch: pytest.Monke
     registered[0]()
 
     assert log[-2:] == ["render close", "scorer close"]
+
+
+RACERS = 8
+RACE_PAUSE = 0.05
+
+
+def _race(call: Callable[[], Any]) -> list[Any]:
+    """Starts RACERS threads on one call at once and returns their answers in submit order. A thread's error is re-raised."""
+    start = threading.Barrier(RACERS, timeout=10)
+
+    def run() -> Any:
+        start.wait()
+        return call()
+
+    with ThreadPoolExecutor(max_workers=RACERS) as pool:
+        futures = [pool.submit(run) for _ in range(RACERS)]
+        return [future.result() for future in futures]
+
+
+class Overlap:
+    """Records the calls a race makes and the most scores in flight at once. Not game text."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.in_flight = 0
+        self.most_in_flight = 0
+        self._guard = threading.Lock()
+
+    def enter(self) -> None:
+        with self._guard:
+            self.in_flight += 1
+            self.most_in_flight = max(self.most_in_flight, self.in_flight)
+
+    def leave(self) -> None:
+        with self._guard:
+            self.in_flight -= 1
+
+
+class SlowScorer:
+    """A Scorer that pauses on open and on each score, so racing threads overlap. Not game text."""
+
+    def __init__(self, overlap: Overlap) -> None:
+        self.overlap = overlap
+
+    def __enter__(self) -> "SlowScorer":
+        time.sleep(RACE_PAUSE)
+        self.overlap.calls.append("scorer open")
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def score(self, text: str) -> float:
+        self.overlap.enter()
+        try:
+            time.sleep(RACE_PAUSE)
+            self.overlap.calls.append("score")
+            return 0.9
+        finally:
+            self.overlap.leave()
+
+
+def test_racing_first_scores_sync_and_open_the_scorer_once_and_never_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    overlap = Overlap()
+
+    def slow_sync() -> None:
+        time.sleep(RACE_PAUSE)
+        overlap.calls.append("sync")
+
+    monkeypatch.setattr(remote, "sync", slow_sync)
+    monkeypatch.setattr(classifier, "Scorer", lambda: SlowScorer(overlap))
+    bound = bindings()
+
+    scores = _race(lambda: bound.classifier.score("Synthetic racing. Not game text."))
+
+    assert scores == [0.9] * RACERS
+    assert overlap.calls.count("sync") == 1
+    assert overlap.calls.count("scorer open") == 1
+    assert overlap.calls.count("score") == RACERS
+    assert overlap.most_in_flight == 1
+
+
+def test_racing_first_renders_open_the_tunnel_once_and_every_render_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    opens: list[str] = []
+
+    @contextmanager
+    def slow_rendering(port: int = 0) -> Iterator[Callable[[str, str], str]]:
+        time.sleep(RACE_PAUSE)
+        opens.append("render open")
+        yield lambda speaker, text: f"voiced {text}"
+
+    monkeypatch.setattr(voice_render, "rendering", slow_rendering)
+    bound = bindings()
+
+    renders = _race(lambda: bound.renderer.render("Synthetic speaker", "Synthetic racing. Not game text."))
+
+    assert renders == ["voiced Synthetic racing. Not game text."] * RACERS
+    assert opens == ["render open"]

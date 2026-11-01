@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ffrd.pipeline.claude import Rejected, Unfinished
+from ffrd.pipeline.claude import Rejected, Unfinished, fan_out
 from ffrd.pipeline.store import Store
 
 STAGE = "bible"
@@ -263,15 +263,28 @@ def setups(
 def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], ask: Ask) -> list[dict[str, Any]] | Unfinished | Rejected:
     scope = {(line.namespace, line.key) for _, lines in chapters for line in lines}
     speakers = {line.speaker for _, lines in chapters for line in lines if line.speaker}
+    placed = [(number, lines) for number, lines in chapters if number is not None]
+    loose = [(number, lines) for number, lines in chapters if number is None]
+    ordered = [*placed, *loose]
     bibles: list[dict[str, Any]] = []
-    for number, lines in chapters:
+    for number, lines in placed:
         result = chapter(store, number, lines, bibles, scope, speakers, ask)
+        if not isinstance(result, dict):
+            return result
+        bibles.append(result)
+    placed_bibles = list(bibles)
+
+    def unplaced(chunk: tuple[int | None, Sequence[Line]]) -> dict[str, Any] | Unfinished | Rejected:
+        # Each unplaced chunk reads only the numbered chapter bibles, never another unplaced chunk's bible.
+        return chapter(store, chunk[0], chunk[1], placed_bibles, scope, speakers, ask)
+
+    for result in fan_out(unplaced, loose):
         if not isinstance(result, dict):
             return result
         bibles.append(result)
     found: list[list[dict[str, Any]]] = [[] for _ in bibles]
     for index in reversed(range(len(bibles))):
-        number, lines = chapters[index]
+        number, lines = ordered[index]
         result = setups(store, number, lines, bibles[index + 1 :], scope, ask)
         if not isinstance(result, list):
             return result

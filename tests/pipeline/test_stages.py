@@ -1,5 +1,8 @@
 import json
+import threading
+import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -81,6 +84,31 @@ class Fake:
         if isinstance(answer, BaseException):
             raise answer
         return answer
+
+
+RACERS = 8
+RACE_PAUSE = 0.05
+
+
+class SlowFake(Fake):
+    """A Fake that pauses before it answers, so racing threads overlap inside it. Not game text."""
+
+    def __call__(self, *args: Any) -> Any:
+        time.sleep(RACE_PAUSE)
+        return super().__call__(*args)
+
+
+def _race(call: Callable[[], Any]) -> list[Any]:
+    """Starts RACERS threads on one call at once and returns their answers in submit order. A thread's error is re-raised."""
+    start = threading.Barrier(RACERS, timeout=10)
+
+    def run() -> Any:
+        start.wait()
+        return call()
+
+    with ThreadPoolExecutor(max_workers=RACERS) as pool:
+        futures = [pool.submit(run) for _ in range(RACERS)]
+        return [future.result() for future in futures]
 
 
 def test_scene_text_puts_speaker_before_english_and_bare_english_for_narration() -> None:
@@ -295,6 +323,18 @@ def test_batch_default_choice_uses_the_least_used_cswap_account(monkeypatch: pyt
     Batch(ask=ask).ask(claude.SONNET, [], SCREEN_SCHEMA)
 
     assert ask.calls[0][0] == 2
+
+
+def test_racing_first_asks_choose_one_account_and_every_ask_is_answered() -> None:
+    choose = SlowFake(*[3] * RACERS)
+    ask = Fake(*[(3, FLAGGED_ONE)] * RACERS)
+    batch = Batch(choose=choose, ask=ask)
+
+    answers = _race(lambda: batch.ask(claude.SONNET, ["Made-up racing part. Not game text."], SCREEN_SCHEMA))
+
+    assert answers == [FLAGGED_ONE] * RACERS
+    assert choose.calls == [()]
+    assert [call[0] for call in ask.calls] == [3] * RACERS
 
 
 # Made-up line-stage fixtures. Not game text.

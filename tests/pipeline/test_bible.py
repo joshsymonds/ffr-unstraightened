@@ -1,12 +1,17 @@
-from collections.abc import Mapping, Sequence
+import json
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, Line, build, chapter, setups, touching
+from ffrd.pipeline import claude
+from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, STAGE, Line, build, chapter, setups, touching
 from ffrd.pipeline.claude import Rejected, Unfinished
-from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import Store, key
 
 # Made-up lines and bibles. Not game text.
 C1_LINES = [
@@ -318,7 +323,7 @@ def test_build_sends_unplaced_lines_last_as_chapter_none_reading_earlier_bibles(
     assert len(ask.calls) == 4
     assert "Unplaced lines:\n" in _prompt(ask, 1)
     assert "Made-up unplaced line. Not game text." in _prompt(ask, 1)
-    assert "Made-up callback meaning one. Not game text." in _prompt(ask, 1)
+    assert json.loads(_part(ask.calls[1][0], "Earlier bibles:\n")) == [{**BIBLE_ONE, "chapter": 1}]
 
 
 def test_build_accepts_ref_to_a_line_of_a_later_passed_chapter(tmp_path: Path) -> None:
@@ -397,6 +402,183 @@ def test_fresh_store_on_same_root_returns_stored_setups_without_asking(tmp_path:
 
     assert result == SETUP_ONE["setups"]
     assert ask.calls == []
+
+
+class ByLine:
+    """Answers a bible prompt by the made-up line it carries, so concurrent chunks get their own answers in any order.
+
+    A callable answer is called first, which lets a test hold a chunk. Setup prompts get no setups. Counts the calls
+    in flight at once. Not game text.
+    """
+
+    def __init__(self, answers: Mapping[str, Any]) -> None:
+        self.answers = dict(answers)
+        self.calls: list[tuple[tuple[str, ...], Mapping[str, Any]]] = []
+        self.in_flight = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, parts: Sequence[str], schema: Mapping[str, Any]) -> Any:
+        with self._lock:
+            self.calls.append((tuple(parts), schema))
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+        try:
+            if schema is SETUP_SCHEMA:
+                return NO_SETUPS
+            prompt = "\n".join(parts)
+            matches = [line for line in self.answers if line in prompt]
+            assert len(matches) == 1, "prompt names no single known line"
+            answer = self.answers[matches[0]]
+            return answer() if callable(answer) else answer
+        finally:
+            with self._lock:
+                self.in_flight -= 1
+
+
+def _part(parts: Sequence[str], prefix: str) -> str:
+    return next(part for part in parts if part.startswith(prefix)).removeprefix(prefix)
+
+
+def _bible_call(ask: ByLine, text: str) -> tuple[str, ...]:
+    (parts,) = [parts for parts, schema in ask.calls if schema is SCHEMA and any(text in part for part in parts)]
+    return parts
+
+
+def _earlier(parts: Sequence[str]) -> Any:
+    return json.loads(_part(parts, "Earlier bibles:\n"))
+
+
+def _unplaced(name: str) -> tuple[list[Line], dict[str, Any]]:
+    # Made-up unplaced chunk, one line and one callback each. Not game text.
+    lines = [Line(f"ST_Menu_{name}", "1", "Brin", f"Made-up unplaced line {name}. Not game text.")]
+    bible = {
+        "characters": [],
+        "facts": [],
+        "callbacks": [
+            {
+                "line": {"namespace": f"ST_Menu_{name}", "key": "1"},
+                "depends": [{"namespace": "ST_C01_001_01", "key": "1"}],
+                "meaning": f"Made-up callback meaning unplaced {name}. Not game text.",
+            }
+        ],
+        "arcs": [],
+    }
+    return lines, bible
+
+
+@pytest.fixture
+def restore_concurrency() -> Iterator[None]:
+    yield
+    claude.set_concurrency(claude.DEFAULT_CONCURRENCY)
+
+
+def test_unplaced_chunks_read_only_numbered_bibles_and_store_under_those_inputs(tmp_path: Path, restore_concurrency: None) -> None:
+    claude.set_concurrency(2)
+    store = Store(tmp_path)
+    (lines_a, bible_a), (lines_b, bible_b) = _unplaced("A"), _unplaced("B")
+    ask = ByLine({C1_LINES[0].text: BIBLE_ONE, lines_a[0].text: bible_a, lines_b[0].text: bible_b})
+    numbered = [{**BIBLE_ONE, "chapter": 1}]
+
+    built = build(store, [(1, C1_LINES), (None, lines_a), (None, lines_b)], ask)
+
+    assert built == [numbered[0], {**bible_a, "chapter": None}, {**bible_b, "chapter": None}]
+    for lines, other in ((lines_a, bible_b), (lines_b, bible_a)):
+        parts = _bible_call(ask, lines[0].text)
+        assert _earlier(parts) == numbered
+        assert other["callbacks"][0]["meaning"] not in "\n".join(parts)
+        inputs = {"chapter": None, "lines": [asdict(line) for line in lines], "earlier": numbered}
+        assert store.read(key(STAGE, inputs, None)) is not None
+
+
+def test_unplaced_chunks_overlap_and_never_exceed_the_configured_concurrency(tmp_path: Path, restore_concurrency: None) -> None:
+    claude.set_concurrency(2)
+    chunks = [_unplaced(name) for name in "ABCDE"]
+    gate = threading.Barrier(2, timeout=10)
+
+    def meet(bible: dict[str, Any]) -> dict[str, Any]:
+        gate.wait()
+        return bible
+
+    answers: dict[str, Any] = {C1_LINES[0].text: BIBLE_ONE}
+    for index, (lines, bible) in enumerate(chunks):
+        answers[lines[0].text] = partial(meet, bible) if index < 2 else bible
+    ask = ByLine(answers)
+
+    built = build(Store(tmp_path), [(1, C1_LINES), *((None, lines) for lines, _ in chunks)], ask)
+
+    assert built == [{**BIBLE_ONE, "chapter": 1}, *({**bible, "chapter": None} for _, bible in chunks)]
+    assert ask.peak == 2
+
+
+def test_output_order_is_chunk_order_whatever_order_chunks_finish(tmp_path: Path, restore_concurrency: None) -> None:
+    claude.set_concurrency(2)
+    (lines_a, bible_a), (lines_b, bible_b) = _unplaced("A"), _unplaced("B")
+    b_asked = threading.Event()
+
+    def late_a() -> dict[str, Any]:
+        # Chunk A is held until chunk B has been asked, so B is in flight first. Not game text.
+        if not b_asked.wait(timeout=10):
+            raise TimeoutError("chunk B was never asked")
+        return bible_a
+
+    def early_b() -> dict[str, Any]:
+        b_asked.set()
+        return bible_b
+
+    ask = ByLine({C1_LINES[0].text: BIBLE_ONE, lines_a[0].text: late_a, lines_b[0].text: early_b})
+
+    built = build(Store(tmp_path), [(1, C1_LINES), (None, lines_a), (None, lines_b)], ask)
+
+    assert built == [{**BIBLE_ONE, "chapter": 1}, {**bible_a, "chapter": None}, {**bible_b, "chapter": None}]
+
+
+def test_failed_chunk_returns_the_first_failure_in_chunk_order_and_stores_the_others(tmp_path: Path, restore_concurrency: None) -> None:
+    claude.set_concurrency(3)
+    store = Store(tmp_path)
+    (lines_a, _), (lines_b, _), (lines_c, bible_c) = _unplaced("A"), _unplaced("B"), _unplaced("C")
+    b_rejected = threading.Event()
+
+    def reject_b() -> Rejected:
+        b_rejected.set()
+        return Rejected("Made-up rejected detail B. Not game text.")
+
+    def unfinished_a() -> Unfinished:
+        # Chunk A fails after chunk B has failed, so the chunk order, not the finish order, picks the failure. Not game text.
+        if not b_rejected.wait(timeout=10):
+            raise TimeoutError("chunk B was never rejected")
+        return Unfinished("Made-up unfinished detail A. Not game text.")
+
+    ask = ByLine({C1_LINES[0].text: BIBLE_ONE, lines_a[0].text: unfinished_a, lines_b[0].text: reject_b, lines_c[0].text: bible_c})
+
+    built = build(store, [(1, C1_LINES), (None, lines_a), (None, lines_b), (None, lines_c)], ask)
+
+    assert built == Unfinished("Made-up unfinished detail A. Not game text.")
+    assert len(store.finished()) == 2
+    assert len(store.unfinished()) == 2
+
+
+def test_rerun_after_one_chunk_failed_asks_only_that_chunk(tmp_path: Path, restore_concurrency: None) -> None:
+    claude.set_concurrency(3)
+    (lines_a, bible_a), (lines_b, bible_b), (lines_c, bible_c) = _unplaced("A"), _unplaced("B"), _unplaced("C")
+    chunks = [(1, C1_LINES), (None, lines_a), (None, lines_b), (None, lines_c)]
+    first = ByLine(
+        {
+            C1_LINES[0].text: BIBLE_ONE,
+            lines_a[0].text: bible_a,
+            lines_b[0].text: Rejected("Made-up rejected detail B. Not game text."),
+            lines_c[0].text: bible_c,
+        }
+    )
+    assert build(Store(tmp_path), chunks, first) == Rejected("Made-up rejected detail B. Not game text.")
+
+    rerun = ByLine({lines_b[0].text: bible_b})
+    built = build(Store(tmp_path), chunks, rerun)
+
+    assert built == [{**BIBLE_ONE, "chapter": 1}, {**bible_a, "chapter": None}, {**bible_b, "chapter": None}, {**bible_c, "chapter": None}]
+    forward = [parts for parts, schema in rerun.calls if schema is SCHEMA]
+    assert len(forward) == 1
+    assert any(lines_b[0].text in part for part in forward[0])
 
 
 OUTSIDE_LINE = {
