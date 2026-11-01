@@ -1,0 +1,147 @@
+# Unstraightening lens. Keeps the game's plot, relationships, traits and operatic stakes,
+# and dials back compulsory romance framing, earnest melodrama and gender rules.
+# Each rule, refinement and protection starts with its label in square brackets.
+
+[[triage]]
+id = "u1-presumed-opposite-sex"
+question = "A character in this scene assumes that another character's partner or future partner is of the opposite sex, or treats closeness between two characters of the same sex as a joke, an insult or a threat."
+
+[[triage]]
+id = "u2-romance-outranks"
+question = "A character in this scene says or implies that a romantic feeling matters more than a duty, a friendship, their own life, or the fate of other people."
+
+[[triage]]
+id = "u3-devotion-as-vow"
+question = "A character in this scene describes devotion to a romantic partner as a sacred vow, fate, or giving up their own self."
+
+[[triage]]
+id = "u4-stake-through-other"
+question = "A character in this scene explains their own goal, fear or worth in terms of what another specific character thinks of them or needs from them."
+
+[[triage]]
+id = "u5-rivalry-over-one-person"
+question = "Two characters in this scene compete or quarrel over the affection or attention of one other character."
+
+[[triage]]
+id = "u6-overwrought-declaration"
+question = "A character in this scene declares romantic love or longing in extreme, breathless or life-or-death terms."
+
+[[triage]]
+id = "u7-gender-rule"
+question = "A line in this scene states what men or women may do, must do, or are like."
+
+[screen]
+criteria = [
+    "[u1-presumed-opposite-sex] Flag u1-presumed-opposite-sex when a character presumes that another character's partner or future partner is of the opposite sex, or when a line treats closeness between two characters of the same sex as a joke, an insult or a threat. Flag the presumption made about another character. Do not flag the sentiment itself, and do not flag a character's own wish for an opposite-sex partner (see first-person-desire).",
+    "[u2-romance-outranks] Flag u2-romance-outranks when a character says or implies that a romantic feeling matters more than a duty, a friendship, their own life, or the fate of other people. Flag it broadly: do not decide whether the feeling is earned. The intent and judge stages decide that from the arc beats.",
+    "[u3-devotion-as-vow] Flag u3-devotion-as-vow when a character describes devotion to a romantic partner or love interest as a sacred vow, as fate, or as giving up their own self. Oaths to lords, causes and comrades are not flagged here (see romantic-partner-only).",
+    "[u4-stake-through-other] Flag u4-stake-through-other when a line about a woman explains her own goal, fear or worth in terms of what a specific man thinks of her or needs from her. The cast notes give each character's gender. This criterion covers only a woman whose stake runs through a man.",
+    "[u5-rivalry-over-one-person] Flag u5-rivalry-over-one-person when two women in the scene compete or quarrel over the affection or attention of one man. The cast notes give each character's gender. This criterion covers only two women rivaling over a man.",
+    "[u6-overwrought-declaration] Flag u6-overwrought-declaration when a character declares romantic love or longing in extreme, breathless or life-or-death terms. Flag it broadly: do not decide whether the declaration is earned. The intent and judge stages decide that from the arc beats.",
+    "[u7-gender-rule] Flag u7-gender-rule when a line states what men or women may do, must do, or are like.",
+    "[first-person-desire] A character's own wish for an opposite-sex partner is protected. When a character voices their own desire, do not flag it under u1-presumed-opposite-sex. Only another character presuming that partner is flagged.",
+    "[romantic-partner-only] u3-devotion-as-vow covers devotion to a romantic partner or love interest only. Oaths to lords, causes and comrades are untouched and must not be flagged under u3-devotion-as-vow.",
+    "[gender-rule-narrow] u7-gender-rule is narrow. Do not flag a line in which a character is vulnerable or protective, even when the line mentions a gender. Flag only a line that states what men or women may do, must do, or are like.",
+    "[romance-as-default] Flag under u2-romance-outranks a line that treats romance as the default frame, such as being unpartnered as incomplete or marriage as what a life is for. Flag it broadly: the intent and judge stages apply the same earned and established-trait exemptions as for u2-romance-outranks.",
+    "[all-characters] The romance rules u1-presumed-opposite-sex, u2-romance-outranks, u3-devotion-as-vow and u6-overwrought-declaration, and the romance-as-default framing, apply to every character's romance framing, men's as well as women's, not only women's. The woman and man clauses of u4-stake-through-other and u5-rivalry-over-one-person are stated in their own criteria.",
+    "[protect-love-and-couples] Heterosexual attraction, couples, marriages, promises, and who loves whom are protected. Do not flag a line only because it states that two characters are a couple, that a marriage or promise exists, that a character is attracted to someone of the opposite sex, or who loves whom. Only the rules above flag a line.",
+    "[protect-plot] Plot facts are protected: what happens, who does what, the decisions characters make, and the events of the scene. Do not flag a line in order to change a plot fact, and do not flag a line whose only defect would be fixed by changing one.",
+    "[protect-traits] Character traits are protected, including a character's own straight desire and a flirt's flirting. Flag the framing of a romance, never the trait itself. A flirt stays a flirt.",
+    "[protect-operatic-stakes] The game's operatic non-romance stakes are protected: grand destinies, the fate of the world, battles, duty and sacrifice for a cause, and oaths to lords, causes and comrades. Do not flag a line because its stakes are large or its tone is grand.",
+    "[protect-earned-declarations] An earned declaration the story builds to is protected. A declaration is earned when the arc beats record a setup and an escalation beat between the same characters before the declaration, or the stance is the speaker's established trait. The screen sees one line at a time, so flag such a line under u2-romance-outranks or u6-overwrought-declaration as usual and leave the earned decision to the intent and judge stages.",
+    "[protect-affectionate-teasing] Affectionate teasing that does not treat same-sex attraction as shameful is protected. Do not flag teasing under u1-presumed-opposite-sex unless it treats closeness between two characters of the same sex as a joke, an insult or a threat.",
+    "[exclude-queer-additions] Do not flag a line in order to add a new romance, to add a queer addition, or to retarget a flirt. Those changes are out of scope.",
+    "[exclude-clumsy-lines] A clumsy, awkward or stilted line with none of the triggers above is out of scope. Do not flag it.",
+]
+
+[intent]
+rule = """
+You fix only the lines the screen flagged under the triage ids. Change as few lines as you can, and fully fix each line you change. Keep the original story.
+
+[fewest-lines] Touch the fewest lines possible, and each line you touch must be fully fixed. A partial fix that leaves the flagged trigger in place is not a fix. When a flagged trigger can be fixed by touching fewer lines, touch only those.
+
+[u1-presumed-opposite-sex] For a presumption that another character's partner or future partner is of the opposite sex, or for closeness between two characters of the same sex treated as a joke, an insult or a threat: remove the presumption, keep the sentiment, and make no one queer. Do not add a new romance.
+
+[u2-romance-outranks] For a romantic feeling said to matter more than a duty, a friendship, the speaker's own life, or the fate of other people: keep the feeling and size it to the moment. Also fix romance-as-default framing the same way: being unpartnered is not presented as incomplete, and marriage is not presented as what a life is for, unless the line is earned or the stance is the speaker's established trait. Leave the line unchanged when the earned test below is met.
+
+[earned] For u2-romance-outranks, u6-overwrought-declaration and the romance-as-default framing, a declaration or stance is earned when the arc beats in your context record a setup and an escalation beat between the same characters before the declaration, or when the stance is the speaker's established trait. An earned line is left unchanged. Fix only lines that are not earned.
+
+[u3-devotion-as-vow] For devotion to a romantic partner or love interest described as a sacred vow, as fate, or as giving up the speaker's own self: make it a choice between equals, with the same commitment and the same action. Oaths to lords, causes and comrades are not in scope.
+
+[u4-stake-through-other] For a woman's own goal, fear or worth routed through a man when the line is about her: return the stake to her, so that the goal, fear or worth is hers.
+
+[u5-rivalry-over-one-person] For two women competing or quarreling over a man: keep the tension and make it about them, not about the man.
+
+[no-invented-motive] For a u5-rivalry-over-one-person line, when the scene offers no other motive for the tension, the line stays vanilla. Do not add an invented motive.
+
+[u6-overwrought-declaration] For an unearned romantic declaration in extreme, breathless or life-or-death terms: write it in an adult register and keep its sentiment.
+
+[u7-gender-rule] For a line that states what men or women may do, must do, or are like: make it neutral. Never change a line in which a character is vulnerable or protective, even when it mentions a gender.
+
+[leave-for-plot] A flagged line that can be fixed only by changing a plot fact stays vanilla. Do not change the plot to make a fix work.
+
+[protect-love-and-couples] Do not change heterosexual attraction, couples, marriages, promises, or who loves whom. Fix only the presumption, framing or rule the flag names.
+
+[protect-plot] Do not change plot facts: what happens, who does what, the decisions characters make, or the events of the scene.
+
+[protect-traits] Keep character traits, including a character's own straight desire. A flirt stays a flirt. A character's own wish for an opposite-sex partner is not changed; the u1-presumed-opposite-sex fix targets only a presumption imposed on another character. Change the story's framing of a romance, never the character.
+
+[protect-operatic-stakes] Keep the game's operatic non-romance stakes, including grand destinies, the fate of the world, battles, duty and sacrifice for a cause, and oaths to lords, causes and comrades.
+
+[protect-earned-declarations] Do not change an earned declaration. Apply the earned test first.
+
+[protect-affectionate-teasing] Keep affectionate teasing that does not treat same-sex attraction as shameful.
+
+[exclude-queer-additions] Add no new romance, no queer addition, and no flirt retargeting.
+
+[exclude-clumsy-lines] Do not rewrite a clumsy line that has no flagged trigger.
+"""
+
+[judge]
+rubric = """
+You judge one rewrite of a flagged line against its vanilla line. A change that touches any protected item below is rejected. Reject a rewrite that fails any check, and name the label it fails.
+
+[fewest-lines] Reject a rewrite that touches more lines than the fix needs, or a touched line whose flagged trigger is still present. A rewrite passes only when it answers no to the reason question of its line.
+
+[leave-for-plot] Reject a rewrite that changes a plot fact to fix a line. A line that needs a plot change to be fixed must stay vanilla, because the story must stay as written.
+
+[u1-presumed-opposite-sex] A passing rewrite removes a presumption that another character's partner or future partner is of the opposite sex, or removes same-sex closeness treated as a joke, an insult or a threat. It keeps the sentiment. Reject a rewrite that keeps the presumption, or that drops the sentiment.
+
+[first-person-desire] Reject a rewrite that changes a character's own wish for an opposite-sex partner. The u1-presumed-opposite-sex fix targets only a presumption imposed on another character, because the character's own straight desire is a trait.
+
+[u2-romance-outranks] A passing rewrite keeps the romantic feeling and sizes it to the moment. It also treats romance-as-default framing the same way: being unpartnered is not presented as incomplete, and marriage is not presented as what a life is for, unless the line is earned or is the speaker's established trait. Reject a rewrite that deletes the feeling itself, or that leaves unearned romantic supremacy in place.
+
+[earned] Read earned from the arc beats in your context. A declaration or stance is earned when the arc beats record a setup and an escalation beat between the same characters before the declaration, or when the stance is the speaker's established trait. Reject any rewrite of an earned line, because the story builds to it.
+
+[u3-devotion-as-vow] A passing rewrite makes devotion to a romantic partner or love interest a choice between equals, with the same commitment and the same action. Reject a rewrite that changes the commitment or the action.
+
+[romantic-partner-only] Reject a rewrite that changes an oath to a lord, a cause or a comrade under u3-devotion-as-vow. That rule covers devotion to a romantic partner or love interest only.
+
+[u4-stake-through-other] A passing rewrite returns a woman's own goal, fear or worth to her. Reject a rewrite that leaves the stake routed through a man.
+
+[u5-rivalry-over-one-person] A passing rewrite keeps the tension between the two women and makes it about them, not about the man. Reject a rewrite that removes the tension.
+
+[no-invented-motive] Reject a rewrite of a u5-rivalry-over-one-person line that adds a motive the scene does not offer. When the scene offers no other motive, the line must stay vanilla.
+
+[u6-overwrought-declaration] A passing rewrite of an unearned declaration is in adult register and keeps its sentiment. Reject a rewrite that drops the sentiment, or that keeps extreme, breathless or life-or-death terms.
+
+[u7-gender-rule] A passing rewrite states the line neutrally, without what men or women may do, must do, or are like. Reject a rewrite that keeps a gender rule in the line.
+
+[gender-rule-narrow] U7 touches only a line that states a gender rule. Reject any change to a line in which a character is vulnerable or protective, even when the line mentions a gender.
+
+[protect-love-and-couples] Reject a rewrite that changes heterosexual attraction, a couple, a marriage, a promise, or who loves whom. Those are the story's relationships.
+
+[protect-plot] Reject a rewrite that changes a plot fact: what happens, who does what, the decisions characters make, or the events of the scene.
+
+[protect-traits] Reject a rewrite that changes a character trait, including a character's own straight desire. A flirt stays a flirt, so a rewrite that tones a flirt down is rejected.
+
+[protect-operatic-stakes] Reject a rewrite that tones down the game's operatic non-romance stakes, because the story's grand moments are part of the original story.
+
+[protect-earned-declarations] Reject a rewrite that changes an earned declaration. See earned.
+
+[protect-affectionate-teasing] Reject a rewrite that removes teasing which does not treat same-sex attraction as shameful.
+
+[exclude-queer-additions] Reject a rewrite that adds a new romance, adds a queer addition, or retargets a flirt. Those changes are out of scope for this lens.
+
+[exclude-clumsy-lines] Reject a rewrite of a defect-free clumsy line. A clumsy line with no flagged trigger is out of scope.
+"""
