@@ -172,17 +172,20 @@ def _flagged(answer: Mapping[str, Any], lens: Lens, scene: Scene) -> list[dict[s
     ]
 
 
-def screen(store: Store, lens: Lens, scene: Scene, ask: Ask) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
-    lines = json.dumps(
+def _screen_lines(scene: Scene) -> str:
+    return json.dumps(
         [{"namespace": line.namespace, "key": line.key, "speaker": line.speaker, "english": line.english} for line in scene.lines],
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def screen(store: Store, lens: Lens, scene: Scene, ask: Ask) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
     parts = [
         SCREEN_INSTRUCTIONS,
         f"Screen criteria:\n{lens.stage_text('screen')}",
         f"Triage questions:\n{lens.stage_text('triage')}",
-        f"Scene lines:\n{lines}",
+        f"Scene lines:\n{_screen_lines(scene)}",
     ]
 
     def call() -> list[dict[str, Any]]:
@@ -200,6 +203,62 @@ def screen(store: Store, lens: Lens, scene: Scene, ask: Ask) -> dict[tuple[str, 
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["reasons"]) for entry in flagged}
+
+
+RESCREEN_INSTRUCTIONS = (
+    "Flag the scene lines that answer yes to the one triage question under the screen criteria. Return JSON with "
+    "flagged, one entry per flagged line, each with namespace and key. Refer to lines only by namespace and key."
+)
+
+RESCREEN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "flagged": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"namespace": {"type": "string"}, "key": {"type": "string"}},
+                "required": ["namespace", "key"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["flagged"],
+    "additionalProperties": False,
+}
+
+
+def rescreen(
+    store: Store,
+    lens: Lens,
+    scene: Scene,
+    question: TriageQuestion,
+    ask: Ask,
+) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+    parts = [
+        RESCREEN_INSTRUCTIONS,
+        f"Screen criteria:\n{lens.stage_text('screen')}",
+        f"Triage question:\n{_json({'id': question.id, 'question': question.question})}",
+        f"Scene lines:\n{_screen_lines(scene)}",
+    ]
+
+    def call() -> list[dict[str, str]]:
+        answer = ask(claude.OPUS, parts, RESCREEN_SCHEMA)
+        if isinstance(answer, Unfinished | Rejected):
+            raise _Unanswered(answer)
+        known = {(line.namespace, line.key) for line in scene.lines}
+        refs = list(dict.fromkeys((entry["namespace"], entry["key"]) for entry in answer["flagged"]))
+        for namespace, key in refs:
+            if (namespace, key) not in known:
+                raise _Unanswered(Rejected(f"flagged line {namespace}/{key} is not in scene {scene.key}"))
+        return [{"namespace": namespace, "key": key} for namespace, key in refs]
+
+    inputs = {**_inputs(scene), "question": question.id, "text": question.question}
+    try:
+        flagged = store.run("rescreen", inputs, lens.stage_text("screen"), call).value
+    except _Unanswered as unanswered:
+        return unanswered.failure
+    return {(entry["namespace"], entry["key"]): (question.id,) for entry in flagged}
 
 
 def _json(value: Any) -> str:

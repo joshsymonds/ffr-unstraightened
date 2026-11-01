@@ -15,6 +15,8 @@ from ffrd.pipeline.stages import (
     DRAFT_SCHEMA,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
+    RESCREEN_INSTRUCTIONS,
+    RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     Batch,
     Scene,
@@ -25,6 +27,7 @@ from ffrd.pipeline.stages import (
     intent,
     judge,
     render,
+    rescreen,
     scene_text,
     screen,
     triage,
@@ -594,5 +597,149 @@ def test_editing_judge_rubric_reruns_cross_judge(tmp_path: Path) -> None:
     edited = replace(LENS, judge_rubric="Edited judge rubric. Not game text.")
 
     cross_judge(store, edited, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], (LINE_TWO,), ask)
+
+    assert len(ask.calls) == 2
+
+
+# Made-up re-screen fixtures. Not game text.
+QUESTION_ALPHA = LENS.triage[0]
+QUESTION_BETA = LENS.triage[1]
+LINE_ONE_REF = {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}
+LINE_TWO_REF = {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}
+RESCREEN_ANSWER = {"flagged": [LINE_ONE_REF, LINE_TWO_REF]}
+
+
+def test_rescreen_schema_requires_flagged_and_forbids_extra_properties() -> None:
+    item = RESCREEN_SCHEMA["properties"]["flagged"]["items"]
+
+    assert RESCREEN_SCHEMA["type"] == "object"
+    assert RESCREEN_SCHEMA["required"] == ["flagged"]
+    assert RESCREEN_SCHEMA["additionalProperties"] is False
+    assert RESCREEN_SCHEMA["properties"]["flagged"]["type"] == "array"
+    assert item["required"] == ["namespace", "key"]
+    assert item["properties"] == {"namespace": {"type": "string"}, "key": {"type": "string"}}
+    assert item["additionalProperties"] is False
+
+
+def test_rescreen_asks_opus_once_with_schema_and_maps_lines_to_the_question_id(tmp_path: Path) -> None:
+    ask = Fake(RESCREEN_ANSWER)
+
+    result = rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, ask)
+
+    assert result == {
+        (LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",),
+        (LINE_TWO.namespace, LINE_TWO.key): ("made-up-alpha",),
+    }
+    assert len(ask.calls) == 1
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == RESCREEN_SCHEMA
+    assert parts == [
+        RESCREEN_INSTRUCTIONS,
+        f"Screen criteria:\n{LENS.stage_text('screen')}",
+        'Triage question:\n{"id": "made-up-alpha", "question": "Made-up question alpha. Not game text."}',
+        parts[3],
+    ]
+    assert parts[3].startswith("Scene lines:\n")
+
+
+def test_rescreen_prompt_carries_the_one_question_and_no_other(tmp_path: Path) -> None:
+    ask = Fake({"flagged": []})
+
+    rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, ask)
+
+    prompt = "\n".join(ask.calls[0][1])
+    assert "made-up-alpha" in prompt
+    assert "made-up-beta" not in prompt
+    assert "Made-up question beta. Not game text." not in prompt
+
+
+def test_rescreen_sends_the_same_scene_lines_as_screen(tmp_path: Path) -> None:
+    screen_ask = Fake({"flagged": []})
+    rescreen_ask = Fake({"flagged": []})
+    screen(Store(tmp_path), LENS, SCENE, screen_ask)
+
+    rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, rescreen_ask)
+
+    assert rescreen_ask.calls[0][1][3] == screen_ask.calls[0][1][3]
+
+
+def test_rescreen_with_no_flagged_lines_returns_empty_mapping(tmp_path: Path) -> None:
+    assert rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, Fake({"flagged": []})) == {}
+
+
+def test_rescreen_given_the_same_line_twice_returns_it_once(tmp_path: Path) -> None:
+    ask = Fake({"flagged": [LINE_ONE_REF, LINE_ONE_REF]})
+
+    result = rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, ask)
+
+    assert result == {(LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",)}
+
+
+def test_rescreen_rejects_a_line_outside_the_scene_and_stores_nothing(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake({"flagged": [{"namespace": "ST_C09_001_01", "key": "1"}]})
+
+    result = rescreen(store, LENS, SCENE, QUESTION_ALPHA, ask)
+
+    assert isinstance(result, Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_rescreen_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, RESCREEN_ANSWER)
+
+    assert rescreen(store, LENS, SCENE, QUESTION_ALPHA, ask) == failure
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert rescreen(store, LENS, SCENE, QUESTION_ALPHA, ask) == {
+        (LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",),
+        (LINE_TWO.namespace, LINE_TWO.key): ("made-up-alpha",),
+    }
+    assert len(ask.calls) == 2
+    assert store.unfinished() == []
+
+
+def test_fresh_store_on_same_root_returns_stored_rescreen_without_asking(tmp_path: Path) -> None:
+    expected = {(LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",), (LINE_TWO.namespace, LINE_TWO.key): ("made-up-alpha",)}
+    rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, Fake(RESCREEN_ANSWER))
+    ask = Fake()
+
+    assert rescreen(Store(tmp_path), LENS, SCENE, QUESTION_ALPHA, ask) == expected
+    assert ask.calls == []
+
+
+def test_each_triage_question_is_asked_on_its_own(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(RESCREEN_ANSWER, RESCREEN_ANSWER)
+    rescreen(store, LENS, SCENE, QUESTION_ALPHA, ask)
+
+    result = rescreen(store, LENS, SCENE, QUESTION_BETA, ask)
+
+    assert result == {
+        (LINE_ONE.namespace, LINE_ONE.key): ("made-up-beta",),
+        (LINE_TWO.namespace, LINE_TWO.key): ("made-up-beta",),
+    }
+    assert len(ask.calls) == 2
+    second = "\n".join(ask.calls[1][1])
+    assert "made-up-beta" in second
+    assert "made-up-alpha" not in second
+
+
+def test_editing_screen_criteria_reruns_rescreen(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(RESCREEN_ANSWER, RESCREEN_ANSWER)
+    rescreen(store, LENS, SCENE, QUESTION_ALPHA, ask)
+    edited = replace(LENS, screen_criteria=("Edited criterion. Not game text.",))
+
+    rescreen(store, edited, SCENE, QUESTION_ALPHA, ask)
 
     assert len(ask.calls) == 2
