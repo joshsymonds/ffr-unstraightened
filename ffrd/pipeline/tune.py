@@ -113,7 +113,8 @@ def cmd_tune(args: argparse.Namespace) -> None:
     root = repo_root()
     lens = load_lens(root / "lenses" / f"{args.lens}.toml")
     directory = work_dir(args.lens)
-    scenes = scoped(stages.bindings().scenes.scenes())
+    source = stages.bindings().scenes
+    scenes = scoped(source.scenes(), scene_table=source.scene_table)
     tuning = tune(Store(directory), lens, scenes, jev.triage, lambda: stages.Batch().ask)
     save_threshold(directory, tuning)
     print(

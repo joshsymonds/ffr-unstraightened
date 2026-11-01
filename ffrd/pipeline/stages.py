@@ -30,6 +30,9 @@ class Scene:
 
 
 class SceneSource(Protocol):
+    # True when the scenes come from the game's scene table (lines referenced by event assets), False otherwise.
+    scene_table: bool
+
     def scenes(self) -> Sequence[Scene]: ...
 
 

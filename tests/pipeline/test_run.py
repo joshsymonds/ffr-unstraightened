@@ -490,8 +490,9 @@ class FakeClassifier:
 
 
 class FakeSource:
-    def __init__(self, scenes: Sequence[Scene]) -> None:
+    def __init__(self, scenes: Sequence[Scene], *, scene_table: bool) -> None:
         self._scenes = list(scenes)
+        self.scene_table = scene_table
 
     def scenes(self) -> Sequence[Scene]:
         return self._scenes
@@ -534,6 +535,7 @@ def _run(
     renderer: FakeRenderer | None = None,
     scenes: Sequence[Scene] = SCENES,
     classifier: FakeClassifier | None = None,
+    scene_table: bool = False,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
@@ -546,6 +548,7 @@ def _run(
         run_id=RUN,
         jev=jev,
         batch=claude.start_batch,
+        scene_table=scene_table,
         out=printed.append,
     )
 
@@ -872,13 +875,21 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _bind(monkeypatch: pytest.MonkeyPatch, claude: FakeClaude, jev: FakeJev) -> None:
+def _bind(
+    monkeypatch: pytest.MonkeyPatch,
+    claude: FakeClaude,
+    jev: FakeJev,
+    *,
+    scenes: Sequence[Scene] = SCENES,
+    scene_table: bool = False,
+) -> None:
     class Batch:
         def __init__(self) -> None:
             self.ask: Ask = claude.start_batch()
 
     def bindings() -> Bindings:
-        return Bindings(scenes=FakeSource(SCENES), classifier=FakeClassifier(), renderer=FakeRenderer({OPUS_A1: VOICE_A1}))
+        source = FakeSource(scenes, scene_table=scene_table)
+        return Bindings(scenes=source, classifier=FakeClassifier(), renderer=FakeRenderer({OPUS_A1: VOICE_A1}))
 
     monkeypatch.setattr(stages, "bindings", bindings)
     monkeypatch.setattr(jev_module, "triage", jev)
@@ -941,3 +952,32 @@ def test_run_command_with_no_triage_needs_no_threshold_and_never_calls_jev(
     assert jev.calls == []
     assert capsys.readouterr().out.splitlines() == EXPECTED_PRINTED
     assert (lens_repo / "work" / LENS / report.OUTCOMES).is_file()
+
+
+# Made-up story line outside the fallback allowlist. Not game text.
+NS_STORY = "ST_Story_001"
+EN_STORY = "Made-up story line. Not game text."
+STORY_SCENE = Scene("made-up-scene-story", (_line(NS_STORY, "1", None, EN_STORY, 1),))
+
+
+@pytest.mark.parametrize(("scene_table", "present"), [(False, False), (True, True)])
+def test_run_keeps_a_line_outside_the_fallback_allowlist_only_with_a_scene_table(tmp_path: Path, scene_table: bool, present: bool) -> None:
+    claude = _claude()
+    claude.bible = {}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None, scenes=(STORY_SCENE,), scene_table=scene_table)
+    assert [(o.namespace, o.key) for o in outcomes] == ([(NS_STORY, "1")] if present else [])
+
+
+@pytest.mark.parametrize(("scene_table", "present"), [(False, False), (True, True)])
+def test_run_command_scopes_by_the_bound_source_scene_table(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, scene_table: bool, present: bool
+) -> None:
+    claude = _claude()
+    claude.bible = {}
+    _bind(monkeypatch, claude, FakeJev(JEV_HIGH), scenes=(STORY_SCENE,), scene_table=scene_table)
+    args = _parse(["run", "--lens", LENS, "--no-triage"])
+
+    args.fn(args)
+
+    outcome_text = (lens_repo / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
+    assert (NS_STORY in outcome_text) is present

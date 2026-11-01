@@ -341,9 +341,10 @@ def run(
     run_id: str,
     jev: Triage,
     batch: Callable[[], Ask],
+    scene_table: bool,
     out: Callable[[str], None] = print,
 ) -> list[Outcome]:
-    scenes = scoped(scenes)
+    scenes = scoped(scenes, scene_table=scene_table)
     bible_ask = batch()
     built = bible.build(store, _chapters(scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema))
     if not isinstance(built, list):
@@ -395,6 +396,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         run_id=run_id,
         jev=jev_client.triage,
         batch=_batch,
+        scene_table=bound.scenes.scene_table,
     )
 
 

@@ -253,8 +253,9 @@ SCENE_TWO = Scene(
 
 
 class _Source:
-    def __init__(self, scenes: list[Scene]) -> None:
+    def __init__(self, scenes: list[Scene], *, scene_table: bool) -> None:
         self._scenes = scenes
+        self.scene_table = scene_table
 
     def scenes(self) -> list[Scene]:
         return self._scenes
@@ -285,7 +286,7 @@ def _parser() -> argparse.ArgumentParser:
 def test_cmd_tune_scopes_scenes_saves_threshold_and_prints_only_the_counts(
     cmd_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(stages, "bindings", lambda: SimpleNamespace(scenes=_Source([SCENE_ONE, SCENE_TWO])))
+    monkeypatch.setattr(stages, "bindings", lambda: SimpleNamespace(scenes=_Source([SCENE_ONE, SCENE_TWO], scene_table=False)))
     jev_fake = Fake(scores(0.9, 0.1), scores(0.2, 0.3))
     batches = Asks(FLAGGED, NOT_FLAGGED)
     monkeypatch.setattr(jev, "triage", jev_fake)
@@ -304,6 +305,20 @@ def test_cmd_tune_scopes_scenes_saves_threshold_and_prints_only_the_counts(
     assert len(jev_fake.calls) == 2
     assert OUT_OF_SCOPE_TEXT not in repr(jev_fake.calls)
     assert OUT_OF_SCOPE_TEXT not in repr([fake.calls for fake in batches.made])
+
+
+def test_cmd_tune_scopes_by_the_bound_source_scene_table(
+    cmd_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(stages, "bindings", lambda: SimpleNamespace(scenes=_Source([SCENE_ONE, SCENE_TWO], scene_table=True)))
+    jev_fake = Fake(scores(0.9, 0.1), scores(0.2, 0.3))
+    batches = Asks(FLAGGED, NOT_FLAGGED)
+    monkeypatch.setattr(jev, "triage", jev_fake)
+    monkeypatch.setattr(stages, "Batch", lambda: _Batch(batches()))
+
+    cmd_tune(argparse.Namespace(lens=CLI_LENS))
+
+    assert OUT_OF_SCOPE_TEXT in repr(jev_fake.calls)
 
 
 def test_cmd_tune_with_unbound_scenes_fails_with_the_bindings_message_and_writes_nothing(
