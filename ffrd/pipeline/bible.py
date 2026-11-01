@@ -283,10 +283,16 @@ def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], a
         if not isinstance(result, dict):
             return result
         bibles.append(result)
-    found: list[list[dict[str, Any]]] = [[] for _ in bibles]
-    for index in reversed(range(len(bibles))):
+
+    def setups_for(index: int) -> list[dict[str, Any]] | Unfinished | Rejected:
+        # Each setups call reads only the later forward bibles, never another setups call's result.
         number, lines = ordered[index]
-        result = setups(store, number, lines, bibles[index + 1 :], scope, ask)
+        return setups(store, number, lines, bibles[index + 1 :], scope, ask)
+
+    indexes = list(reversed(range(len(bibles))))
+    found: dict[int, list[dict[str, Any]]] = {}
+    for index, result in zip(indexes, fan_out(setups_for, indexes), strict=True):
+        # Results come back in index order, highest first, so the first failure is the one the sequential loop returned.
         if not isinstance(result, list):
             return result
         found[index] = result

@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict
 from functools import partial
@@ -9,7 +10,7 @@ from typing import Any
 import pytest
 
 from ffrd.pipeline import claude
-from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, STAGE, Line, build, chapter, setups, touching
+from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, SETUP_STAGE, STAGE, Line, build, chapter, setups, touching
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.store import Store, key
 
@@ -367,22 +368,31 @@ def test_setup_schema_requires_line_depends_and_meaning_with_no_extra_properties
     assert setup["properties"]["meaning"] == {"type": "string"}
 
 
-def test_build_runs_setups_backward_and_each_reads_only_later_forward_bibles(tmp_path: Path) -> None:
-    ask = FakeAsk(BIBLE_ONE, BIBLE_TWO, SETUP_TWO, SETUP_ONE)
+def test_build_asks_each_setups_with_only_later_forward_bibles_and_no_setups(tmp_path: Path) -> None:
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO},
+        {C1_LINES[0].text: SETUP_ONE, C2_LINES[0].text: SETUP_TWO},
+    )
 
     build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], ask)
 
     assert [schema for _, schema in ask.calls] == [SCHEMA, SCHEMA, SETUP_SCHEMA, SETUP_SCHEMA]
-    assert "Chapter 2 lines:\n" in _prompt(ask, 2)
-    assert "Later bibles:\n[]" in _prompt(ask, 2)
-    assert "Chapter 1 lines:\n" in _prompt(ask, 3)
-    assert "Later bibles:\n" in _prompt(ask, 3)
-    assert "Made-up callback meaning two. Not game text." in _prompt(ask, 3)
-    assert "Made-up setup meaning two. Not game text." not in _prompt(ask, 3)
+    chapter_two = _setups_call(ask, C2_LINES[0].text)
+    assert "Chapter 2 lines:\n" in chapter_two
+    assert "Later bibles:\n[]" in chapter_two
+    chapter_one = _setups_call(ask, C1_LINES[0].text)
+    assert "Chapter 1 lines:\n" in chapter_one
+    assert "Later bibles:\n" in chapter_one
+    assert "Made-up callback meaning two. Not game text." in chapter_one
+    assert "Made-up setup meaning two. Not game text." not in chapter_one
 
 
 def test_build_appends_setups_after_forward_callbacks_and_touching_finds_them(tmp_path: Path) -> None:
-    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], FakeAsk(BIBLE_ONE, BIBLE_TWO, SETUP_TWO, SETUP_ONE))
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO},
+        {C1_LINES[0].text: SETUP_ONE, C2_LINES[0].text: SETUP_TWO},
+    )
+    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], ask)
 
     assert isinstance(built, list)
     assert built == [
@@ -416,14 +426,16 @@ def test_fresh_store_on_same_root_returns_stored_setups_without_asking(tmp_path:
 
 
 class ByLine:
-    """Answers a bible prompt by the made-up line it carries, so concurrent chunks get their own answers in any order.
+    """Answers a prompt by the made-up line it carries, so concurrent calls get their own answers in any order.
 
-    A callable answer is called first, which lets a test hold a chunk. Setup prompts get no setups. Counts the calls
-    in flight at once. Not game text.
+    A bible prompt gets the answer keyed by its line in answers. A setup prompt gets the answer keyed by its chapter's
+    line in setup_answers, or no setups when none is keyed. A callable answer is called first, which lets a test hold
+    a call. Counts the calls in flight at once. Not game text.
     """
 
-    def __init__(self, answers: Mapping[str, Any]) -> None:
+    def __init__(self, answers: Mapping[str, Any], setup_answers: Mapping[str, Any] | None = None) -> None:
         self.answers = dict(answers)
+        self.setup_answers = dict(setup_answers or {})
         self.calls: list[tuple[tuple[str, ...], Mapping[str, Any]]] = []
         self.in_flight = 0
         self.peak = 0
@@ -435,12 +447,17 @@ class ByLine:
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
         try:
-            if schema is SETUP_SCHEMA:
-                return NO_SETUPS
             prompt = "\n".join(parts)
-            matches = [line for line in self.answers if line in prompt]
-            assert len(matches) == 1, "prompt names no single known line"
-            answer = self.answers[matches[0]]
+            if schema is SETUP_SCHEMA:
+                matches = [line for line in self.setup_answers if line in prompt]
+                assert len(matches) <= 1, "setup prompt names more than one known line"
+                if not matches:
+                    return NO_SETUPS
+                answer = self.setup_answers[matches[0]]
+            else:
+                matches = [line for line in self.answers if line in prompt]
+                assert len(matches) == 1, "prompt names no single known line"
+                answer = self.answers[matches[0]]
             return answer() if callable(answer) else answer
         finally:
             with self._lock:
@@ -454,6 +471,24 @@ def _part(parts: Sequence[str], prefix: str) -> str:
 def _bible_call(ask: ByLine, text: str) -> tuple[str, ...]:
     (parts,) = [parts for parts, schema in ask.calls if schema is SCHEMA and any(text in part for part in parts)]
     return parts
+
+
+def _setups_call(ask: ByLine, text: str) -> str:
+    (parts,) = [parts for parts, schema in ask.calls if schema is SETUP_SCHEMA and any(text in part for part in parts)]
+    return "\n".join(parts)
+
+
+def _meet(gate: threading.Barrier, answer: Any) -> Any:
+    gate.wait()
+    return answer
+
+
+HOLD = 0.2  # Seconds a held setups call stays in flight, so a call past the concurrency limit would overlap it.
+
+
+def _hold(answer: Any) -> Any:
+    time.sleep(HOLD)
+    return answer
 
 
 def _earlier(parts: Sequence[str]) -> Any:
@@ -633,3 +668,72 @@ def test_failed_setups_are_returned_store_nothing_and_stay_unfinished(
     assert isinstance(result, failure)
     assert store.finished() == []
     assert len(store.unfinished()) == 1
+
+
+def test_setups_calls_for_two_chapters_overlap_and_never_exceed_the_configured_concurrency(
+    tmp_path: Path, restore_concurrency: None
+) -> None:
+    claude.set_concurrency(2)
+    gate = threading.Barrier(2, timeout=10)
+    lines_a, bible_a = _unplaced("A")
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO, lines_a[0].text: bible_a},
+        {
+            # The unplaced chunk's setups call is asked first and held, so a third call in flight would push the peak past 2.
+            lines_a[0].text: partial(_hold, NO_SETUPS),
+            C1_LINES[0].text: partial(_meet, gate, SETUP_ONE),
+            C2_LINES[0].text: partial(_meet, gate, SETUP_TWO),
+        },
+    )
+
+    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES), (None, lines_a)], ask)
+
+    assert built == [
+        {**BIBLE_ONE, "chapter": 1, "callbacks": [*BIBLE_ONE["callbacks"], *SETUP_ONE["setups"]]},
+        {**BIBLE_TWO, "chapter": 2, "callbacks": [*BIBLE_TWO["callbacks"], *SETUP_TWO["setups"]]},
+        {**bible_a, "chapter": None},
+    ]
+    assert ask.peak == 2
+
+
+def test_setups_store_under_the_same_inputs_and_a_rerun_asks_no_setups(tmp_path: Path) -> None:
+    chapters = [(1, C1_LINES), (2, C2_LINES)]
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO},
+        {C1_LINES[0].text: SETUP_ONE, C2_LINES[0].text: SETUP_TWO},
+    )
+    built = build(Store(tmp_path), chapters, ask)
+
+    store = Store(tmp_path)
+    chapter_one = {"chapter": 1, "lines": [asdict(line) for line in C1_LINES], "later": [{**BIBLE_TWO, "chapter": 2}]}
+    chapter_two = {"chapter": 2, "lines": [asdict(line) for line in C2_LINES], "later": []}
+    assert store.read(key(SETUP_STAGE, chapter_one, None)) is not None
+    assert store.read(key(SETUP_STAGE, chapter_two, None)) is not None
+
+    rerun = FakeAsk()
+    assert build(Store(tmp_path), chapters, rerun) == built
+    assert rerun.calls == []
+
+
+def test_failed_setups_return_the_highest_chapter_failure_whatever_order_they_finish(tmp_path: Path, restore_concurrency: None) -> None:
+    claude.set_concurrency(2)
+    one_unfinished = threading.Event()
+
+    def unfinished_one() -> Unfinished:
+        # Chapter one fails first, so the chapter order, not the finish order, picks the failure. Not game text.
+        one_unfinished.set()
+        return Unfinished("Made-up unfinished detail one. Not game text.")
+
+    def reject_two() -> Rejected:
+        if not one_unfinished.wait(timeout=10):
+            raise TimeoutError("chapter one was never unfinished")
+        return Rejected("Made-up rejected detail two. Not game text.")
+
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO},
+        {C1_LINES[0].text: unfinished_one, C2_LINES[0].text: reject_two},
+    )
+
+    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], ask)
+
+    assert built == Rejected("Made-up rejected detail two. Not game text.")
