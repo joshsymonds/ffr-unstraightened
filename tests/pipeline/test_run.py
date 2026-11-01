@@ -600,6 +600,7 @@ def _run(
     classifier: FakeClassifier | None = None,
     scene_table: bool = False,
     batch: Callable[[], Ask] | None = None,
+    through: int | None = None,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
@@ -612,6 +613,7 @@ def _run(
         jev=jev,
         batch=claude.start_batch if batch is None else batch,
         scene_table=scene_table,
+        through=through,
         out=printed.append,
     )
 
@@ -1848,3 +1850,176 @@ def test_readme_documents_the_concurrency_option_in_the_run_row() -> None:
     readme = (Path(__file__).parents[2] / "README.md").read_text(encoding="utf-8")
     row = next(line for line in readme.splitlines() if line.startswith("| `ffrd run --lens"))
     assert "[--concurrency N]" in row
+
+
+# Made-up chapter-order scene: an unplaced line, a chapter-1 line and a chapter-2 line. Not game text.
+NS_MIX = "ST_Mix_001"
+EN_MIX1 = "Made-up mixed line one, unplaced. Not game text."
+EN_MIX2 = "Made-up mixed line two, chapter one. Not game text."
+EN_MIX3 = "Made-up mixed line three, chapter two. Not game text."
+OPUS_MIX1 = "Made-up opus rewrite of mix one. Not game text."
+OPUS_MIX2 = "Made-up opus rewrite of mix two. Not game text."
+OPUS_MIX3 = "Made-up opus rewrite of mix three. Not game text."
+MIXED = Scene(
+    "made-up-scene-mixed",
+    (
+        _line(NS_MIX, "1", None, EN_MIX1, None),
+        _line(NS_MIX, "2", "made-up-speaker-a", EN_MIX2, 1),
+        _line(NS_MIX, "3", None, EN_MIX3, 2),
+    ),
+)
+EXPECTED_PROVISIONAL = (
+    "chapter 1: 1 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 1\n"
+    "  gate minimal_change: 1\n"
+    "total: 1 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 1\n"
+    "  gate minimal_change: 1\n"
+)
+EXPECTED_PROVISIONAL_ARC = (
+    "chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 1\n"
+    "total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 1\n"
+)
+EXPECTED_PROVISIONAL_MIXED = (
+    "chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 1\n"
+    "total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 1\n"
+)
+
+
+def _add_mixed(claude: FakeClaude) -> FakeClaude:
+    claude.flags.update({(NS_MIX, "1"): [ALPHA], (NS_MIX, "2"): [ALPHA], (NS_MIX, "3"): [ALPHA]})
+    claude.drafts.update({(NS_MIX, "1"): [OPUS_MIX1], (NS_MIX, "2"): [OPUS_MIX2], (NS_MIX, "3"): [OPUS_MIX3]})
+    return claude
+
+
+def _c01_path(tmp_path: Path) -> Path:
+    return tmp_path / "repo" / "reports" / f"{LENS}-c01.txt"
+
+
+def test_scenes_run_chapter_one_first_then_ascending_chapters_and_chapterless_last(tmp_path: Path) -> None:
+    claude_module.set_concurrency(1)
+    printed: list[str] = []
+    _run(tmp_path, _add_mixed(_claude()), printed, jev=FakeJev(JEV_HIGH), scenes=(SCENE_C, SCENE_B, MIXED, SCENE_A), scene_table=True)
+    assert _scene_order(printed) == ["made-up-scene-mixed", "made-up-scene-a", "made-up-scene-b", "made-up-scene-c"]
+
+
+def test_provisional_file_holds_chapter_one_counts_in_report_format(tmp_path: Path) -> None:
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == EXPECTED_PROVISIONAL
+
+
+def test_provisional_file_is_written_while_a_later_chapter_scene_still_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude_module.set_concurrency(2)
+    claude = _claude()
+    probe = _c01_path(tmp_path)
+    seen: list[bool] = []
+    ask = claude.ask
+
+    def probed(model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
+        if schema is SCREEN_SCHEMA and any(line["namespace"] == NS_B for line in json.loads(_part(parts, "Scene lines:\n"))):
+            # The chapter-two screen waits for the chapter-one file. A file written only after every scene finishes is not there yet.
+            deadline = time.monotonic() + MEET_TIMEOUT
+            while not probe.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            seen.append(probe.exists())
+        return ask(model, parts, schema)
+
+    monkeypatch.setattr(claude, "ask", probed)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert seen == [True]
+    assert outcomes == EXPECTED_OUTCOMES
+    assert probe.read_text(encoding="utf-8") == EXPECTED_PROVISIONAL
+
+
+def test_provisional_file_ignores_an_arc_revert_of_a_chapter_one_change(tmp_path: Path) -> None:
+    claude = _arc_claude()
+    claude.arc = [_arc_verdict(False, (NS_A, "1")), _arc_verdict(False, (NS_A, "1"))]
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=ARC_SCENES)
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None)
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == EXPECTED_PROVISIONAL_ARC
+
+
+def test_provisional_file_counts_only_chapter_one_lines_of_a_mixed_scene(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    # The default chapter-one bible names lines of other scenes, so this scene gets an empty one.
+    claude.bible = {1: EMPTY_BIBLE}
+    _run(tmp_path, _add_mixed(claude), [], jev=None, scenes=(MIXED,), scene_table=True)
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == EXPECTED_PROVISIONAL_MIXED
+
+
+def test_provisional_file_waits_for_every_scene_holding_a_chapter_one_line(tmp_path: Path) -> None:
+    _run(tmp_path, _add_mixed(_claude()), [], jev=None, scenes=(SCENE_A, MIXED), scene_table=True)
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == (
+        "chapter 1: 2 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched\n"
+        f"  reason {ALPHA}: 2\n"
+        "  character 1: 2\n"
+        "  gate minimal_change: 1\n"
+        "total: 2 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched\n"
+        f"  reason {ALPHA}: 2\n"
+        "  character 1: 2\n"
+        "  gate minimal_change: 1\n"
+    )
+
+
+def test_no_provisional_file_when_the_run_has_no_chapter_one_line(tmp_path: Path) -> None:
+    _run(tmp_path, _claude(), [], jev=None, scenes=(SCENE_B, SCENE_C))
+    assert not _c01_path(tmp_path).exists()
+
+
+def test_through_one_runs_only_chapter_one_and_writes_its_outputs(tmp_path: Path) -> None:
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    printed: list[str] = []
+    outcomes = _run(tmp_path, claude, printed, jev=jev, through=1)
+    assert outcomes == EXPECTED_OUTCOMES[:4]
+    assert not any(text in prompt for prompt in _all_prompts(claude, jev) for text in (NS_B, NS_C, NS_OUT, EN_B1, EN_B2, EN_C1, EN_OUT))
+    assert len(jev.calls) == 1
+    assert _scene_order(printed) == [SCENE_A.key]
+    assert _dialog_files(tmp_path / "repo" / "dialog" / LENS) == ["chapter-01.toml"]
+    assert len((tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()) == 4
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == EXPECTED_PROVISIONAL
+
+
+def test_through_one_drops_the_chapterless_and_later_chapter_lines_of_a_kept_scene(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE}
+    outcomes = _run(tmp_path, _add_mixed(claude), [], jev=None, scenes=(MIXED,), scene_table=True, through=1)
+    assert [(o.namespace, o.key) for o in outcomes] == [(NS_MIX, "2")]
+    assert not any(text in part for _, parts, _ in claude.calls for part in parts for text in (EN_MIX1, EN_MIX3))
+
+
+@pytest.mark.parametrize("limit", [0, -2])
+def test_through_below_one_fails_before_any_claude_call(tmp_path: Path, limit: int) -> None:
+    claude = _claude()
+    with pytest.raises(Fail, match="through must be at least 1"):
+        _run(tmp_path, claude, [], jev=None, through=limit)
+    assert claude.batches == 0
+    assert claude.calls == []
+
+
+def test_register_declares_the_through_option_with_all_chapters_by_default() -> None:
+    assert _parse(["run", "--lens", LENS]).through is None
+    assert _parse(["run", "--lens", LENS, "--through", "2"]).through == 2
+
+
+def test_run_command_passes_through_to_the_run(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    _bind(monkeypatch, claude, jev)
+    args = _parse(["run", "--lens", LENS, "--through", "1"])
+
+    args.fn(args)
+
+    assert _dialog_files(lens_repo / "dialog" / LENS) == ["chapter-01.toml"]
+    assert len(jev.calls) == 1
+    assert (lens_repo / "reports" / f"{LENS}-c01.txt").read_text(encoding="utf-8") == EXPECTED_PROVISIONAL

@@ -21,7 +21,7 @@ from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line
 from ffrd.pipeline.lens import Lens, load_lens
-from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL
+from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, Record, render
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose
 from ffrd.pipeline.stages import Ask, Classifier, Renderer, Scene, SceneLine, Triage
@@ -189,6 +189,25 @@ def _chapters(scenes: Sequence[Scene]) -> list[tuple[int | None, list[bible.Line
     numbered: list[tuple[int | None, list[bible.Line]]] = [(number, list(seen.values())) for number, seen in sorted(by_chapter.items())]
     loose = [(None, list(unplaced[namespace].values())) for namespace in sorted(unplaced, key=lambda ns: (natural(ns), ns))]
     return numbered + loose
+
+
+def _limited(scenes: Sequence[Scene], limit: int) -> list[Scene]:
+    kept: list[Scene] = []
+    for scene in scenes:
+        lines = tuple(line for line in scene.lines if line.chapter is not None and line.chapter <= limit)
+        if lines:
+            kept.append(Scene(key=scene.key, lines=lines))
+    return kept
+
+
+def _chapter_order(scene: Scene) -> tuple[bool, int]:
+    """Orders a scene by the smallest chapter of its lines, with chapterless scenes last."""
+    chapters = [line.chapter for line in scene.lines if line.chapter is not None]
+    return not chapters, min(chapters, default=0)
+
+
+def _holds_chapter_one(scene: Scene) -> bool:
+    return any(line.chapter == 1 for line in scene.lines)
 
 
 def _speakers(scene: Scene) -> set[str | None]:
@@ -493,6 +512,23 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
     return outcomes, changes, recall
 
 
+def _record(outcome: Outcome) -> Record:
+    return Record(
+        chapter=outcome.chapter,
+        speaker=outcome.speaker,
+        reasons=frozenset(outcome.reasons),
+        outcome=outcome.outcome,
+        gate=outcome.gate,
+    )
+
+
+def _write_provisional(root: Path, lens: Lens, outcomes: Sequence[Outcome]) -> None:
+    """Writes the counts of Chapter 1's outcomes in the report format, before the arc judge."""
+    records = [_record(o) for o in outcomes if o.chapter == 1]
+    lines = render(records, [question.id for question in lens.triage])
+    _write_atomic(root / "reports" / f"{lens.name}-c01.txt", "".join(f"{line}\n" for line in lines))
+
+
 def _write_recall(path: Path, lens: Lens, recall: _Recall) -> None:
     record = {
         question.id: {"disagreements": recall.disagreements[question.id], "confirmed": recall.confirmed[question.id]}
@@ -513,9 +549,15 @@ def run(
     run_id: str,
     batch: Callable[[], Ask],
     scene_table: bool,
+    through: int | None = None,
     out: Callable[[str], None] = print,
 ) -> list[Outcome]:
+    if through is not None and through < 1:
+        raise Fail("through must be at least 1")
     scenes = scoped(scenes, scene_table=scene_table)
+    if through is not None:
+        scenes = _limited(scenes, through)
+    scenes = sorted(scenes, key=_chapter_order)
     bible_ask = batch()
     built = bible.build(store, _chapters(scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema))
     if not isinstance(built, list):
@@ -533,12 +575,20 @@ def run(
         lines=_first_lines(scenes),
     )
     progress = threading.Lock()
+    waiting = sum(_holds_chapter_one(scene) for scene in scenes)
+    chapter_one: list[Outcome] = []
 
     def scene_pass(item: tuple[Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall]:
+        nonlocal waiting
         scene, ask = item
         scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, ask)
         with progress:
             out(f"scene {scene.key}: {_counts(scene_outcomes)}")
+            if _holds_chapter_one(scene):
+                chapter_one.extend(scene_outcomes)
+                waiting -= 1
+                if waiting == 0:
+                    _write_provisional(root, lens, chapter_one)
         return scene_outcomes, scene_changes, scene_recall
 
     scene_results = claude.fan_out(scene_pass, [(scene, batch()) for scene in scenes])
@@ -582,6 +632,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         run_id=run_id,
         batch=_batch,
         scene_table=bound.scenes.scene_table,
+        through=args.through,
     )
 
 
@@ -598,5 +649,12 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         default=claude.DEFAULT_CONCURRENCY,
         metavar="N",
         help="Claude calls in flight at once across the bible, the scenes and the arc judges (default 8, at least 1)",
+    )
+    p.add_argument(
+        "--through",
+        type=int,
+        default=None,
+        metavar="N",
+        help="run only lines of chapter N or earlier, leaving out unplaced lines (default all chapters)",
     )
     p.set_defaults(fn=cmd_run)
