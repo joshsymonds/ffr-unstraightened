@@ -13,7 +13,9 @@ GGUF = "models/voice.gguf"
 
 
 def records(pairs: Sequence[Pair]) -> list[dict[str, str]]:
-    return [{"prompt": prompt(p.speaker, p.paraphrase), "target": p.original} for p in pairs if p.split == "train"]
+    return [
+        {"prompt": prompt(p.speaker, p.paraphrase), "target": p.original} for p in pairs if p.split == "train" and p.speaker is not None
+    ]
 
 
 def train(epochs: int = 1) -> None:

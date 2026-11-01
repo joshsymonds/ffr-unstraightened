@@ -78,7 +78,7 @@ def test_load_pairs_reads_train_file_in_pairs_format_in_file_order(voice_dir: Pa
             speaker=SYNTH_TEXTS[0],
             paraphrase=SYNTH_TEXTS[1],
             original=SYNTH_TEXTS[2],
-            slot="2",
+            slot=2,
             model="synth-model-1",
             split="train",
         ),
@@ -87,7 +87,7 @@ def test_load_pairs_reads_train_file_in_pairs_format_in_file_order(voice_dir: Pa
             speaker=SYNTH_TEXTS[0],
             paraphrase=SYNTH_TEXTS[3],
             original=SYNTH_TEXTS[4],
-            slot="4",
+            slot=4,
             model="synth-model-1",
             split="train",
         ),
@@ -101,13 +101,17 @@ def test_load_pairs_reads_heldout_file_and_sets_split_from_argument(voice_dir: P
     assert {pair.split for pair in loaded} == {"heldout"}
 
 
-def test_load_pairs_skips_null_speaker_pairs(voice_dir: Path) -> None:
+def test_load_pairs_keeps_null_speaker_pairs_with_their_int_slot(voice_dir: Path) -> None:
     write_pairs(
         voice_dir,
         pairs.TRAIN,
-        [pair_row(scene="synth-scene-1", speaker=None), pair_row(scene="synth-scene-2")],
+        [pair_row(scene="synth-scene-1", speaker=None, slot=3), pair_row(scene="synth-scene-2")],
     )
-    assert [pair.scene for pair in load_pairs("train")] == ["synth-scene-2"]
+    loaded = load_pairs("train")
+    assert [(pair.scene, pair.speaker, pair.slot) for pair in loaded] == [
+        ("synth-scene-1", None, 3),
+        ("synth-scene-2", SYNTH_TEXTS[0], 2),
+    ]
 
 
 def test_load_pairs_rejects_unknown_split(voice_dir: Path) -> None:
@@ -126,7 +130,7 @@ def test_pair_repr_hides_speaker_paraphrase_and_original() -> None:
         speaker=SYNTH_TEXTS[0],
         paraphrase=SYNTH_TEXTS[1],
         original=SYNTH_TEXTS[2],
-        slot="synth-slot-1",
+        slot=1,
         model="synth-model-1",
         split="train",
     )
@@ -142,7 +146,7 @@ def make_pair(original: str, paraphrase: str) -> Pair:
         speaker=SYNTH_TEXTS[0],
         paraphrase=paraphrase,
         original=original,
-        slot="synth-slot-1",
+        slot=1,
         model="synth-model-1",
         split="train",
     )
@@ -161,6 +165,11 @@ def test_examples_dedupes_originals_and_keeps_pair_order() -> None:
         (SYNTH_TEXTS[3], 0),
         ("SYNTH-PARAPHRASE-THREE wording", 0),
     ]
+
+
+def test_examples_includes_null_speaker_pairs_original_and_paraphrase(voice_dir: Path) -> None:
+    write_pairs(voice_dir, pairs.TRAIN, [pair_row(speaker=None, original=SYNTH_TEXTS[2], paraphrase=SYNTH_TEXTS[1])])
+    assert examples(load_pairs("train")) == [(SYNTH_TEXTS[2], 1), (SYNTH_TEXTS[1], 0)]
 
 
 def test_examples_drops_paraphrase_identical_to_its_original() -> None:

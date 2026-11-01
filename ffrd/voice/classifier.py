@@ -19,10 +19,10 @@ MALFORMED_REPLY = "classifier worker sent a malformed reply"
 @dataclass(frozen=True)
 class Pair:
     scene: str
-    speaker: str = field(repr=False)
+    speaker: str | None = field(repr=False)
     paraphrase: str = field(repr=False)
     original: str = field(repr=False)
-    slot: str
+    slot: int
     model: str
     split: str
 
@@ -36,12 +36,11 @@ def load_pairs(split: str) -> list[Pair]:
             speaker=row.speaker,
             paraphrase=row.paraphrase,
             original=row.original,
-            slot=str(row.slot),
+            slot=row.slot,
             model=row.model,
             split=split,
         )
         for row in pairs.read(SPLIT_FILES[split], work_dir("voice"))
-        if row.speaker is not None
     ]
 
 

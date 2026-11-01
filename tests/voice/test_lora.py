@@ -11,13 +11,13 @@ TRAIN_ARGV = ["python3", "-m", "tools.voice.finetune", "train", lora.DATA, lora.
 EXPORT_ARGV = ["python3", "-m", "tools.voice.export", lora.ADAPTER, lora.GGUF]
 
 
-def pair(split: str, n: int) -> Pair:
+def pair(split: str, n: int, *, null_speaker: bool = False) -> Pair:
     return Pair(
         scene="synth-scene",
-        speaker=f"SYNTH-SPEAKER-{n}",
+        speaker=None if null_speaker else f"SYNTH-SPEAKER-{n}",
         paraphrase=f"SYNTH-PARAPHRASE-{n} wording",
         original=f"SYNTH-ORIGINAL-{n} wording",
-        slot="synth-slot",
+        slot=1,
         model="synth-model",
         split=split,
     )
@@ -44,7 +44,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
 def train_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_load(split: str) -> list[Pair]:
         assert split == "train"
-        return [pair("train", 1), pair("heldout", 2)]
+        return [pair("train", 1), pair("heldout", 2), pair("train", 4, null_speaker=True)]
 
     monkeypatch.setattr(lora, "load_pairs", fake_load)
 
@@ -61,6 +61,14 @@ def test_records_builds_shared_prompt_and_original_target_for_train_pairs_in_ord
 
 def test_records_skips_heldout_pairs_entirely() -> None:
     assert lora.records([pair("heldout", 1)]) == []
+
+
+def test_records_leaves_out_null_speaker_train_pairs() -> None:
+    rows = lora.records([pair("train", 1), pair("train", 2, null_speaker=True), pair("train", 3)])
+    assert rows == [
+        {"prompt": prompt("SYNTH-SPEAKER-1", "SYNTH-PARAPHRASE-1 wording"), "target": "SYNTH-ORIGINAL-1 wording"},
+        {"prompt": prompt("SYNTH-SPEAKER-3", "SYNTH-PARAPHRASE-3 wording"), "target": "SYNTH-ORIGINAL-3 wording"},
+    ]
 
 
 def test_train_syncs_then_stages_train_records_then_runs(
