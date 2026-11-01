@@ -3,6 +3,7 @@ import io
 import json
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import pytest
 
 from ffrd.game import Fail
 from ffrd.pipeline.gates import Classifier
-from ffrd.voice import classifier, remote
+from ffrd.voice import classifier, pairs, remote
 from ffrd.voice.classifier import MODEL_DIR, Pair, Scorer, examples, load_pairs
 
 # Made-up strings for the pairs loader. Not game text.
@@ -20,24 +21,30 @@ SYNTH_TEXTS = (
     "SYNTH-ORIGINAL-ONE wording",
     "SYNTH-PARAPHRASE-TWO wording",
     "SYNTH-ORIGINAL-TWO wording",
-    "SYNTH-RAW-NOT-JSON fragment",
 )
 
 # Made-up strings for the scorer. Not game text.
 SCORE_TEXTS = ("SYNTH-SCORE-ONE wording", "SYNTH-SCORE-TWO wording")
 
 
-def record(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
-        "scene": "synth-scene-1",
-        "speaker": SYNTH_TEXTS[0],
-        "paraphrase": SYNTH_TEXTS[1],
-        "original": SYNTH_TEXTS[2],
-        "slot": "synth-slot-1",
-        "model": "synth-model-1",
-    }
-    base.update(overrides)
-    return base
+def pair_row(
+    *,
+    scene: str = "synth-scene-1",
+    speaker: str | None = SYNTH_TEXTS[0],
+    paraphrase: str = SYNTH_TEXTS[1],
+    original: str = SYNTH_TEXTS[2],
+    slot: int = 2,
+) -> pairs.Pair:
+    return pairs.Pair(
+        scene=scene,
+        namespace="synth-namespace-1",
+        key="synth-key-1",
+        speaker=speaker,
+        slot=slot,
+        model="synth-model-1",
+        original=original,
+        paraphrase=paraphrase,
+    )
 
 
 def line(value: dict[str, object]) -> str:
@@ -45,24 +52,24 @@ def line(value: dict[str, object]) -> str:
 
 
 @pytest.fixture
-def pairs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def voice_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "work"
     monkeypatch.setattr(classifier, "work_dir", lambda lens: root / lens)
-    return root / "voice" / "pairs"
+    return root / "voice"
 
 
-def write_split(pairs_dir: Path, split: str, lines: list[str]) -> None:
-    pairs_dir.mkdir(parents=True, exist_ok=True)
-    (pairs_dir / f"{split}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+def write_pairs(voice_dir: Path, name: str, rows: list[pairs.Pair]) -> None:
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    (voice_dir / name).write_text("".join(line(asdict(row)) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_load_pairs_maps_fields_in_file_order(pairs_dir: Path) -> None:
-    write_split(
-        pairs_dir,
-        "train",
+def test_load_pairs_reads_train_file_in_pairs_format_in_file_order(voice_dir: Path) -> None:
+    write_pairs(
+        voice_dir,
+        pairs.TRAIN,
         [
-            line(record(scene="synth-scene-1", original=SYNTH_TEXTS[2], paraphrase=SYNTH_TEXTS[1])),
-            line(record(scene="synth-scene-2", speaker=SYNTH_TEXTS[0], original=SYNTH_TEXTS[4], paraphrase=SYNTH_TEXTS[3])),
+            pair_row(scene="synth-scene-1", original=SYNTH_TEXTS[2], paraphrase=SYNTH_TEXTS[1]),
+            pair_row(scene="synth-scene-2", speaker=SYNTH_TEXTS[0], original=SYNTH_TEXTS[4], paraphrase=SYNTH_TEXTS[3], slot=4),
         ],
     )
     assert load_pairs("train") == [
@@ -71,7 +78,7 @@ def test_load_pairs_maps_fields_in_file_order(pairs_dir: Path) -> None:
             speaker=SYNTH_TEXTS[0],
             paraphrase=SYNTH_TEXTS[1],
             original=SYNTH_TEXTS[2],
-            slot="synth-slot-1",
+            slot="2",
             model="synth-model-1",
             split="train",
         ),
@@ -80,54 +87,37 @@ def test_load_pairs_maps_fields_in_file_order(pairs_dir: Path) -> None:
             speaker=SYNTH_TEXTS[0],
             paraphrase=SYNTH_TEXTS[3],
             original=SYNTH_TEXTS[4],
-            slot="synth-slot-1",
+            slot="4",
             model="synth-model-1",
             split="train",
         ),
     ]
 
 
-def test_load_pairs_sets_split_from_argument(pairs_dir: Path) -> None:
-    write_split(pairs_dir, "heldout", [line(record()), line(record(scene="synth-scene-2"))])
+def test_load_pairs_reads_heldout_file_and_sets_split_from_argument(voice_dir: Path) -> None:
+    write_pairs(voice_dir, pairs.HELDOUT, [pair_row(), pair_row(scene="synth-scene-2")])
     loaded = load_pairs("heldout")
-    assert len(loaded) == 2
+    assert [pair.scene for pair in loaded] == ["synth-scene-1", "synth-scene-2"]
     assert {pair.split for pair in loaded} == {"heldout"}
 
 
-def test_load_pairs_skips_blank_lines(pairs_dir: Path) -> None:
-    write_split(pairs_dir, "train", ["", line(record()), "   ", "\t", line(record(scene="synth-scene-2"))])
-    assert [pair.scene for pair in load_pairs("train")] == ["synth-scene-1", "synth-scene-2"]
+def test_load_pairs_skips_null_speaker_pairs(voice_dir: Path) -> None:
+    write_pairs(
+        voice_dir,
+        pairs.TRAIN,
+        [pair_row(scene="synth-scene-1", speaker=None), pair_row(scene="synth-scene-2")],
+    )
+    assert [pair.scene for pair in load_pairs("train")] == ["synth-scene-2"]
 
 
-def test_load_pairs_rejects_unknown_split(pairs_dir: Path) -> None:
+def test_load_pairs_rejects_unknown_split(voice_dir: Path) -> None:
     with pytest.raises(Fail, match="unknown pairs split 'synthetic'"):
         load_pairs("synthetic")
 
 
-def test_load_pairs_missing_file_points_at_pairs_command(pairs_dir: Path) -> None:
-    with pytest.raises(Fail, match="no heldout pairs file; run `ffrd voice pairs` first"):
+def test_load_pairs_missing_file_surfaces_pairs_reader_error(voice_dir: Path) -> None:
+    with pytest.raises(Fail, match=r"no pairs at .*heldout\.jsonl; run `ffrd voice pairs`"):
         load_pairs("heldout")
-
-
-@pytest.mark.parametrize(
-    ("bad_line", "reason"),
-    [
-        (f"[{json.dumps(SYNTH_TEXTS[2])}]", "not a JSON object"),
-        (SYNTH_TEXTS[5], "not a JSON object"),
-        (line({k: v for k, v in record().items() if k != "model"}), "missing or non-string 'model' field"),
-        (line(record(paraphrase=7)), "missing or non-string 'paraphrase' field"),
-    ],
-    ids=["array", "not-json", "missing-field", "non-string-field"],
-)
-def test_load_pairs_failures_name_split_and_line_only(pairs_dir: Path, bad_line: str, reason: str) -> None:
-    write_split(pairs_dir, "train", [line(record()), bad_line])
-    with pytest.raises(Fail) as excinfo:
-        load_pairs("train")
-    message = str(excinfo.value)
-    assert "train line 2" in message
-    assert reason in message
-    for text in (*SYNTH_TEXTS, "synth-scene-1", "synth-model-1"):
-        assert text not in message
 
 
 def test_pair_repr_hides_speaker_paraphrase_and_original() -> None:
