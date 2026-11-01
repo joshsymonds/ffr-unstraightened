@@ -2,6 +2,7 @@
 
 import argparse
 import re
+import threading
 from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -51,6 +52,9 @@ REQUIRED_STAGES: tuple[str, ...] = (
     SELECTION,
 )
 
+# Guards the shared counts and returned lists: stage calls run concurrently, and each update is a read-modify-write.
+_COUNTS_LOCK = threading.Lock()
+
 OUTSIDE_FALLBACK = "outside fallback"
 HARD_EXCLUDED = "hard excluded"
 # The DL38 fallback families, as scope.py matches them.
@@ -80,8 +84,9 @@ class _CountingStore(Store):
 
     def run(self, stage: str, inputs: Any, lens: str | None, call: Callable[[], Any]) -> Result:
         result = super().run(stage, inputs, lens, call)
-        self._counts[result.stage] += 1
-        self._returned.setdefault(result.stage, []).append((inputs, result.value))
+        with _COUNTS_LOCK:
+            self._counts[result.stage] += 1
+            self._returned.setdefault(result.stage, []).append((inputs, result.value))
         return result
 
     def returned(self, stage: str) -> list[tuple[Any, Any]]:
@@ -99,7 +104,8 @@ class _CountingClassifier:
 
     def score(self, text: str) -> float:
         value = self._inner.score(text)
-        self._counts[CLASSIFIER] += 1
+        with _COUNTS_LOCK:
+            self._counts[CLASSIFIER] += 1
         return value
 
 

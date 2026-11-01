@@ -1,7 +1,11 @@
 import argparse
 import json
 import re
-from collections.abc import Mapping, Sequence
+import threading
+import time
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +16,7 @@ from ffrd.pipeline import arcs, bible, coherence, stages
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Unfinished
 from ffrd.pipeline.lens import TriageQuestion
-from ffrd.pipeline.smoke import cmd_smoke, register
+from ffrd.pipeline.smoke import CLASSIFIER, _CountingClassifier, _CountingStore, cmd_smoke, register
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
@@ -462,3 +466,66 @@ def test_a_screen_that_flags_nothing_fails_naming_the_stages_that_need_a_draft(
     out = capsys.readouterr().out.splitlines()
     assert "stage selection: 3" in out
     assert not any(line.endswith("(exercised)") for line in out)
+
+
+THREADS = 8
+
+
+class _SlowCounter(Counter[str]):
+    """A counter whose read takes a moment, so unguarded increments from two threads lose updates. Not game text."""
+
+    def __getitem__(self, key: str) -> int:
+        value = super().__getitem__(key)
+        time.sleep(0.005)
+        return value
+
+
+class _BarrierClassifier:
+    """A classifier whose score waits until every thread has arrived, so the calls must overlap. Not game text."""
+
+    threshold = 0.5
+
+    def __init__(self, arrived: threading.Barrier) -> None:
+        self._arrived = arrived
+
+    def score(self, text: str) -> float:
+        self._arrived.wait()
+        return 1.0
+
+
+def test_counting_store_keeps_exact_counts_and_every_result_under_threads(tmp_path: Path) -> None:
+    counts = _SlowCounter()
+    store = _CountingStore(tmp_path, counts)
+    arrived = threading.Barrier(THREADS, timeout=10)
+
+    def call(index: int) -> Callable[[], dict[str, int]]:
+        def compute() -> dict[str, int]:
+            # Every stage call waits here, so a store that serializes its calls breaks the barrier.
+            arrived.wait()
+            return {"made-up": index}
+
+        return compute
+
+    stage_names = ["draft" if index % 2 == 0 else "intent" for index in range(THREADS)]
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        futures = [pool.submit(store.run, stage_names[index], {"made-up-input": index}, None, call(index)) for index in range(THREADS)]
+        for future in futures:
+            future.result()
+
+    assert dict(counts) == {"draft": THREADS // 2, "intent": THREADS // 2}
+    drafts = sorted(store.returned("draft"), key=lambda pair: pair[0]["made-up-input"])
+    assert drafts == [({"made-up-input": index}, {"made-up": index}) for index in range(0, THREADS, 2)]
+    intents = sorted(store.returned("intent"), key=lambda pair: pair[0]["made-up-input"])
+    assert intents == [({"made-up-input": index}, {"made-up": index}) for index in range(1, THREADS, 2)]
+
+
+def test_counting_classifier_keeps_an_exact_count_and_overlaps_its_scores(tmp_path: Path) -> None:
+    counts = _SlowCounter()
+    arrived = threading.Barrier(THREADS, timeout=10)
+    classifier = _CountingClassifier(_BarrierClassifier(arrived), counts)
+
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        scores = list(pool.map(classifier.score, [f"made-up text {index}" for index in range(THREADS)]))
+
+    assert scores == [1.0] * THREADS
+    assert dict(counts) == {CLASSIFIER: THREADS}
