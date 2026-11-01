@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import IO
 
 import pytest
+from pylocres import LocresFile
 
-from ffrd import deck, gnomon
-from ffrd.game import APP_ID, Fail, vanilla_hash
+from ffrd import cli, deck, gnomon, probe
+from ffrd.game import APP_ID, LOCRES, Fail, vanilla_hash
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 MOD = WORKSPACE / "ue4ss/UnstraightenedProbe/Scripts/main.lua"
@@ -505,3 +506,345 @@ def test_game_killed_and_mod_removed_in_every_outcome(make_remote: Callable[...,
     assert EXE_PKILL in fake.commands
     assert not fake.game_running()
     assert not [key for key in fake.fs if key.startswith(DEST)]
+
+
+# ffrd probe: deck and gnomon refusals, verdicts, paks removed, and the packed shapes. Made-up keys and text only.
+
+DECK = "synthetic-deck"
+MODS = f"{GAME}/FFRS/Content/Paks/~mods"
+PROBE_PAK = "FFRS-UnstraightenedProbe_P.pak"
+PROBE_FILES = [PROBE_PAK, "FFRS-UnstraightenedProbe_P.utoc", "FFRS-UnstraightenedProbe_P.ucas"]
+PROBE_KEY_SYNTH = ("ST_C01_001_01", "10")
+OTHER_KEY = ("ST_C01_001_01", "2")
+SYNTH_VANILLA = "Synthetic line ten."
+SYNTH_TABLE = {
+    ("ST_C01_001_01", "10"): "Synthetic line ten.",
+    ("ST_C01_001_01", "2"): "Synthetic line two.",
+    ("ST_C01_001_02", "1"): "",
+    ("ST_C03_002_01", "1"): "Same in both.",
+}
+
+Responder = Callable[[str], list[str]] | BaseException
+
+
+def edited_line(text: str) -> list[str]:
+    return [line(PROBE_KEY_SYNTH, vanilla_hash(text)), "done"]
+
+
+def vanilla_line(_text: str) -> list[str]:
+    return [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"]
+
+
+def run_ffrd_probe() -> int:
+    try:
+        cli.main(["probe"])
+    except SystemExit as exit_info:
+        assert isinstance(exit_info.code, int)
+        return exit_info.code
+    return 0
+
+
+def translations(table: LocresFile) -> dict[tuple[str, str], str]:
+    return {(ns.name, key): ns[key].translation for ns in table for key in ns.entrys}
+
+
+def packed_locres(pak: bytes, tmp_path: Path, name: str) -> LocresFile:
+    """Read one English locres back out of a probe pak with repak get."""
+    pak_path = tmp_path / PROBE_PAK
+    pak_path.write_bytes(pak)
+    data = subprocess.run(["repak", "get", str(pak_path), f"{LOCRES}/en/{name}"], check=True, capture_output=True).stdout
+    path = tmp_path / name
+    path.write_bytes(data)
+    table = LocresFile()
+    table.read(str(path))
+    return table
+
+
+class ProbeRemote:
+    """Stands in for ssh, gnomon and the Deck copy. Records every call and answers each launch in turn."""
+
+    def __init__(self, responders: list[Responder], deck_status: int, running: bool, build: str, put_error: Fail | None) -> None:
+        self.responders = responders
+        self.deck_status = deck_status
+        self.running = running
+        self.build = build
+        self.put_error = put_error
+        self.texts: list[str] = []
+        self.status_calls: list[tuple[str, str]] = []
+        self.fetched: list[str] = []
+        self.puts: list[tuple[str, dict[str, bytes]]] = []
+        self.deletes: list[tuple[str, list[str]]] = []
+        self.runs: list[tuple[Path, dict[str, bytes], str]] = []
+
+    def next_text(self) -> str:
+        text = f"Unstraightened probe {len(self.texts) + 1:08x}"
+        self.texts.append(text)
+        return text
+
+    def ssh_status(self, host: str, command: str) -> int:
+        self.status_calls.append((host, command))
+        return self.deck_status
+
+    def fetch(self, path: str) -> bytes:
+        self.fetched.append(path)
+        return path.encode()
+
+    def put(self, host: str, dest: str, files: list[Path]) -> None:
+        self.puts.append((dest, {f.name: f.read_bytes() for f in files}))
+        if self.put_error is not None:
+            raise self.put_error
+
+    def delete(self, host: str, dest: str, names: list[str]) -> None:
+        self.deletes.append((dest, names))
+
+    def run(self, mod: Path, files: dict[str, bytes], log: str) -> list[str]:
+        self.runs.append((mod, files, log))
+        if not self.responders:
+            raise AssertionError("more launches than the test expects")
+        answer = self.responders.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer(self.texts[-1])
+
+
+@pytest.fixture
+def make_probe(fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[..., ProbeRemote]:
+    root = tmp_path / "repo"
+    (root / "ffrd").mkdir(parents=True)
+    (root / "devenv.nix").write_text("{ }\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("FFR_DECK_HOST", DECK)
+    monkeypatch.setattr(probe, "PROBE_KEY", PROBE_KEY_SYNTH)
+
+    def make(
+        responders: Sequence[Responder] = (),
+        deck_status: int = 1,
+        running: bool = False,
+        build: str = "424242",
+        put_error: Fail | None = None,
+    ) -> ProbeRemote:
+        fake = ProbeRemote(list(responders), deck_status, running, build, put_error)
+        monkeypatch.setattr(probe, "_probe_text", fake.next_text)
+        monkeypatch.setattr(deck, "ssh_status", fake.ssh_status)
+        monkeypatch.setattr(deck, "put", fake.put)
+        monkeypatch.setattr(deck, "delete", fake.delete)
+        monkeypatch.setattr(gnomon, "running", lambda: fake.running)
+        monkeypatch.setattr(gnomon, "build_id", lambda: fake.build)
+        monkeypatch.setattr(gnomon, "fetch", fake.fetch)
+        monkeypatch.setattr(gnomon, "run_mod", fake.run)
+        return fake
+
+    return make
+
+
+def test_partial_honoured_exits_0_after_one_launch(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    assert len(fake.runs) == 1
+    marker = vanilla_hash(fake.texts[0])
+    vanilla_digest = vanilla_hash(SYNTH_VANILLA)
+    assert capsys.readouterr().out == (
+        f"partial: ST_C01_001_01,10 marker {marker} vanilla {vanilla_digest} seen {marker}: honoured\nshape honoured: partial\n"
+    )
+
+
+def test_partial_not_honoured_then_full_honoured_exits_0(
+    make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_probe([vanilla_line, edited_line])
+    assert run_ffrd_probe() == 0
+    assert len(fake.runs) == 2
+    assert fake.texts[0] != fake.texts[1]
+    vanilla_digest = vanilla_hash(SYNTH_VANILLA)
+    out = capsys.readouterr().out
+    assert (
+        f"partial: ST_C01_001_01,10 marker {vanilla_hash(fake.texts[0])} vanilla {vanilla_digest} seen {vanilla_digest}: not honoured\n"
+        in out
+    )
+    assert out.endswith("shape honoured: full\n")
+
+
+def test_neither_shape_honoured_exits_1(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([vanilla_line, vanilla_line])
+    assert run_ffrd_probe() == 1
+    assert len(fake.runs) == 2
+    assert capsys.readouterr().err == "ffrd: neither shape is honoured by the game\n"
+
+
+@pytest.mark.parametrize(
+    ("lines", "honoured"),
+    [
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)), "done"], True, id="marker-only"),
+        pytest.param(
+            lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)), line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"],
+            False,
+            id="marker-and-vanilla",
+        ),
+        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"], False, id="vanilla-only"),
+        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, "missing"), "done"], False, id="missing"),
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t).upper()), "done"], False, id="uppercase-digest"),
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)) + " extra", "done"], False, id="trailing-text"),
+        pytest.param(lambda t: [line(OTHER_KEY, vanilla_hash(t)), "done"], False, id="other-key"),
+        pytest.param(lambda _t: ["done"], False, id="no-key-line"),
+    ],
+)
+def test_verdict_needs_the_marker_and_no_vanilla_line(
+    make_probe: Callable[..., ProbeRemote], lines: Callable[[str], list[str]], honoured: bool
+) -> None:
+    fake = make_probe([lines, lines])
+    assert run_ffrd_probe() == (0 if honoured else 1)
+    assert len(fake.runs) == (1 if honoured else 2)
+
+
+def test_refuses_when_ffr_runs_on_the_deck(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe(deck_status=0)
+    assert run_ffrd_probe() == 1
+    assert capsys.readouterr().err == f"ffrd: FINAL FANTASY RESONANCE is running on {DECK}; refusing to probe\n"
+    assert fake.status_calls == [(DECK, EXE_PGREP)]
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []
+
+
+def test_proceeds_silently_when_the_deck_answers_without_ffr(
+    make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_probe([edited_line], deck_status=1)
+    assert run_ffrd_probe() == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_proceeds_with_a_note_when_the_deck_is_unreachable(
+    make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_probe([edited_line], deck_status=255)
+    assert run_ffrd_probe() == 0
+    err = capsys.readouterr().err
+    assert err.startswith("note: ")
+    assert DECK in err
+    assert "255" in err
+
+
+def test_refuses_when_ffr_runs_on_gnomon(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe(running=True)
+    assert run_ffrd_probe() == 1
+    assert "is running on" in capsys.readouterr().err
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []
+
+
+def test_refuses_when_gnomon_build_differs_from_vanilla(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe(build="999999")
+    assert run_ffrd_probe() == 1
+    assert "999999" in capsys.readouterr().err
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []
+
+
+def test_probe_asks_the_mod_for_the_probe_key(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    mod, files, log = fake.runs[0]
+    assert mod == tmp_path / "repo" / "ue4ss/UnstraightenedProbe"
+    assert files == {"keys.txt": b"ST_C01_001_01,10\n"}
+    assert log == "probe.log"
+
+
+def test_paks_are_installed_beside_the_global_container_copies(make_probe: Callable[..., ProbeRemote]) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    assert fake.fetched == [f"{GAME}/FFRS/Content/Paks/global.utoc", f"{GAME}/FFRS/Content/Paks/global.ucas"]
+    dest, files = fake.puts[0]
+    assert dest == MODS
+    assert sorted(files) == sorted(PROBE_FILES)
+    assert files["FFRS-UnstraightenedProbe_P.utoc"] == f"{GAME}/FFRS/Content/Paks/global.utoc".encode()
+    assert files["FFRS-UnstraightenedProbe_P.ucas"] == f"{GAME}/FFRS/Content/Paks/global.ucas".encode()
+
+
+def test_partial_pak_carries_only_the_probe_line(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    table = packed_locres(fake.puts[0][1][PROBE_PAK], tmp_path, "Unstraightened.locres")
+    assert translations(table) == {PROBE_KEY_SYNTH: fake.texts[0]}
+
+
+def test_full_pak_replaces_the_probe_line_and_keeps_the_rest(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    fake = make_probe([vanilla_line, edited_line])
+    assert run_ffrd_probe() == 0
+    table = packed_locres(fake.puts[1][1][PROBE_PAK], tmp_path, "Game.locres")
+    assert translations(table) == {**SYNTH_TABLE, PROBE_KEY_SYNTH: fake.texts[1]}
+
+
+def test_output_has_no_probe_text(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    captured = capsys.readouterr()
+    assert fake.texts[0] not in captured.out + captured.err
+    assert "Unstraightened probe" not in captured.out + captured.err
+
+
+def junk_then_edited(text: str) -> list[str]:
+    return ["Synthetic junk line the probe must never echo.", f"{line(PROBE_KEY_SYNTH, vanilla_hash(text))} trailing", *edited_line(text)]
+
+
+def test_output_never_echoes_unmatched_log_lines(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    make_probe([junk_then_edited])
+    assert run_ffrd_probe() == 0
+    captured = capsys.readouterr()
+    assert "Synthetic junk line" not in captured.out + captured.err
+    assert "trailing" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("missing", [("ST_C01_001_01", "99"), ("ST_SYNTH_NONE", "1")], ids=["key", "namespace"])
+def test_probe_key_absent_from_vanilla_exits_1(
+    make_probe: Callable[..., ProbeRemote], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: tuple[str, str]
+) -> None:
+    fake = make_probe([edited_line])
+    monkeypatch.setattr(probe, "PROBE_KEY", missing)
+    assert run_ffrd_probe() == 1
+    assert capsys.readouterr().err == f"ffrd: the probe key {missing[0]},{missing[1]} is not in the vanilla text\n"
+    assert fake.puts == []
+
+
+@pytest.mark.parametrize(
+    ("responders", "code"),
+    [
+        pytest.param([edited_line], 0, id="partial-honoured"),
+        pytest.param([vanilla_line, edited_line], 0, id="full-honoured"),
+        pytest.param([vanilla_line, vanilla_line], 1, id="neither"),
+        pytest.param([Fail("synthetic launch failure")], 1, id="launch-fails"),
+    ],
+)
+def test_probe_paks_removed_after_every_run(make_probe: Callable[..., ProbeRemote], responders: list[Responder], code: int) -> None:
+    fake = make_probe(responders)
+    assert run_ffrd_probe() == code
+    assert fake.puts
+    assert all(dest == MODS and sorted(files) == sorted(PROBE_FILES) for dest, files in fake.puts)
+    assert fake.deletes == [(MODS, PROBE_FILES)] * len(fake.puts)
+
+
+def test_probe_paks_removed_when_copy_fails(make_probe: Callable[..., ProbeRemote]) -> None:
+    fake = make_probe([edited_line], put_error=Fail("synthetic copy failure"))
+    assert run_ffrd_probe() == 1
+    assert fake.deletes == [(MODS, PROBE_FILES)]
+    assert fake.runs == []
+
+
+def test_probe_text_is_a_fresh_hex_line_per_call() -> None:
+    first, second = probe._probe_text(), probe._probe_text()
+    assert re.fullmatch(r"Unstraightened probe [0-9a-f]{8}", first)
+    assert first != second
+
+
+def test_refuses_when_vanilla_has_no_build_stamp(
+    make_probe: Callable[..., ProbeRemote], fake_vanilla: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_probe()
+    (fake_vanilla / "BUILDID").unlink()
+    assert run_ffrd_probe() == 1
+    assert capsys.readouterr().err == "ffrd: no vanilla text yet; run `ffrd extract`\n"
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []

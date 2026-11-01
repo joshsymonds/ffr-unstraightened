@@ -8,7 +8,7 @@ import polib
 import pytest
 from pylocres import Entry, LocresFile, Namespace
 
-from ffrd import cli, extract, install
+from ffrd import cli, extract, install, probe
 from ffrd.game import LOCRES, MOD_NAME, vanilla_hash
 
 EXTS = ("pak", "utoc", "ucas")
@@ -381,6 +381,7 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.build",
         "ffrd.install",
         "ffrd.leakcheck",
+        "ffrd.probe",
     ]
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--help"])
@@ -396,3 +397,12 @@ def test_progress_is_registered_after_extract_with_its_help(
         cli.main(["--help"])
     assert exit_info.value.code == 0
     assert "record the chapter you are on, or print the recorded one" in capsys.readouterr().out
+
+
+def test_probe_is_registered_last_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert cli.COMMANDS[-1] is probe
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "run the UE4SS probe on the gnomon host to see which text shape FFR honours" in capsys.readouterr().out
