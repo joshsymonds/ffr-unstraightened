@@ -5,8 +5,9 @@ and when the gnomon build is not the vanilla build. For each pak shape it packs 
 and .ucas copied from the host's global container, installs it in the host's Paks/~mods and runs the probe mod. The
 target shape (the default build shape) is tried first and the full shape only when the target one is not honoured.
 `--shape` runs one shape alone: target, full, partial or ue4ss. The ue4ss shape installs no pak: it runs the probe mod
-with the repo's UE4SS text mod beside it, whose edits.txt holds the one probe edit. It prints only keys and hashes,
-never the probe text.
+with the repo's UE4SS text mod beside it, whose edits.txt holds the one probe edit. A launch whose log holds no
+observation line for the probe key is inconclusive: the probe stops there and fails, without trying another shape.
+It prints only keys and hashes, never the probe text.
 
 `ffrd usmap` dumps the game's mappings with the usmap mod and saves them as Mappings.usmap in the vanilla folder.
 """
@@ -92,11 +93,13 @@ def _launch_ue4ss(text: str) -> list[str]:
 def _verdict(shape: str, lines: list[str], marker: str, vanilla_digest: str) -> bool:
     ns, key = PROBE_KEY
     pattern = re.compile(rf"{re.escape(ns)},{re.escape(key)} ([0-9a-f]{{16}}|missing)")
+    observed = [match.group(1) for line in lines if (match := pattern.fullmatch(line))]
+    if not observed:
+        raise Fail(f"{shape}: the game produced no observation for {ns},{key}; the probe is inconclusive")
     seen: list[str] = []
-    for line in lines:
-        match = pattern.fullmatch(line)
-        if match and match.group(1) != "missing" and match.group(1) not in seen:
-            seen.append(match.group(1))
+    for digest in observed:
+        if digest != "missing" and digest not in seen:
+            seen.append(digest)
     honoured = marker in seen and vanilla_digest not in seen
     verdict = "honoured" if honoured else "not honoured"
     print(f"{shape}: {ns},{key} marker {marker} vanilla {vanilla_digest} seen {' '.join(seen) or 'none'}: {verdict}")

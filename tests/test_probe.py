@@ -608,6 +608,10 @@ def vanilla_line(_text: str) -> list[str]:
     return [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"]
 
 
+def no_observation(_text: str) -> list[str]:
+    return ["done"]
+
+
 def run_ffrd_probe(*args: str) -> int:
     try:
         cli.main(["probe", *args])
@@ -778,28 +782,47 @@ def test_unknown_shape_exits_2_before_any_launch(make_probe: Callable[..., Probe
 
 
 @pytest.mark.parametrize(
-    ("lines", "honoured"),
+    ("lines", "exit_code", "launches"),
     [
-        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)), "done"], True, id="marker-only"),
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)), "done"], 0, 1, id="marker-only"),
         pytest.param(
             lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)), line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"],
-            False,
+            1,
+            2,
             id="marker-and-vanilla",
         ),
-        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"], False, id="vanilla-only"),
-        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, "missing"), "done"], False, id="missing"),
-        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t).upper()), "done"], False, id="uppercase-digest"),
-        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)) + " extra", "done"], False, id="trailing-text"),
-        pytest.param(lambda t: [line(OTHER_KEY, vanilla_hash(t)), "done"], False, id="other-key"),
-        pytest.param(lambda _t: ["done"], False, id="no-key-line"),
+        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"], 1, 2, id="vanilla-only"),
+        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, "missing"), "done"], 1, 2, id="missing"),
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t).upper()), "done"], 1, 1, id="uppercase-digest"),
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)) + " extra", "done"], 1, 1, id="trailing-text"),
+        pytest.param(lambda t: [line(OTHER_KEY, vanilla_hash(t)), "done"], 1, 1, id="other-key"),
+        pytest.param(lambda _t: ["done"], 1, 1, id="no-key-line"),
     ],
 )
 def test_verdict_needs_the_marker_and_no_vanilla_line(
-    make_probe: Callable[..., ProbeRemote], lines: Callable[[str], list[str]], honoured: bool
+    make_probe: Callable[..., ProbeRemote], lines: Callable[[str], list[str]], exit_code: int, launches: int
 ) -> None:
     fake = make_probe([lines, lines])
-    assert run_ffrd_probe() == (0 if honoured else 1)
-    assert len(fake.runs) == (1 if honoured else 2)
+    assert run_ffrd_probe() == exit_code
+    assert len(fake.runs) == launches
+
+
+def test_log_without_an_observation_is_inconclusive(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([no_observation, edited_line])
+    assert run_ffrd_probe() == 1
+    assert len(fake.runs) == 1
+    captured = capsys.readouterr()
+    assert "produced no observation" in captured.err
+    assert "not honoured" not in captured.out
+
+
+def test_shape_without_an_observation_is_inconclusive(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([no_observation])
+    assert run_ffrd_probe("--shape", "full") == 1
+    assert len(fake.runs) == 1
+    captured = capsys.readouterr()
+    assert "produced no observation" in captured.err
+    assert "not honoured" not in captured.out
 
 
 def test_refuses_when_ffr_runs_on_the_deck(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
