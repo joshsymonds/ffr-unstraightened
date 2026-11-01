@@ -1,13 +1,31 @@
+import argparse
 import json
+import re
 import tomllib
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import report
-from ffrd.pipeline.run import Change, Outcome, write_dialog, write_outcomes
+from ffrd.pipeline import bible, report, stages
+from ffrd.pipeline import jev as jev_module
+from ffrd.pipeline.claude import Rejected, Unfinished
+from ffrd.pipeline.lens import Lens, TriageQuestion
+from ffrd.pipeline.run import Change, Outcome, cmd_run, register, run, write_dialog, write_outcomes
+from ffrd.pipeline.stages import (
+    CROSS_SCHEMA,
+    DRAFT_SCHEMA,
+    INTENT_SCHEMA,
+    JUDGE_SCHEMA,
+    SCREEN_SCHEMA,
+    Ask,
+    Bindings,
+    Scene,
+    SceneLine,
+)
+from ffrd.pipeline.store import Store
 
 LENS = "made-up-lens"
 RUN = "made-up-run-id"
@@ -258,3 +276,668 @@ def test_dialog_oserror_fails_naming_the_path_and_reason(tmp_path: Path) -> None
         write_dialog(directory, [_change()])
     assert str(directory) in str(raised.value)
     assert "Not a directory" in str(raised.value)
+
+
+# Made-up scenes, lens and answers. Not game text.
+ALPHA = "made-up-first-id"
+BETA = "made-up-second-id"
+NS_A = "ST_C01_001_01"
+NS_B = "ST_C02_001_01"
+NS_C = "ST_SubEv_004_01"
+NS_OUT = "ST_Menu_001"
+EN_A1 = "Made-up line one of scene a. Not game text."
+EN_A2 = "Made-up line two of scene a. Not game text."
+EN_A3 = "Made-up line three of scene a. Not game text."
+EN_A4 = "Made-up line four of scene a. Not game text."
+EN_OUT = "Made-up menu line, out of scope. Not game text."
+EN_B1 = "Made-up line one of scene b. Not game text."
+EN_B2 = "Made-up line two of scene b. Not game text."
+EN_C1 = "Made-up unattributed line. Not game text."
+ENGLISH = (EN_A1, EN_A2, EN_A3, EN_A4, EN_OUT, EN_B1, EN_B2, EN_C1)
+OPUS_A1 = "Made-up opus rewrite one. Not game text."
+VOICE_A1 = "Made-up voiced rewrite one. Not game text."
+OPUS_A2 = "Made-up opus rewrite two. Not game text."
+OPUS_A3 = "Made-up opus rewrite three. Not game text."
+OPUS_B1 = "Made-up opus rewrite of b one. Not game text."
+OPUS_B2 = "Made-up opus rewrite of b two. Not game text."
+OPUS_C1 = "Made-up opus unattributed. Not game text."
+JEV_HIGH = {ALPHA: 0.9, BETA: 0.9}
+COUNT_LINE = re.compile(r"(?:scene [a-z0-9-]+|total): \d+ changed, \d+ kept for plot, \d+ gate failed, \d+ unfinished, \d+ untouched")
+LENS_TOML = """\
+[[triage]]
+id = "made-up-first-id"
+question = "Made-up question one. Not game text."
+
+[[triage]]
+id = "made-up-second-id"
+question = "Made-up question two. Not game text."
+
+[screen]
+criteria = ["Made-up criterion. Not game text."]
+
+[intent]
+rule = "Made-up intent rule. Not game text."
+
+[judge]
+rubric = "Made-up judge rubric. Not game text."
+"""
+LENS_OBJ = Lens(
+    name=LENS,
+    triage=(TriageQuestion(ALPHA, "Made-up question one. Not game text."), TriageQuestion(BETA, "Made-up question two. Not game text.")),
+    screen_criteria=("Made-up criterion. Not game text.",),
+    intent_rule="Made-up intent rule. Not game text.",
+    judge_rubric="Made-up judge rubric. Not game text.",
+)
+ALL_PASS = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "restores_japanese": True}
+CHAPTER_ONE_BIBLE: dict[str, Any] = {
+    "characters": [],
+    "facts": [],
+    "callbacks": [
+        {
+            "line": {"namespace": NS_A, "key": "1"},
+            "depends": [{"namespace": NS_A, "key": "3"}],
+            "meaning": "Made-up callback meaning. Not game text.",
+        }
+    ],
+}
+EMPTY_BIBLE: dict[str, Any] = {"characters": [], "facts": [], "callbacks": []}
+
+
+def _line(namespace: str, key: str, speaker: str | None, english: str, chapter: int | None) -> SceneLine:
+    return SceneLine(namespace, key, speaker, english, f"Made-up Japanese {key}. Not game text.", chapter)
+
+
+SCENE_A = Scene(
+    "made-up-scene-a",
+    (
+        _line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),
+        _line(NS_A, "2", None, EN_A2, 1),
+        _line(NS_A, "3", "made-up-speaker-a", EN_A3, 1),
+        _line(NS_OUT, "1", None, EN_OUT, None),
+        _line(NS_A, "4", None, EN_A4, 1),
+    ),
+)
+SCENE_B = Scene("made-up-scene-b", (_line(NS_B, "1", "made-up-speaker-b", EN_B1, 2), _line(NS_B, "2", None, EN_B2, 2)))
+SCENE_C = Scene("made-up-scene-c", (_line(NS_C, "1", None, EN_C1, None),))
+SCENES = (SCENE_A, SCENE_B, SCENE_C)
+
+EXPECTED_OUTCOMES = [
+    Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    Outcome(NS_A, "2", 1, None, (BETA,), "gate_failed", "minimal_change", None),
+    Outcome(NS_A, "3", 1, "made-up-speaker-a", (ALPHA,), "kept_for_plot", "plot", None),
+    Outcome(NS_A, "4", 1, None, (), "untouched", None, None),
+    Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus"),
+    Outcome(NS_B, "2", 2, None, (BETA,), "unfinished", None, None),
+    Outcome(NS_C, "1", None, None, (ALPHA,), "changed", None, "opus"),
+]
+EXPECTED_PRINTED = [
+    "scene made-up-scene-a: 1 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched",
+    "scene made-up-scene-b: 1 changed, 0 kept for plot, 0 gate failed, 1 unfinished, 0 untouched",
+    "scene made-up-scene-c: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+    "total: 3 changed, 1 kept for plot, 1 gate failed, 1 unfinished, 1 untouched",
+]
+
+
+def _judgment(**changed: bool) -> dict[str, bool]:
+    return {**ALL_PASS, **changed}
+
+
+def _part(parts: Sequence[str], prefix: str) -> str:
+    return next(part for part in parts if part.startswith(prefix)).removeprefix(prefix)
+
+
+def _target(parts: Sequence[str]) -> tuple[str, str]:
+    ref = json.loads(_part(parts, "Target line:\n"))
+    return ref["namespace"], ref["key"]
+
+
+def _related_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
+    return [(ref["namespace"], ref["key"]) for ref in json.loads(_part(parts, "Related lines:\n"))]
+
+
+class FakeClaude:
+    """Stands in for the Claude batches. Answers each stage from the target line or candidate in its prompt. Not game text."""
+
+    def __init__(self) -> None:
+        self.batches = 0
+        self.calls: list[tuple[str, list[str], Mapping[str, Any]]] = []
+        self.bible: dict[int, dict[str, Any] | Unfinished] = {1: CHAPTER_ONE_BIBLE}
+        self.screen_failure: Unfinished | None = None
+        self.flags: dict[tuple[str, str], list[str]] = {}
+        self.intents: dict[tuple[str, str], str | Unfinished] = {}
+        self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
+        self.judgments: dict[str, dict[str, bool]] = {}
+        self.judge_failures: dict[str, Unfinished | Rejected] = {}
+        self.consistent: dict[str, bool] = {}
+        self.cross_failures: dict[str, Unfinished | Rejected] = {}
+
+    def start_batch(self) -> Ask:
+        self.batches += 1
+        return self.ask
+
+    def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
+        self.calls.append((model, list(parts), schema))
+        if schema is bible.SCHEMA:
+            number = int(_part(parts, "Chapter ").split()[0])
+            return self.bible.get(number, EMPTY_BIBLE)
+        if schema is SCREEN_SCHEMA:
+            return self._screen(parts)
+        if schema is INTENT_SCHEMA:
+            answer = self.intents.get(_target(parts), "Made-up intent. Not game text.")
+            return answer if isinstance(answer, Unfinished) else {"intent": answer}
+        if schema is DRAFT_SCHEMA:
+            answer = self.drafts[_target(parts)]
+            return answer if isinstance(answer, Unfinished | Rejected) else {"drafts": answer}
+        if schema is JUDGE_SCHEMA:
+            candidate = _part(parts, "Candidate:\n")
+            if candidate in self.judge_failures:
+                return self.judge_failures[candidate]
+            return dict(self.judgments.get(candidate, ALL_PASS))
+        if schema is CROSS_SCHEMA:
+            candidate = _part(parts, "Candidate:\n")
+            if candidate in self.cross_failures:
+                return self.cross_failures[candidate]
+            return {"consistent": self.consistent.get(candidate, True)}
+        raise AssertionError("unexpected schema")
+
+    def _screen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished:
+        if self.screen_failure is not None:
+            return self.screen_failure
+        lines = json.loads(_part(parts, "Scene lines:\n"))
+        flagged = [
+            {"namespace": line["namespace"], "key": line["key"], "reasons": self.flags[(line["namespace"], line["key"])]}
+            for line in lines
+            if (line["namespace"], line["key"]) in self.flags
+        ]
+        return {"flagged": flagged}
+
+
+class FakeJev:
+    """Stands in for the Jev triage call, with one answer for every scene. Not game text."""
+
+    def __init__(self, answer: dict[str, float] | Unfinished) -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def __call__(self, scene: str, questions: Sequence[TriageQuestion]) -> dict[str, float] | Unfinished:
+        self.calls.append((scene, [question.id for question in questions]))
+        return self.answer
+
+
+class FakeRenderer:
+    """Stands in for the voice render. Maps a draft to its voiced text, or returns it unchanged. Not game text."""
+
+    def __init__(self, voiced: Mapping[str, str]) -> None:
+        self.voiced = dict(voiced)
+        self.calls: list[tuple[str | None, str]] = []
+
+    def render(self, speaker: str | None, text: str) -> str:
+        self.calls.append((speaker, text))
+        return self.voiced.get(text, text)
+
+
+class FakeClassifier:
+    """Scores every text as game-like and records each text it scored. Not game text."""
+
+    threshold = 0.5
+
+    def __init__(self) -> None:
+        self.scored: list[str] = []
+
+    def score(self, text: str) -> float:
+        self.scored.append(text)
+        return 1.0
+
+
+class FakeSource:
+    def __init__(self, scenes: Sequence[Scene]) -> None:
+        self._scenes = list(scenes)
+
+    def scenes(self) -> Sequence[Scene]:
+        return self._scenes
+
+
+def _claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.flags = {
+        (NS_A, "1"): [ALPHA],
+        (NS_A, "2"): [BETA],
+        (NS_A, "3"): [ALPHA],
+        (NS_B, "1"): [ALPHA],
+        (NS_B, "2"): [BETA],
+        (NS_C, "1"): [ALPHA],
+    }
+    claude.drafts = {
+        (NS_A, "1"): [OPUS_A1],
+        (NS_A, "2"): [OPUS_A2],
+        (NS_A, "3"): [OPUS_A3],
+        (NS_B, "1"): [OPUS_B1],
+        (NS_B, "2"): Unfinished("Made-up draft failure. Not game text."),
+        (NS_C, "1"): [OPUS_C1],
+    }
+    # OPUS_A1 loses on ranking (restores_japanese False), so the voiced text ships.
+    claude.judgments = {
+        OPUS_A1: _judgment(restores_japanese=False),
+        OPUS_A2: _judgment(minimal_change=False),
+        OPUS_A3: _judgment(plot=False),
+    }
+    return claude
+
+
+def _run(
+    tmp_path: Path,
+    claude: FakeClaude,
+    printed: list[str],
+    *,
+    jev: FakeJev,
+    threshold: float | None,
+    renderer: FakeRenderer | None = None,
+    scenes: Sequence[Scene] = SCENES,
+    classifier: FakeClassifier | None = None,
+) -> list[Outcome]:
+    return run(
+        tmp_path / "repo",
+        LENS_OBJ,
+        Store(tmp_path / "work" / LENS),
+        scenes,
+        classifier=FakeClassifier() if classifier is None else classifier,
+        renderer=FakeRenderer({OPUS_A1: VOICE_A1}) if renderer is None else renderer,
+        threshold=threshold,
+        run_id=RUN,
+        jev=jev,
+        batch=claude.start_batch,
+        out=printed.append,
+    )
+
+
+def _all_prompts(claude: FakeClaude, jev: FakeJev) -> list[str]:
+    return [part for _, parts, _ in claude.calls for part in parts] + [scene for scene, _ in jev.calls]
+
+
+def test_each_outcome_kind_and_writer_is_recorded(tmp_path: Path) -> None:
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes == EXPECTED_OUTCOMES
+
+
+def test_out_of_scope_line_has_no_record_and_reaches_no_prompt(tmp_path: Path) -> None:
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    _run(tmp_path, claude, [], jev=jev, threshold=0.5)
+    prompts = _all_prompts(claude, jev)
+    assert not any(NS_OUT in text or EN_OUT in text for text in prompts)
+    assert NS_OUT not in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
+
+
+def test_one_batch_for_the_bible_and_one_per_scene(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert claude.batches == 1 + len(SCENES)
+
+
+def test_no_triage_never_calls_jev_and_screens_every_scene(tmp_path: Path) -> None:
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    outcomes = _run(tmp_path, claude, [], jev=jev, threshold=None)
+    assert jev.calls == []
+    assert sum(1 for _, _, schema in claude.calls if schema is SCREEN_SCHEMA) == len(SCENES)
+    assert outcomes == EXPECTED_OUTCOMES
+
+
+def test_triage_below_threshold_leaves_every_line_untouched(tmp_path: Path) -> None:
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev({ALPHA: 0.2, BETA: 0.4}), threshold=0.5)
+    assert [(o.namespace, o.key) for o in outcomes] == [
+        (NS_A, "1"),
+        (NS_A, "2"),
+        (NS_A, "3"),
+        (NS_A, "4"),
+        (NS_B, "1"),
+        (NS_B, "2"),
+        (NS_C, "1"),
+    ]
+    assert [o.outcome for o in outcomes] == ["untouched"] * 7
+    assert all(o.reasons == () for o in outcomes)
+    assert not any(schema is SCREEN_SCHEMA for _, _, schema in claude.calls)
+
+
+def test_triage_takes_the_highest_question_probability(tmp_path: Path) -> None:
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev({ALPHA: 0.2, BETA: 0.6}), threshold=0.5)
+    assert outcomes == EXPECTED_OUTCOMES
+
+
+def test_triage_failure_leaves_every_line_unfinished(tmp_path: Path) -> None:
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(Unfinished("Made-up triage failure. Not game text.")), threshold=0.5)
+    assert [o.outcome for o in outcomes] == ["unfinished"] * 7
+    assert all(o.reasons == () for o in outcomes)
+    assert not any(schema is SCREEN_SCHEMA for _, _, schema in claude.calls)
+
+
+def test_screen_failure_leaves_every_line_unfinished(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.screen_failure = Unfinished("Made-up screen failure. Not game text.")
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None)
+    assert [o.outcome for o in outcomes] == ["unfinished"] * 7
+    assert all(o.reasons == () for o in outcomes)
+
+
+def test_intent_failure_leaves_that_line_unfinished_and_drafts_nothing(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.intents[(NS_A, "1")] = Unfinished("Made-up intent failure. Not game text.")
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert (NS_A, "1") not in [_target(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA]
+
+
+def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.bible[1] = Unfinished("Made-up bible failure. Not game text.")
+    printed: list[str] = []
+    with pytest.raises(Fail, match="story bible unfinished; rerun ffrd run"):
+        _run(tmp_path, claude, printed, jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert printed == ["bible: unfinished"]
+    assert all(schema is bible.SCHEMA for _, _, schema in claude.calls)
+    assert claude.batches == 1
+    assert not (tmp_path / "work" / LENS / report.OUTCOMES).exists()
+
+
+def test_cross_judge_runs_for_a_callback_line_with_its_related_lines(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    cross = [(_target(parts), _related_refs(parts)) for _, parts, schema in claude.calls if schema is CROSS_SCHEMA]
+    assert cross
+    assert {target for target, _ in cross} == {(NS_A, "1")}
+    assert all(related == [(NS_A, "3")] for _, related in cross)
+
+
+def test_false_cross_judge_verdict_blocks_the_change(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.consistent = {OPUS_A1: False, VOICE_A1: False}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "callback", None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+
+
+def test_writer_retry_is_told_the_failing_gate_once(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    drafts_a2 = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == (NS_A, "2")]
+    assert len(drafts_a2) == 2
+    assert not any(part.startswith("The previous candidates failed") for part in drafts_a2[0])
+    assert any(part.startswith("The previous candidates failed the minimal_change gate") for part in drafts_a2[1])
+    assert sum(1 for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == (NS_A, "1")) == 1
+
+
+def _drafts_for(claude: FakeClaude, ref: tuple[str, str]) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == ref]
+
+
+def _judged(claude: FakeClaude, schema: Mapping[str, Any]) -> list[tuple[tuple[str, str], str]]:
+    return [(_target(parts), _part(parts, "Candidate:\n")) for _, parts, called in claude.calls if called is schema]
+
+
+def _dialog_entries(tmp_path: Path) -> set[tuple[str, str]]:
+    entries: set[tuple[str, str]] = set()
+    for path in (tmp_path / "repo" / "dialog" / LENS).iterdir():
+        for namespace, table in tomllib.loads(path.read_text(encoding="utf-8")).items():
+            entries.update((namespace, key) for key in table)
+    return entries
+
+
+def test_scene_judge_unfinished_leaves_the_line_unfinished_with_no_dialog_entry(tmp_path: Path) -> None:
+    claude = _claude()
+    failure = Unfinished("Made-up judge failure. Not game text.")
+    claude.judge_failures = {OPUS_A1: failure, VOICE_A1: failure}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert len(_drafts_for(claude, (NS_A, "1"))) == 1
+    assert (NS_A, "1") not in _dialog_entries(tmp_path)
+
+
+def test_scene_judge_rejecting_every_candidate_fails_the_judge_gate_after_one_retry(tmp_path: Path) -> None:
+    claude = _claude()
+    rejection = Rejected("Made-up judge rejection. Not game text.")
+    claude.judge_failures = {OPUS_A1: rejection, VOICE_A1: rejection}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "judge", None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert len(_drafts_for(claude, (NS_A, "1"))) == 2
+    assert (NS_A, "1") not in _dialog_entries(tmp_path)
+
+
+def test_cross_judge_unfinished_leaves_the_callback_line_unfinished_with_no_dialog_entry(tmp_path: Path) -> None:
+    claude = _claude()
+    failure = Unfinished("Made-up cross-judge failure. Not game text.")
+    claude.cross_failures = {OPUS_A1: failure, VOICE_A1: failure}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert (NS_A, "1") not in _dialog_entries(tmp_path)
+
+
+def test_cross_judge_rejecting_every_candidate_fails_the_judge_gate(tmp_path: Path) -> None:
+    claude = _claude()
+    rejection = Rejected("Made-up cross-judge rejection. Not game text.")
+    claude.cross_failures = {OPUS_A1: rejection, VOICE_A1: rejection}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "judge", None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert (NS_A, "1") not in _dialog_entries(tmp_path)
+
+
+def test_rejected_draft_fails_the_writer_gate_after_one_retry_and_is_never_judged(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.drafts[(NS_B, "2")] = Rejected("Made-up draft rejection. Not game text.")
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes == [*EXPECTED_OUTCOMES[:5], Outcome(NS_B, "2", 2, None, (BETA,), "gate_failed", "writer", None), *EXPECTED_OUTCOMES[6:]]
+    retried = _drafts_for(claude, (NS_B, "2"))
+    assert len(retried) == 2
+    assert not any(part.startswith("The previous candidates failed") for part in retried[0])
+    assert any(part == "The previous candidates failed the writer gate. Write candidates that pass it." for part in retried[1])
+    judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
+    assert (NS_B, "2") not in judged
+
+
+def test_candidate_equal_to_the_english_is_never_judged_or_written(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.drafts[(NS_A, "1")] = [EN_A1, OPUS_A1]
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert outcomes[0] == EXPECTED_OUTCOMES[0]
+    assert EN_A1 not in [candidate for _, candidate in _judged(claude, JUDGE_SCHEMA)]
+    chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert chapter_one[NS_A]["1"]["text"] == VOICE_A1
+    assert chapter_one[NS_A]["1"]["text"] != EN_A1
+
+
+def test_repeated_candidate_is_judged_once(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.drafts[(NS_B, "1")] = [OPUS_B1, OPUS_B1]
+    classifier = FakeClassifier()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5, classifier=classifier)
+    assert [candidate for ref, candidate in _judged(claude, JUDGE_SCHEMA) if ref == (NS_B, "1")] == [OPUS_B1]
+    assert classifier.scored.count(OPUS_B1) == 1
+    assert outcomes[4] == EXPECTED_OUTCOMES[4]
+
+
+# Made-up scenes for bible assembly, out of chapter order. Not game text.
+EN_A_REPEAT = "Made-up different English for a repeated key. Not game text."
+LATE_SCENE = Scene("made-up-scene-late", (_line(NS_B, "1", "made-up-speaker-b", EN_B1, 2),))
+EARLY_SCENE = Scene(
+    "made-up-scene-early",
+    (
+        _line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),
+        _line(NS_A, "2", None, EN_A2, 1),
+        _line(NS_A, "1", "made-up-speaker-a", EN_A_REPEAT, 1),
+    ),
+)
+
+
+def test_bible_runs_chapters_ascending_with_first_occurrence_lines_and_empty_speaker(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.bible = {}
+    claude.flags = {}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None, scenes=(LATE_SCENE, EARLY_SCENE))
+    bible_calls = [parts for _, parts, schema in claude.calls if schema is bible.SCHEMA]
+    assert len(bible_calls) == 2
+    assert json.loads(_part(bible_calls[0], "Chapter 1 lines:\n")) == [
+        {"namespace": NS_A, "key": "1", "speaker": "made-up-speaker-a", "text": EN_A1},
+        {"namespace": NS_A, "key": "2", "speaker": "", "text": EN_A2},
+    ]
+    assert json.loads(_part(bible_calls[1], "Chapter 2 lines:\n")) == [
+        {"namespace": NS_B, "key": "1", "speaker": "made-up-speaker-b", "text": EN_B1},
+    ]
+
+
+def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:
+    printed: list[str] = []
+    _run(tmp_path, _claude(), printed, jev=FakeJev(JEV_HIGH), threshold=0.5)
+    assert printed == EXPECTED_PRINTED
+    assert all(COUNT_LINE.fullmatch(line) for line in printed)
+    assert not any(text in line for line in printed for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_B1))
+
+
+def test_outcomes_and_dialog_are_written_and_hold_no_english(tmp_path: Path) -> None:
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcome_text = (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
+    records = [json.loads(line) for line in outcome_text.splitlines()]
+    assert [(r["namespace"], r["key"], r["outcome"], r["gate"], r["writer"]) for r in records] == [
+        (o.namespace, o.key, o.outcome, o.gate, o.writer) for o in EXPECTED_OUTCOMES
+    ]
+    dialog = tmp_path / "repo" / "dialog" / LENS
+    assert _dialog_files(dialog) == ["chapter-01.toml", "chapter-02.toml", "unattributed.toml"]
+    chapter_one = tomllib.loads((dialog / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert chapter_one[NS_A]["1"] == {
+        "vanilla": vanilla_hash(EN_A1),
+        "text": VOICE_A1,
+        "lens": LENS,
+        "reason": ALPHA,
+        "writer": "voice",
+        "verdict": "passed",
+        "run": RUN,
+    }
+    chapter_two = tomllib.loads((dialog / "chapter-02.toml").read_text(encoding="utf-8"))
+    assert chapter_two[NS_B]["1"]["text"] == OPUS_B1
+    assert chapter_two[NS_B]["1"]["writer"] == "opus"
+    unattributed = tomllib.loads((dialog / "unattributed.toml").read_text(encoding="utf-8"))
+    assert unattributed[NS_C]["1"]["text"] == OPUS_C1
+    written = outcome_text + "".join(p.read_text(encoding="utf-8") for p in dialog.iterdir())
+    assert not any(english in written for english in ENGLISH)
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_rerun_makes_no_calls_and_writes_identical_files(tmp_path: Path) -> None:
+    claude = _claude()
+    # Every stage must finish on the first run, or the rerun would ask again for the unfinished line.
+    claude.drafts[(NS_B, "2")] = [OPUS_B2]
+    jev = FakeJev(JEV_HIGH)
+    renderer = FakeRenderer({OPUS_A1: VOICE_A1})
+    _run(tmp_path, claude, [], jev=jev, threshold=0.5, renderer=renderer)
+    before = _snapshot(tmp_path)
+    calls, jev_calls, renders = len(claude.calls), len(jev.calls), len(renderer.calls)
+
+    _run(tmp_path, claude, [], jev=jev, threshold=0.5, renderer=renderer)
+
+    assert len(claude.calls) == calls
+    assert len(jev.calls) == jev_calls
+    assert len(renderer.calls) == renders
+    assert _snapshot(tmp_path) == before
+
+
+# Made-up command repo and lens file. Not game text.
+@pytest.fixture
+def lens_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "repo"
+    (root / "ffrd").mkdir(parents=True)
+    (root / "devenv.nix").write_text("{ }\n")
+    (root / "lenses").mkdir()
+    (root / "lenses" / f"{LENS}.toml").write_text(LENS_TOML)
+    monkeypatch.chdir(root)
+    return root
+
+
+def _write_threshold(root: Path) -> None:
+    directory = root / "work" / LENS
+    directory.mkdir(parents=True)
+    (directory / "threshold.json").write_text(json.dumps({"threshold": 0.5, "scenes": 3, "positives": 2, "passing": 3}) + "\n")
+
+
+def _parse(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ffrd")
+    register(parser.add_subparsers(required=True))
+    return parser.parse_args(argv)
+
+
+def _bind(monkeypatch: pytest.MonkeyPatch, claude: FakeClaude, jev: FakeJev) -> None:
+    class Batch:
+        def __init__(self) -> None:
+            self.ask: Ask = claude.start_batch()
+
+    def bindings() -> Bindings:
+        return Bindings(scenes=FakeSource(SCENES), classifier=FakeClassifier(), renderer=FakeRenderer({OPUS_A1: VOICE_A1}))
+
+    monkeypatch.setattr(stages, "bindings", bindings)
+    monkeypatch.setattr(jev_module, "triage", jev)
+    monkeypatch.setattr(stages, "Batch", Batch)
+
+
+def _unbound() -> Bindings:
+    raise AssertionError("bindings were read before the threshold was loaded")
+
+
+def test_register_declares_the_run_command_with_required_lens_and_no_triage_flag() -> None:
+    args = _parse(["run", "--lens", LENS])
+    assert args.fn is cmd_run
+    assert args.lens == LENS
+    assert args.no_triage is False
+    assert _parse(["run", "--lens", LENS, "--no-triage"]).no_triage is True
+    with pytest.raises(SystemExit):
+        _parse(["run"])
+
+
+def test_run_command_writes_outcomes_and_dialog_through_the_bound_stages(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_threshold(lens_repo)
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    _bind(monkeypatch, claude, jev)
+    args = _parse(["run", "--lens", LENS])
+
+    args.fn(args)
+
+    assert capsys.readouterr().out.splitlines() == EXPECTED_PRINTED
+    records = (lens_repo / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()
+    assert len(records) == len(EXPECTED_OUTCOMES)
+    dialog = lens_repo / "dialog" / LENS
+    assert _dialog_files(dialog) == ["chapter-01.toml", "chapter-02.toml", "unattributed.toml"]
+    run_id = tomllib.loads((dialog / "chapter-01.toml").read_text(encoding="utf-8"))[NS_A]["1"]["run"]
+    assert re.fullmatch(r"\d{8}T\d{6}Z", run_id)
+    assert len(jev.calls) == len(SCENES)
+
+
+def test_run_command_without_a_stored_threshold_fails_before_any_stage(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stages, "bindings", _unbound)
+    args = _parse(["run", "--lens", LENS])
+    with pytest.raises(Fail, match="no triage threshold"):
+        args.fn(args)
+    assert not (lens_repo / "work" / LENS / report.OUTCOMES).exists()
+
+
+def test_run_command_with_no_triage_needs_no_threshold_and_never_calls_jev(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    _bind(monkeypatch, claude, jev)
+    args = _parse(["run", "--lens", LENS, "--no-triage"])
+
+    args.fn(args)
+
+    assert jev.calls == []
+    assert capsys.readouterr().out.splitlines() == EXPECTED_PRINTED
+    assert (lens_repo / "work" / LENS / report.OUTCOMES).is_file()
