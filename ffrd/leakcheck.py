@@ -1,4 +1,4 @@
-"""leak-check: report vanilla game text found anywhere in the repository's history."""
+"""leak-check: report vanilla game text, and tracked files under the top-level work/ directory, found anywhere in the repository's history."""
 
 import argparse
 import subprocess
@@ -92,15 +92,17 @@ class Objects:
         return content
 
 
-def scan(root: Path, index: dict[str, list[tuple[str, Label]]]) -> list[str]:
-    lines: list[str] = []
+def scan(root: Path, index: dict[str, list[tuple[str, Label]]]) -> tuple[list[str], list[str]]:
+    """Return the vanilla-text lines and the work/ lines, each path reported at its oldest commit."""
+    vanilla_lines: list[str] = []
+    work_lines: list[str] = []
     shown: dict[str, str] = {}  # tree path -> the path as printed, after its first match
     seen_blobs: set[str] = set()
     commits = git(root, "rev-list", "--reverse", "HEAD").decode().split()
     with Objects(root) as objects:
         for commit in commits:
             message = objects.read(commit).partition(b"\n\n")[2]
-            lines += report(f"{commit}:message", matches(message.decode(errors="replace"), index))
+            vanilla_lines += report(f"{commit}:message", matches(message.decode(errors="replace"), index))
             for entry in git(root, "ls-tree", "-r", "-z", commit).split(b"\0"):
                 if not entry:
                     continue
@@ -110,30 +112,37 @@ def scan(root: Path, index: dict[str, list[tuple[str, Label]]]) -> list[str]:
                 if path not in shown:
                     hits = matches(path, index)
                     shown[path] = redact(path, hits)
-                    lines += report(f"{commit}:{shown[path]}", hits)
+                    vanilla_lines += report(f"{commit}:{shown[path]}", hits)
+                    if path.startswith("work/"):
+                        work_lines.append(f"{commit}:{shown[path]} work/")
                 if kind == "blob" and sha not in seen_blobs:
                     seen_blobs.add(sha)
                     text = objects.read(sha).decode(errors="replace")
-                    lines += report(f"{commit}:{shown[path]}", matches(text, index))
-    return lines
+                    vanilla_lines += report(f"{commit}:{shown[path]}", matches(text, index))
+    return vanilla_lines, work_lines
 
 
 def cmd_leak_check(args: argparse.Namespace) -> None:
     index = build_index(tables())
-    lines = scan(repo_root(), index)
-    if not lines:
+    vanilla_lines, work_lines = scan(repo_root(), index)
+    if not vanilla_lines and not work_lines:
         print(0)
         return
-    for line in lines:
+    for line in vanilla_lines + work_lines:
         print(line)
-    raise Fail(f"{len(lines)} vanilla strings in history")
+    if vanilla_lines and work_lines:
+        raise Fail(f"{len(vanilla_lines)} vanilla strings and {len(work_lines)} tracked files under work/ in history")
+    if work_lines:
+        raise Fail(f"{len(work_lines)} tracked files under work/ in history")
+    raise Fail(f"{len(vanilla_lines)} vanilla strings in history")
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     c = subparsers.add_parser(
         "leak-check",
-        help="fail if vanilla game text is in any commit's paths, files or messages",
+        help="fail if vanilla game text is in any commit's paths, files or messages, or a file under work/ is tracked",
         description=f"Scan every commit reachable from HEAD for vanilla game text. Ignores vanilla strings shorter than {MIN_LEN} characters. "
-        "Prints a location and table key for each match, never the matched text.",
+        "Prints a location and table key for each match, never the matched text. "
+        "Also fails on any tracked file under the top-level work/ directory, reporting each path once at its oldest commit.",
     )
     c.set_defaults(fn=cmd_leak_check)

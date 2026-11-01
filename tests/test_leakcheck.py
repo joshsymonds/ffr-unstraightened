@@ -156,6 +156,48 @@ def test_text_removed_in_a_later_commit_is_still_reported(vanilla: Path, repo: P
     assert out == f"{added}:gone.txt en ST_T01_001,1\n"
 
 
+def test_tracked_work_file_is_reported_by_commit_and_path(vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    planted = commit(repo, "Add work", {"work/voice/x.jsonl": '{"made": "up"}\n'})
+    out, err = leak_check_fails(capsys)
+    assert out == f"{planted}:work/voice/x.jsonl work/\n"
+    assert err == "ffrd: 1 tracked files under work/ in history\n"
+
+
+def test_work_file_removed_in_a_later_commit_is_still_reported(vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    added = commit(repo, "Add work", {"work/voice/x.jsonl": '{"made": "up"}\n'})
+    git(repo, "rm", "-q", "work/voice/x.jsonl")
+    git(repo, "commit", "-q", "-m", "Remove work")
+    out, _ = leak_check_fails(capsys)
+    assert out == f"{added}:work/voice/x.jsonl work/\n"
+
+
+def test_work_path_seen_in_two_commits_is_reported_once_at_the_oldest(
+    vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    oldest = commit(repo, "Add work", {"work/a.jsonl": '{"made": "up"}\n'})
+    commit(repo, "Change work", {"work/a.jsonl": '{"made": "changed"}\n'})
+    out, err = leak_check_fails(capsys)
+    assert out == f"{oldest}:work/a.jsonl work/\n"
+    assert err == "ffrd: 1 tracked files under work/ in history\n"
+
+
+def test_path_named_work_below_another_directory_is_not_reported(vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    commit(repo, "Add notes", {"notes/work/a.txt": "clean\n"})
+    cli.main(["leak-check"])
+    captured = capsys.readouterr()
+    assert captured.out == "0\n"
+    assert captured.err == ""
+
+
+def test_vanilla_hit_and_work_file_are_reported_with_the_combined_message(
+    vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    planted = commit(repo, "Add notes", {"notes.txt": f"{EN_LINE}\n", "work/voice/x.jsonl": '{"made": "up"}\n'})
+    out, err = leak_check_fails(capsys)
+    assert out == f"{planted}:notes.txt en ST_T01_001,1\n{planted}:work/voice/x.jsonl work/\n"
+    assert err == "ffrd: 1 vanilla strings and 1 tracked files under work/ in history\n"
+
+
 def test_missing_vanilla_dir_exits_1_without_printing_zero(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -188,3 +230,13 @@ def test_leak_check_is_registered_with_its_minimum_in_help(
         cli.main(["leak-check", "--help"])
     assert exit_info.value.code == 0
     assert "shorter than 20 characters" in capsys.readouterr().out
+
+
+def test_leak_check_help_names_the_work_rule(
+    vanilla: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["leak-check", "--help"])
+    assert exit_info.value.code == 0
+    assert "tracked file under the top-level work/ directory" in capsys.readouterr().out
