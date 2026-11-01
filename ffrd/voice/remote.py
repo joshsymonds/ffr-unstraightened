@@ -5,10 +5,12 @@ import io
 import json
 import os
 import shlex
+import socket
 import subprocess
 import tarfile
 import tempfile
-from collections.abc import Sequence
+import time
+from collections.abc import Iterator, Sequence
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import IO, Any, Self
@@ -20,6 +22,7 @@ DEFAULT_HOST = "gnomon"
 DEFAULT_SCRATCH = "~/.local/share/ffr-unstraightened/voice"
 ENV = "path:./tools/voice#cuda"
 WAIT_SECONDS = 30
+TUNNEL_TIMEOUT = 30.0
 
 
 def host() -> str:
@@ -95,6 +98,48 @@ def pull(name: str, local: Path) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+@contextlib.contextmanager
+def tunnel(remote_port: int) -> Iterator[int]:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        local = probe.getsockname()[1]
+    try:
+        proc = subprocess.Popen(
+            ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-L", f"127.0.0.1:{local}:127.0.0.1:{remote_port}", host()],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as e:
+        raise Fail(f"ssh not found on PATH; cannot reach {host()}") from e
+    try:
+        _await_tunnel(proc, local)
+        yield local
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def _await_tunnel(proc: subprocess.Popen[bytes], local: int) -> None:
+    deadline = time.monotonic() + TUNNEL_TIMEOUT
+    while True:
+        code = proc.poll()
+        if code is not None:
+            raise Fail(f"ssh tunnel to {host()} exited {code}")
+        try:
+            with socket.create_connection(("127.0.0.1", local), timeout=1):
+                return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise Fail(f"ssh tunnel to {host()} was not ready within {TUNNEL_TIMEOUT:g} s")
+        time.sleep(0.1)
 
 
 class Worker:

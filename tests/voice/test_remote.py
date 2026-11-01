@@ -1,6 +1,8 @@
 import io
+import socket
 import subprocess
 import tarfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -56,13 +58,22 @@ class FakePipe:
 
 
 class FakeProcess:
-    def __init__(self, reply: bytes = b"", returncode: int = 0, hang: bool = False) -> None:
+    def __init__(self, reply: bytes = b"", returncode: int = 0, hang: bool = False, exited: bool = False) -> None:
         self.stdin = FakePipe()
         self.stdout = FakePipe(reply)
         self.returncode = returncode
         self.hang = hang
+        self.exited = exited
+        self.terminated = False
         self.killed = False
         self.waits: list[float | None] = []
+
+    def poll(self) -> int | None:
+        return self.returncode if self.exited else None
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.exited = True
 
     def wait(self, timeout: float | None = None) -> int:
         self.waits.append(timeout)
@@ -72,15 +83,24 @@ class FakeProcess:
 
     def kill(self) -> None:
         self.killed = True
+        self.exited = True
 
 
 class FakePopen:
-    def __init__(self, process: FakeProcess) -> None:
+    def __init__(self, process: FakeProcess, listeners: list[socket.socket] | None = None) -> None:
         self.process = process
+        self.listeners = listeners
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> FakeProcess:
         self.calls.append((args, kwargs))
+        if self.listeners is not None and "-L" in args:
+            # Stand in for the forwarded port on gnomon: listen on the local end of the -L spec.
+            local = int(args[args.index("-L") + 1].split(":")[1])
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", local))
+            sock.listen()
+            self.listeners.append(sock)
         return self.process
 
 
@@ -240,3 +260,110 @@ def test_worker_exit_kills_a_worker_that_ignores_the_wait(monkeypatch: pytest.Mo
     assert process.stdin.closed
     assert process.killed
     assert process.waits == [30, None]
+
+
+@pytest.fixture
+def listeners() -> Iterator[list[socket.socket]]:
+    socks: list[socket.socket] = []
+    yield socks
+    for sock in socks:
+        sock.close()
+
+
+def test_tunnel_runs_ssh_forward_with_devnull_streams_and_yields_local_port(
+    monkeypatch: pytest.MonkeyPatch, listeners: list[socket.socket]
+) -> None:
+    process = FakeProcess()
+    popen = FakePopen(process, listeners)
+    monkeypatch.setattr(remote.subprocess, "Popen", popen)
+
+    with remote.tunnel(8080) as local:
+        assert isinstance(local, int)
+        assert local != 0
+
+    args, kwargs = popen.calls[0]
+    assert args == [
+        "ssh",
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-L",
+        f"127.0.0.1:{local}:127.0.0.1:8080",
+        "gnomon",
+    ]
+    assert kwargs == {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+
+
+def test_tunnel_terminates_ssh_on_normal_exit(monkeypatch: pytest.MonkeyPatch, listeners: list[socket.socket]) -> None:
+    process = FakeProcess()
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process, listeners))
+
+    with remote.tunnel(8080):
+        assert not process.terminated
+
+    assert process.terminated
+    assert process.waits == [remote.WAIT_SECONDS]
+    assert not process.killed
+
+
+def test_tunnel_terminates_ssh_when_body_raises(monkeypatch: pytest.MonkeyPatch, listeners: list[socket.socket]) -> None:
+    process = FakeProcess()
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process, listeners))
+
+    with pytest.raises(RuntimeError, match="body failed"), remote.tunnel(8080):
+        raise RuntimeError("body failed")
+
+    assert process.terminated
+    assert process.waits == [remote.WAIT_SECONDS]
+
+
+def test_tunnel_kills_ssh_that_ignores_terminate(monkeypatch: pytest.MonkeyPatch, listeners: list[socket.socket]) -> None:
+    process = FakeProcess(hang=True)
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process, listeners))
+
+    with remote.tunnel(8080):
+        pass
+
+    assert process.terminated
+    assert process.killed
+    assert process.waits == [remote.WAIT_SECONDS, None]
+
+
+def test_tunnel_early_ssh_exit_raises_fail_and_terminates(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = FakeProcess(returncode=255, exited=True)
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
+
+    with pytest.raises(Fail) as err, remote.tunnel(8080):
+        pytest.fail("body must not run when ssh exits first")
+
+    assert str(err.value) == "ssh tunnel to gnomon exited 255"
+    assert process.terminated
+
+
+def test_tunnel_without_ssh_raises_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("ssh")
+
+    monkeypatch.setattr(remote.subprocess, "Popen", missing)
+
+    with pytest.raises(Fail) as err, remote.tunnel(8080):
+        pytest.fail("body must not run without ssh")
+
+    assert str(err.value) == "ssh not found on PATH; cannot reach gnomon"
+
+
+def test_tunnel_never_ready_raises_fail_on_timeout_and_terminates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote, "TUNNEL_TIMEOUT", 0.2)
+    process = FakeProcess()
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
+
+    with pytest.raises(Fail) as err, remote.tunnel(8080):
+        pytest.fail("body must not run when the tunnel is never ready")
+
+    assert str(err.value) == "ssh tunnel to gnomon was not ready within 0.2 s"
+    assert process.terminated
+    assert process.waits == [remote.WAIT_SECONDS]
