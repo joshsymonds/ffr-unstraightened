@@ -7,6 +7,7 @@ import os
 import shlex
 import socket
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -54,6 +55,27 @@ def _ssh(command: str, **streams: Any) -> int:
     return result.returncode
 
 
+def _relay(command: str) -> int:
+    try:
+        proc = subprocess.Popen(["ssh", host(), command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+    except FileNotFoundError as e:
+        raise Fail(f"ssh not found on PATH; cannot reach {host()}") from e
+    stdout = proc.stdout
+    if stdout is None:
+        raise RuntimeError("ssh stdout is not a pipe")
+    try:
+        for line in iter(stdout.readline, b""):
+            sys.stdout.write(line.decode("utf-8", errors="replace"))
+            sys.stdout.flush()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        stdout.close()
+    return proc.wait()
+
+
 def _require_ok(code: int, what: str) -> None:
     if code != 0:
         raise Fail(f"{host()} {what} exited {code}")
@@ -69,7 +91,8 @@ def shell(command: str) -> None:
 
 
 def run(argv: Sequence[str]) -> None:
-    shell(f"{env(argv)} 2>> logs/remote.log")
+    # Stdout is relayed line by line to sys.stdout; stderr goes to the remote log.
+    _require_ok(_relay(f"{_prefix()} && {env(['env', 'PYTHONUNBUFFERED=1', *argv])} 2>> logs/remote.log"), "command")
 
 
 def sync() -> None:

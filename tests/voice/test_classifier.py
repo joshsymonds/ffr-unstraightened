@@ -283,11 +283,26 @@ class RecordingSsh:
             self.pushed = stdin.read()
         return subprocess.CompletedProcess(args, 0)
 
+    def popen(self, args: list[str], **kwargs: Any) -> "SilentJob":
+        self.commands.append(args[2])
+        return SilentJob()
+
+
+class SilentJob:
+    """Stands in for a remote job that prints nothing and exits 0."""
+
+    def __init__(self) -> None:
+        self.stdout = io.BytesIO(b"")
+
+    def wait(self) -> int:
+        return 0
+
 
 @pytest.fixture
 def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[RecordingSsh, Path]:
     ssh = RecordingSsh()
     monkeypatch.setattr(remote.subprocess, "run", ssh)
+    monkeypatch.setattr(remote.subprocess, "Popen", ssh.popen)
     monkeypatch.setattr(remote, "repo_root", lambda: tmp_path / "repo")
     voice = tmp_path / "repo" / "tools" / "voice"
     voice.mkdir(parents=True)
@@ -317,7 +332,7 @@ def test_train_syncs_then_stages_examples_then_runs_remote_trainer(train_env: tu
     )
     assert ssh.commands[1] == f"{REMOTE_PREFIX} && mkdir -p -- data && cat > data/classifier.jsonl"
     assert ssh.commands[2] == (
-        f"{REMOTE_PREFIX} && {REMOTE_DEVENV} python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
+        f"{REMOTE_PREFIX} && {REMOTE_DEVENV} env PYTHONUNBUFFERED=1 python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
     )
 
 

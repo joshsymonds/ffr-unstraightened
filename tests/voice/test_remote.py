@@ -154,9 +154,90 @@ def test_shell_nonzero_exit_raises_fail_with_host_and_code_only(ssh: Ssh) -> Non
     assert str(err.value) == "gnomon command exited 7"
 
 
-def test_run_appends_remote_stderr_to_remote_log(ssh: Ssh) -> None:
+def test_run_command_is_unbuffered_and_appends_remote_stderr_to_remote_log(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+    popen = FakePopen(FakeProcess())
+    monkeypatch.setattr(remote.subprocess, "Popen", popen)
     remote.run(["python3", "x.py"])
-    assert ssh.calls[0][0][2] == f"{PREFIX} && {DEVENV} python3 x.py 2>> logs/remote.log"
+    assert ssh.calls == []
+    args, kwargs = popen.calls[0]
+    assert args == ["ssh", "gnomon", f"{PREFIX} && {DEVENV} env PYTHONUNBUFFERED=1 python3 x.py 2>> logs/remote.log"]
+    assert kwargs == {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE}
+
+
+class LiveJob(FakePipe):
+    """Stands in for the job's stdout. Each readline is the job producing its next line, so it records what sys.stdout holds by then."""
+
+    def __init__(self, out: io.StringIO, lines: list[bytes]) -> None:
+        super().__init__()
+        self.out = out
+        self.lines = lines
+        self.seen: list[str] = []
+
+    def readline(self) -> bytes:
+        self.seen.append(self.out.getvalue())
+        return self.lines.pop(0) if self.lines else b""
+
+
+def test_run_relays_each_stdout_line_before_the_job_produces_the_next(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    process = FakeProcess()
+    job = LiveJob(out, [b"synthetic step 1 loss 0.5\n", b"synthetic step 2 loss 0.4\n"])
+    process.stdout = job
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
+
+    remote.run(["python3", "x.py"])
+
+    assert job.seen == ["", "synthetic step 1 loss 0.5\n", "synthetic step 1 loss 0.5\nsynthetic step 2 loss 0.4\n"]
+    assert out.getvalue() == "synthetic step 1 loss 0.5\nsynthetic step 2 loss 0.4\n"
+    assert ssh.calls == []
+
+
+def test_run_decodes_stdout_without_raising_on_undecodable_bytes(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    process = FakeProcess()
+    process.stdout = FakePipe(b"synthetic caf\xe9 line\n")
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
+
+    remote.run(["x"])
+
+    assert out.getvalue() == "synthetic caf� line\n"
+
+
+class BrokenOut(io.StringIO):
+    def write(self, text: str) -> int:
+        raise BrokenPipeError("synthetic closed terminal")
+
+
+def test_run_kills_and_reaps_the_job_when_relaying_a_line_fails(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdout", BrokenOut())
+    process = FakeProcess(reply=b"SYNTH-STEP line\n")
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
+    with pytest.raises(BrokenPipeError):
+        remote.run(["x"])
+    assert process.killed
+    assert process.waits == [None]
+    assert process.stdout.closed
+
+
+def test_run_nonzero_exit_raises_fail_with_host_and_code_only(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(FakeProcess(reply=b"SYNTH-STEP line\n", returncode=7)))
+    with pytest.raises(Fail) as err:
+        remote.run(["x"])
+    assert str(err.value) == "gnomon command exited 7"
+
+
+def test_run_without_ssh_raises_fail(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("ssh")
+
+    monkeypatch.setattr(remote.subprocess, "Popen", missing)
+    with pytest.raises(Fail) as err:
+        remote.run(["x"])
+    assert str(err.value) == "ssh not found on PATH; cannot reach gnomon"
+    assert ssh.calls == []
 
 
 SYNC = "mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {} + && tar -x -f -"
