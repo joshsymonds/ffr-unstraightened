@@ -109,10 +109,17 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
 
 ### Rewrite pipeline
 
-`ffrd tune --lens <name>` and `ffrd run --lens <name>` change only in-scope lines:
-main story dialogue (`ST_C<n>_`), side-event dialogue (`ST_SubEv_`), and the
-`ST_DialogChoice`, `ST_MainSummary` and `ST_UnitDescription` namespaces, bare or
-followed by `_`. Names, menus, items, skills and tutorials never change.
+`ffrd tune --lens <name>` and `ffrd run --lens <name>` change only in-scope lines.
+A line is in scope when the scene source yields it from the game's scene table. That
+covers event dialogue, including unnumbered side events, which count under the chapter
+that unlocks them, and the `ST_DialogChoice`, `ST_MainSummary` and `ST_UnitDescription`
+namespaces. Without a scene table, which is the case before the real source is bound
+and in tests, a fallback allowlist applies instead. It matches the `ST_C<n>_`,
+`ST_SubEv`, `ST_ChrEv`, `ST_FEV`, `ST_LegendEV`, `ST_GimEv`, `ST_BtlEv` and `ST_EV`
+prefixes, plus the same three namespaces. Hard exclusions apply in every case:
+`ST_Tutorial*`, `ST_UI*`, any namespace ending in `Name` or `SkillDescription`, and
+`ST_ConsumablesDescription`, `ST_EquipmentDescription` and `ST_ArtifactDescription`.
+Names, menus, items, skills and tutorials never change.
 
 `ffrd run` works through the lens's scenes in order. It writes a story bible for each
 chapter and triages each scene with Jev against the stored threshold, unless
