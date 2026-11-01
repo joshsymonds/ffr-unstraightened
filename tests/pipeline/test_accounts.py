@@ -1,7 +1,10 @@
 import json
 import os
 import sys
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -9,6 +12,7 @@ from typing import Any
 import pytest
 
 from ffrd.game import Fail
+from ffrd.pipeline import accounts, claude
 from ffrd.pipeline.accounts import WEEKLY_LIMIT, Account, choose, read
 from ffrd.pipeline.claude import OPUS, SYSTEM_PROMPT, RateLimited, Rejected, Unfinished, ask, call
 
@@ -417,3 +421,233 @@ def test_ask_returns_unfinished_or_rejected_without_retrying(
     assert ask(1, OPUS, PARTS, SCHEMA, sleep=Sleeps()) == (1, expected)
     assert [call_["account"] for call_ in cswap.claude_calls()] == [1]
     assert cswap.calls() == []
+
+
+# Made-up outcomes and a gauge for the concurrency tests. Not game text.
+RATE_LIMITED = RateLimited("api_error_status 429")
+
+
+HOLD = 0.1  # Seconds each gauged call stays in flight, so calls that overlap are counted together.
+
+
+class Gauge:
+    """Records the most calls in flight at once. Every call holds for HOLD seconds."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.in_flight = 0
+        self.peak = 0
+
+    def hold(self) -> None:
+        with self.lock:
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+        time.sleep(HOLD)
+        with self.lock:
+            self.in_flight -= 1
+
+
+def gauged_call(gauge: Gauge, outcome: Callable[[int], object]) -> Callable[..., object]:
+    def fake(account: int, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> object:
+        gauge.hold()
+        return outcome(account)
+
+    return fake
+
+
+@pytest.fixture
+def default_concurrency() -> Iterator[None]:
+    yield
+    claude.set_concurrency(claude.DEFAULT_CONCURRENCY)
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_concurrency_defaults_to_eight() -> None:
+    assert claude.DEFAULT_CONCURRENCY == 8
+    assert claude.concurrency() == 8
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_set_concurrency_below_one_fails_and_keeps_the_bound() -> None:
+    with pytest.raises(Fail) as exc:
+        claude.set_concurrency(0)
+    assert str(exc.value) == "concurrency must be at least 1"
+    assert claude.concurrency() == claude.DEFAULT_CONCURRENCY
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_concurrent_asks_reach_but_never_exceed_default_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    limit = claude.DEFAULT_CONCURRENCY
+    gauge = Gauge()
+    monkeypatch.setattr(claude, "call", gauged_call(gauge, lambda _account: MADE_UP))
+    with ThreadPoolExecutor(max_workers=3 * limit) as pool:
+        answers = list(pool.map(lambda _: ask(1, OPUS, PARTS, SCHEMA, sleep=Sleeps()), range(3 * limit)))
+    assert answers == [(1, MADE_UP)] * (3 * limit)
+    assert gauge.peak == limit
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_set_concurrency_replaces_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    claude.set_concurrency(3)
+    assert claude.concurrency() == 3
+    gauge = Gauge()
+    monkeypatch.setattr(claude, "call", gauged_call(gauge, lambda _account: MADE_UP))
+    with ThreadPoolExecutor(max_workers=9) as pool:
+        answers = list(pool.map(lambda _: ask(1, OPUS, PARTS, SCHEMA, sleep=Sleeps()), range(9)))
+    assert answers == [(1, MADE_UP)] * 9
+    assert gauge.peak == 3
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_rate_limited_call_frees_its_slot_before_the_account_choice(cswap: FakeCswap, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude.set_concurrency(1)
+    cswap.publish(listing(usable(1, 10.0), usable(2, 20.0)))
+    gauge = Gauge()
+    monkeypatch.setattr(claude, "call", gauged_call(gauge, lambda account: RATE_LIMITED if account == 1 else MADE_UP))
+    real_choose = accounts.choose
+    probe_finished: list[bool] = []
+    probe_answers: list[object] = []
+
+    def probing_choose(exclude: Collection[int], *, sleep: Callable[[float], None]) -> Account:
+        # A second ask must get the only slot while the first is choosing. If the slot were still held, the probe
+        # would never finish, and the join's timeout records that instead of hanging the test.
+        probe = threading.Thread(
+            target=lambda: probe_answers.append(ask(9, OPUS, PARTS, SCHEMA, sleep=Sleeps())),
+            daemon=True,
+        )
+        probe.start()
+        probe.join(timeout=5)
+        probe_finished.append(not probe.is_alive())
+        return real_choose(exclude, sleep=sleep)
+
+    monkeypatch.setattr(accounts, "choose", probing_choose)
+    assert ask(1, OPUS, PARTS, SCHEMA, sleep=Sleeps()) == (2, MADE_UP)
+    assert probe_finished == [True]
+    assert probe_answers == [(9, MADE_UP)]
+    assert gauge.peak == 1
+    assert cswap.calls() == ["list --json"]
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_concurrent_rate_limited_asks_reread_usage_and_finish_on_a_free_account(cswap: FakeCswap, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude.set_concurrency(3)
+    cswap.publish(listing(usable(1, 10.0), usable(2, 20.0), usable(3, 30.0)))
+    gauge = Gauge()
+    monkeypatch.setattr(claude, "call", gauged_call(gauge, lambda account: RATE_LIMITED if account == 1 else MADE_UP))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        answers = list(pool.map(lambda _: ask(1, OPUS, PARTS, SCHEMA, sleep=Sleeps()), range(6)))
+    assert answers == [(2, MADE_UP)] * 6
+    assert cswap.calls() == ["list --json"] * 6
+    assert gauge.peak == 3
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_fan_out_returns_results_in_item_order_when_completion_is_reversed() -> None:
+    items = [0, 1, 2, 3]
+    finished = [threading.Event() for _ in items]
+    completion: list[int] = []
+
+    def work(item: int) -> int:
+        if item + 1 < len(items):
+            finished[item + 1].wait(timeout=5)
+        completion.append(item)
+        finished[item].set()
+        return item * 10
+
+    assert claude.fan_out(work, items) == [0, 10, 20, 30]
+    assert completion == [3, 2, 1, 0]
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_fan_out_runs_at_most_concurrency_items_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    claude.set_concurrency(3)
+    gauge = Gauge()
+
+    def work(item: int) -> int:
+        gauge.hold()
+        return item
+
+    assert claude.fan_out(work, list(range(10))) == list(range(10))
+    assert gauge.peak == 3
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_fan_out_of_no_items_returns_empty_without_a_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    class NoPool:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("fan_out started a pool for no items")
+
+    monkeypatch.setattr(claude, "ThreadPoolExecutor", NoPool)
+    assert claude.fan_out(lambda item: item, []) == []
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_fan_out_failure_cancels_unstarted_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    claude.set_concurrency(1)
+    started: list[int] = []
+
+    def work(item: int) -> int:
+        started.append(item)
+        time.sleep(0.05)
+        if item == 0:
+            raise ValueError("SYNTHETIC-FAILURE item 0")
+        return item
+
+    with pytest.raises(ValueError, match="SYNTHETIC-FAILURE item 0"):
+        claude.fan_out(work, list(range(10)))
+    assert 0 in started
+    assert len(started) < 10
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_fan_out_failure_lets_running_items_finish_and_raises_first_in_item_order() -> None:
+    claude.set_concurrency(2)
+    finished: list[int] = []
+
+    def work(item: int) -> int:
+        if item == 0:
+            time.sleep(0.2)
+            finished.append(0)
+            raise ValueError("SYNTHETIC-FAILURE item 0")
+        if item == 1:
+            raise KeyError("SYNTHETIC-FAILURE item 1")
+        return item
+
+    with pytest.raises(ValueError, match="SYNTHETIC-FAILURE item 0"):
+        claude.fan_out(work, [0, 1, 2, 3])
+    assert finished == [0]
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_nested_fan_out_completes_within_the_bound() -> None:
+    claude.set_concurrency(2)
+
+    def inner(item: int) -> int:
+        return item
+
+    def outer(item: int) -> list[int]:
+        return claude.fan_out(inner, [item, item + 10, item + 20])
+
+    assert claude.fan_out(outer, [0, 100]) == [[0, 10, 20], [100, 110, 120]]
+
+
+@pytest.mark.usefixtures("default_concurrency")
+def test_fan_out_interrupted_while_waiting_cancels_unstarted_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    claude.set_concurrency(1)
+    release = threading.Event()
+    started: list[int] = []
+
+    def work(item: int) -> int:
+        started.append(item)
+        release.wait(timeout=5)
+        return item
+
+    def interrupted_wait(*args: object, **kwargs: object) -> None:
+        # Item 0 is released only after the interrupt has had time to cancel the rest.
+        threading.Timer(0.2, release.set).start()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(claude, "wait", interrupted_wait)
+    with pytest.raises(KeyboardInterrupt):
+        claude.fan_out(work, list(range(10)))
+    assert started == [0]
