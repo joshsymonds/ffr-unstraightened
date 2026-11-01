@@ -1,20 +1,54 @@
-"""Classifier metrics for the voice eval: AUROC of game-likeness scores separating held-out game lines (label 1) from their paraphrases (label 0), overall and for short lines."""
+"""Voice eval metrics: AUROC of game-likeness scores separating held-out game lines (label 1) from their paraphrases (label 0), overall and for short lines; and the revert check, where Opus alters training lines and the share of renders that keep the alteration is measured."""
 
 import hashlib
+import json
 import statistics
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from fractions import Fraction
+from functools import partial
+from pathlib import Path
+from typing import Any
 
 from ffrd.game import Fail
+from ffrd.pipeline import accounts, claude
+from ffrd.pipeline.claude import Rejected, Unfinished
+from ffrd.pipeline.store import Store
 from ffrd.voice.classifier import Pair
 
 CLASSIFIER_BAR = 0.90
 SHORT_WORDS = 8
 RENDER_SCORE_BAR = 0.5
 MEANING_MARGIN = 0.03
+REVERT_BAR = 0.90
+REVERT_INPUTS = 200
+REVERT_BATCH = 20
 # Exact decimal so the meaning boundary is compared without float rounding.
 _MEANING_MARGIN_EXACT = Fraction(str(MEANING_MARGIN))
+_REVERT_BAR_EXACT = Fraction(str(REVERT_BAR))
+
+ALTER_PROMPT = (
+    "Each entry below is a line of game dialogue. For each entry, return a version of its text that changes "
+    "its meaning in one concrete way: a fact, an object, a place, a number, or a yes to a no. Keep each "
+    "entry's length and tone. Return one entry per id, using the same id."
+)
+ALTER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "altered": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["id", "text"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["altered"],
+    "additionalProperties": False,
+}
 
 Renderer = Callable[[str, str], str]
 ScoreMany = Callable[[Sequence[str]], list[float]]
@@ -108,4 +142,81 @@ def classifier_metrics(scored: Sequence[Scored]) -> dict[str, int | float | bool
         "n_short": len(short),
         "auroc_short": auroc_short,
         "pass": overall >= CLASSIFIER_BAR,
+    }
+
+
+def revert_sample(pairs: Sequence[Pair], n: int = REVERT_INPUTS) -> list[Pair]:
+    return heldout_sample([pair for pair in pairs if pair.split == "train"])[:n]
+
+
+def _alter_id(pair: Pair) -> str:
+    return _digest(pair.paraphrase)[:16]
+
+
+def _log_call(log: Path, number: int, account: int) -> None:
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp}\tbatch {number}\taccount {account}\n")
+    except OSError as e:
+        raise Fail(f"cannot append to {log}: {e.strerror}") from e
+
+
+def _altered_texts(number: int, entries: list[dict[str, str]], outcome: dict[str, Any]) -> dict[str, str]:
+    replies = outcome.get("altered")
+    if not isinstance(replies, list) or not all(
+        isinstance(reply, dict) and isinstance(reply.get("id"), str) and isinstance(reply.get("text"), str) for reply in replies
+    ):
+        raise Fail(f"revert batch {number} reply is malformed")
+    if sorted(reply["id"] for reply in replies) != sorted(entry["id"] for entry in entries):
+        raise Fail(f"revert batch {number} reply ids do not match the batch")
+    if any(not reply["text"].strip() for reply in replies):
+        raise Fail(f"revert batch {number} reply has an empty text")
+    return {reply["id"]: reply["text"] for reply in replies}
+
+
+def _ask_batch(number: int, entries: list[dict[str, str]], log: Path, calls: dict[int, int]) -> dict[str, str]:
+    account = accounts.choose()
+    used, outcome = claude.ask(
+        account.number,
+        claude.OPUS,
+        [ALTER_PROMPT, json.dumps(entries, ensure_ascii=False)],
+        ALTER_SCHEMA,
+    )
+    calls[used] = calls.get(used, 0) + 1
+    _log_call(log, number, used)
+    if isinstance(outcome, Unfinished | Rejected):
+        raise Fail(f"revert batch {number} failed: {type(outcome).__name__}: {outcome.detail}")
+    return _altered_texts(number, entries, outcome)
+
+
+def alter(sample: Sequence[Pair], store: Store, log: Path) -> tuple[list[str], dict[int, int]]:
+    texts: dict[str, str] = {}
+    calls: dict[int, int] = {}
+    for number, start in enumerate(range(0, len(sample), REVERT_BATCH), start=1):
+        entries = [{"id": _alter_id(pair), "text": pair.paraphrase} for pair in sample[start : start + REVERT_BATCH]]
+        result = store.run("revert-alter", entries, None, partial(_ask_batch, number, entries, log, calls))
+        texts.update(result.value)
+    return [texts[_alter_id(pair)] for pair in sample], calls
+
+
+def revert_metrics(
+    sample: Sequence[Pair],
+    altered: Sequence[str],
+    render: Renderer,
+    holds_many: HoldsMany,
+) -> dict[str, int | float | bool]:
+    if not sample:
+        raise Fail("revert eval needs at least one training input")
+    if len(altered) != len(sample):
+        raise Fail("revert eval needs one altered text per training input")
+    renders = [render(pair.speaker, text) for pair, text in zip(sample, altered, strict=True)]
+    holds = holds_many([(rendered, pair.original) for pair, rendered in zip(sample, renders, strict=True)])
+    n = len(sample)
+    kept = n - sum(holds)
+    return {
+        "n": n,
+        "kept_rate": kept / n,
+        "pass": Fraction(kept, n) >= _REVERT_BAR_EXACT,
     }

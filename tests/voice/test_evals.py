@@ -1,19 +1,36 @@
-from collections.abc import Sequence
+import hashlib
+import json
+from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ffrd.game import Fail
+from ffrd.pipeline import accounts, claude
+from ffrd.pipeline.accounts import Account
+from ffrd.pipeline.claude import Rejected, Unfinished
+from ffrd.pipeline.store import Store
 from ffrd.voice.classifier import Pair
 from ffrd.voice.evals import (
+    ALTER_PROMPT,
+    ALTER_SCHEMA,
     CLASSIFIER_BAR,
     MEANING_MARGIN,
     RENDER_SCORE_BAR,
+    REVERT_BAR,
+    REVERT_BATCH,
+    REVERT_INPUTS,
     SHORT_WORDS,
     Scored,
+    alter,
     auroc,
     classifier_metrics,
     heldout_sample,
     render_metrics,
+    revert_metrics,
+    revert_sample,
     word_count,
 )
 
@@ -343,5 +360,260 @@ def test_render_metrics_result_has_exactly_the_contract_keys_and_no_text() -> No
         "meaning_pass",
         "pass",
     }
+    assert all(isinstance(value, int | float | bool) for value in metrics.values())
+    assert "secret" not in repr(metrics)
+
+
+def make_train_pair(i: int) -> Pair:
+    return Pair(
+        scene="scene-x",
+        speaker=f"spk-{i}",
+        paraphrase=f"para-{i:03d}",
+        original=f"line-{i:03d}",
+        slot="slot-1",
+        model="model-m",
+        split="train",
+    )
+
+
+def alter_id(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def echo_reply(entries: list[dict[str, str]]) -> dict[str, Any]:
+    return {"altered": [{"id": entry["id"], "text": f"altered:{entry['text']}"} for entry in entries]}
+
+
+class FakeOpus:
+    """Stands in for claude.ask and accounts.choose; answers every batch with echo_reply unless reply is replaced."""
+
+    def __init__(self, tmp_path: Path, numbers: Sequence[int] = (3, 5)) -> None:
+        self.store = Store(tmp_path / "store")
+        self.log = tmp_path / "revert-alter.log"
+        self.reply: Callable[[list[dict[str, str]]], Any] = echo_reply
+        self.calls: list[dict[str, Any]] = []
+        self._numbers = list(numbers)
+        self._next_account = 0
+
+    def choose(self) -> Account:
+        number = self._numbers[self._next_account % len(self._numbers)]
+        self._next_account += 1
+        return Account(number=number, weekly_pct=0.0, resets=())
+
+    def ask(self, account: int, model: str, parts: Sequence[str], schema: dict[str, Any]) -> tuple[int, Any]:
+        self.calls.append({"account": account, "model": model, "parts": list(parts), "schema": schema})
+        return account, self.reply(json.loads(parts[1]))
+
+
+@pytest.fixture
+def opus(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeOpus:
+    fake = FakeOpus(tmp_path)
+    monkeypatch.setattr(claude, "ask", fake.ask)
+    monkeypatch.setattr(accounts, "choose", fake.choose)
+    return fake
+
+
+def test_revert_constants_match_the_frozen_interface() -> None:
+    assert REVERT_BAR == 0.90
+    assert REVERT_INPUTS == 200
+    assert REVERT_BATCH == 20
+
+
+def test_revert_sample_keeps_train_pairs_only_and_caps_at_n() -> None:
+    train = [make_train_pair(i) for i in range(10)]
+    heldout = [
+        Pair(
+            scene="scene-x",
+            speaker="spk-h",
+            paraphrase=f"para-h{i}",
+            original=f"line-h{i}",
+            slot="slot-1",
+            model="model-m",
+            split="heldout",
+        )
+        for i in range(10)
+    ]
+    sample = revert_sample(heldout + train, n=4)
+    assert len(sample) == 4
+    assert all(pair.split == "train" for pair in sample)
+    assert sample == heldout_sample(train)[:4]
+
+
+def test_revert_sample_defaults_to_two_hundred_inputs() -> None:
+    assert len(revert_sample([make_train_pair(i) for i in range(250)])) == REVERT_INPUTS
+
+
+def test_revert_sample_of_nothing_is_empty() -> None:
+    assert revert_sample([]) == []
+
+
+def test_alter_sends_forty_five_inputs_as_batches_of_20_20_5(opus: FakeOpus) -> None:
+    sample = [make_train_pair(i) for i in range(45)]
+    alter(sample, opus.store, opus.log)
+    assert len(opus.calls) == 3
+    assert [len(json.loads(call["parts"][1])) for call in opus.calls] == [20, 20, 5]
+    for call, batch in zip(opus.calls, [sample[0:20], sample[20:40], sample[40:45]], strict=True):
+        assert call["model"] == claude.OPUS
+        assert call["schema"] == ALTER_SCHEMA
+        expected_entries = [{"id": alter_id(pair.paraphrase), "text": pair.paraphrase} for pair in batch]
+        assert call["parts"] == [ALTER_PROMPT, json.dumps(expected_entries, ensure_ascii=False)]
+
+
+def test_alter_returns_texts_in_sample_order_and_calls_per_account(opus: FakeOpus) -> None:
+    sample = [make_train_pair(i) for i in range(45)]
+    texts, per_account = alter(sample, opus.store, opus.log)
+    assert texts == [f"altered:{pair.paraphrase}" for pair in sample]
+    assert per_account == {3: 2, 5: 1}
+
+
+def test_alter_logs_one_line_per_call_with_the_account_used(opus: FakeOpus) -> None:
+    sample = [make_train_pair(i) for i in range(45)]
+    alter(sample, opus.store, opus.log)
+    lines = opus.log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    fields = [line.split("\t") for line in lines]
+    for stamp, _, _ in fields:
+        assert datetime.fromisoformat(stamp).utcoffset() == timedelta(0)
+    assert [(batch, account) for _, batch, account in fields] == [
+        ("batch 1", "account 3"),
+        ("batch 2", "account 5"),
+        ("batch 3", "account 3"),
+    ]
+
+
+def test_alter_rerun_makes_no_calls_and_returns_the_same_texts(opus: FakeOpus) -> None:
+    sample = [make_train_pair(i) for i in range(45)]
+    first, _ = alter(sample, opus.store, opus.log)
+    calls_before = len(opus.calls)
+    second, per_account = alter(sample, opus.store, opus.log)
+    assert second == first
+    assert len(opus.calls) == calls_before
+    assert per_account == {}
+    assert len(opus.log.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_alter_of_nothing_makes_no_calls(opus: FakeOpus) -> None:
+    assert alter([], opus.store, opus.log) == ([], {})
+    assert opus.calls == []
+
+
+def test_alter_unfinished_reply_raises_fail_naming_the_batch(opus: FakeOpus) -> None:
+    opus.reply = lambda entries: Unfinished("timeout after 1800 seconds")
+    sample = [make_train_pair(i) for i in range(25)]
+    with pytest.raises(Fail, match="batch 1") as info:
+        alter(sample, opus.store, opus.log)
+    assert "Unfinished" in str(info.value)
+    assert len(opus.log.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_alter_rejected_reply_raises_fail_naming_the_batch(opus: FakeOpus) -> None:
+    opus.reply = lambda entries: Rejected("subtype error_max_structured_output_retries")
+    with pytest.raises(Fail, match="batch 1") as info:
+        alter([make_train_pair(0)], opus.store, opus.log)
+    assert "Rejected" in str(info.value)
+
+
+def test_failed_batch_is_not_saved_so_rerun_calls_only_that_batch(opus: FakeOpus) -> None:
+    sample = [make_train_pair(i) for i in range(25)]
+    second_batch_size = len(sample) - REVERT_BATCH
+
+    def fail_second_batch(entries: list[dict[str, str]]) -> Any:
+        if len(entries) == second_batch_size:
+            return Unfinished("subtype error_during_execution")
+        return echo_reply(entries)
+
+    opus.reply = fail_second_batch
+    with pytest.raises(Fail, match="batch 2"):
+        alter(sample, opus.store, opus.log)
+    opus.reply = echo_reply
+    texts, per_account = alter(sample, opus.store, opus.log)
+    assert texts == [f"altered:{pair.paraphrase}" for pair in sample]
+    assert sum(per_account.values()) == 1
+    assert len(opus.calls) == 3
+
+
+MALFORMED_REPLIES: dict[str, Callable[[list[dict[str, str]]], Any]] = {
+    "missing id": lambda entries: {"altered": [{"id": e["id"], "text": "made-up-synth"} for e in entries[:-1]]},
+    "extra id": lambda entries: {
+        "altered": [{"id": e["id"], "text": "made-up-synth"} for e in entries] + [{"id": "0" * 16, "text": "made-up-synth"}]
+    },
+    "duplicate id": lambda entries: {"altered": [{"id": entries[0]["id"], "text": "made-up-synth"} for _ in entries]},
+    "empty text": lambda entries: {"altered": [{"id": e["id"], "text": "  "} for e in entries]},
+    "no altered key": lambda entries: {"items": []},
+}
+
+
+@pytest.mark.parametrize("reply", MALFORMED_REPLIES.values(), ids=MALFORMED_REPLIES.keys())
+def test_alter_malformed_reply_raises_fail_with_no_text(opus: FakeOpus, reply: Callable[[list[dict[str, str]]], Any]) -> None:
+    opus.reply = reply
+    sample = [make_train_pair(0), make_train_pair(1)]
+    with pytest.raises(Fail) as info:
+        alter(sample, opus.store, opus.log)
+    assert "made-up-synth" not in str(info.value)
+
+
+def test_revert_metrics_on_a_hand_built_case() -> None:
+    # Nine renders no longer hold the original meaning and one does: nine kept of ten.
+    sample = [make_train_pair(i) for i in range(10)]
+    altered = [f"altered:{pair.paraphrase}" for pair in sample]
+    rendered_holds = [False] * 9 + [True]
+    metrics = revert_metrics(sample, altered, lambda speaker, text: f"R:{text}", lambda pairs: rendered_holds)
+    assert metrics == {"n": 10, "kept_rate": 0.9, "pass": True}
+
+
+def test_revert_bar_passes_at_exactly_ninety_percent_kept() -> None:
+    sample = [make_train_pair(i) for i in range(100)]
+    altered = [f"altered:{pair.paraphrase}" for pair in sample]
+    holds = [i >= 90 for i in range(100)]
+    metrics = revert_metrics(sample, altered, lambda speaker, text: text, lambda pairs: holds)
+    assert metrics["kept_rate"] == 0.9
+    assert metrics["pass"] is True
+
+
+def test_revert_bar_fails_just_below_ninety_percent_kept() -> None:
+    sample = [make_train_pair(i) for i in range(100)]
+    altered = [f"altered:{pair.paraphrase}" for pair in sample]
+    holds = [i >= 89 for i in range(100)]
+    metrics = revert_metrics(sample, altered, lambda speaker, text: text, lambda pairs: holds)
+    assert metrics["kept_rate"] == 0.89
+    assert metrics["pass"] is False
+
+
+def test_revert_renders_happen_before_holds_many() -> None:
+    sample = [make_train_pair(i) for i in range(3)]
+    altered = ["altered-0", "altered-1", "altered-2"]
+    log: list[str] = []
+    hold_inputs: list[list[tuple[str, str]]] = []
+
+    def render(speaker: str, text: str) -> str:
+        log.append("render")
+        return f"R:{text}"
+
+    def holds_many(pairs: Sequence[tuple[str, str]]) -> list[bool]:
+        log.append("holds")
+        hold_inputs.append(list(pairs))
+        return [False, False, False]
+
+    revert_metrics(sample, altered, render, holds_many)
+    assert log == ["render", "render", "render", "holds"]
+    assert hold_inputs == [[("R:altered-0", "line-000"), ("R:altered-1", "line-001"), ("R:altered-2", "line-002")]]
+
+
+def test_revert_metrics_of_nothing_raises_before_any_render() -> None:
+    renders: list[str] = []
+    with pytest.raises(Fail):
+        revert_metrics([], [], lambda speaker, text: renders.append(text) or text, lambda pairs: [])
+    assert renders == []
+
+
+def test_revert_metrics_rejects_an_altered_count_that_differs_from_the_sample() -> None:
+    with pytest.raises(Fail):
+        revert_metrics([make_train_pair(0)], [], lambda speaker, text: text, lambda pairs: [False])
+
+
+def test_revert_metrics_result_has_exactly_the_contract_keys_and_no_text() -> None:
+    sample = [make_train_pair(0)]
+    metrics = revert_metrics(sample, ["altered-secret-a"], lambda speaker, text: f"R:{text}", lambda pairs: [False])
+    assert set(metrics) == {"n", "kept_rate", "pass"}
     assert all(isinstance(value, int | float | bool) for value in metrics.values())
     assert "secret" not in repr(metrics)
