@@ -3,7 +3,7 @@
 The game's text lives in FFRS/Content/Localization/Game/<lang>/Game.locres
 inside the legacy .pak. The mod packs FFRS-Unstraightened_P.pak, plus a
 .utoc/.ucas pair the loader requires (copies of the game's empty global
-container). Three shapes, chosen by flag:
+container). Three pak shapes, chosen by flag:
 
 - default (target): two files. FFRS/Content/Localization/Unstraightened/en/
   Unstraightened.locres holds only the edited entries, each under its
@@ -17,6 +17,10 @@ container). Three shapes, chosen by flag:
   only the edited entries. The game was seen to ignore a second en/*.locres
   for an entry Game.locres already holds, so this shape does not change those
   entries.
+
+--ue4ss writes no pak. It writes build/UnstraightenedText/, a UE4SS mod folder:
+the repo's ue4ss/UnstraightenedText/Scripts/main.lua, an empty enabled.txt and
+edits.txt, which lists each edit for the mod to register as en polyglot text.
 """
 
 import argparse
@@ -41,6 +45,10 @@ USER_GAME_TEXT = (
     "+LocalizationPaths=%GAMEDIR%Content/Localization/Unstraightened\n"
     "+LocalizationPaths=%GAMEDIR%Content/Localization/Game\n"
 )
+
+UE4SS_NAME = "UnstraightenedText"
+UE4SS_SRC = Path("ue4ss") / UE4SS_NAME / "Scripts/main.lua"
+EDIT_ESCAPES = str.maketrans({"\\": "\\\\", "\t": "\\t", "\r": "\\r", "\n": "\\n"})
 
 PLACEHOLDER = re.compile(r"\{[^}]*\}")
 STYLE_OPEN = re.compile(r"<text\b[^>]*>")
@@ -141,6 +149,26 @@ def pack(files: dict[Path, bytes], out: Path, name: str) -> Path:
     return pak
 
 
+def edits_text(overrides: dict[tuple[str, str], str]) -> str:
+    """edits.txt for the UE4SS text mod: one namespace<TAB>key<TAB>text line per edit, sorted by namespace and key.
+
+    Backslash, tab, CR and LF are escaped in each field as \\\\, \\t, \\r and \\n.
+    """
+    return "".join(
+        f"{ns.translate(EDIT_ESCAPES)}\t{key.translate(EDIT_ESCAPES)}\t{text.translate(EDIT_ESCAPES)}\n"
+        for (ns, key), text in sorted(overrides.items())
+    )
+
+
+def write_ue4ss(out: Path, root: Path, overrides: dict[tuple[str, str], str]) -> None:
+    """Write the UE4SS text mod folder under out: the repo's main.lua, an empty enabled.txt and edits.txt."""
+    mod = out / UE4SS_NAME
+    (mod / "Scripts").mkdir(parents=True)
+    shutil.copyfile(root / UE4SS_SRC, mod / "Scripts/main.lua")
+    (mod / "enabled.txt").write_bytes(b"")
+    (mod / "edits.txt").write_bytes(edits_text(overrides).encode("utf-8"))
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     root = repo_root()
     stamp = vanilla_dir() / "BUILDID"
@@ -155,10 +183,15 @@ def cmd_build(args: argparse.Namespace) -> None:
     if errors:
         raise Fail("\n".join(errors))
 
-    files = pak_files(args.shape, en, overrides)
     out = root / "build"
     if out.exists():
         shutil.rmtree(out)
+    if args.shape == "ue4ss":
+        write_ue4ss(out, root, overrides)
+        print(f"{len(overrides)} lines overridden -> build/{UE4SS_NAME}/")
+        return
+
+    files = pak_files(args.shape, en, overrides)
     pak = pack(files, out, MOD_NAME)
 
     locres = next(path for path in files if path.suffix == ".locres")
@@ -181,7 +214,8 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
             "Pack the mod into build/. Shapes: the default (target) packs the edited entries as "
             "FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres plus FFRS/Config/UserGame.ini, "
             "which lists that folder ahead of Game; --full packs the whole English table as en/Game.locres; "
-            "--partial packs the edited entries as en/Unstraightened.locres in the Game folder."
+            "--partial packs the edited entries as en/Unstraightened.locres in the Game folder; "
+            "--ue4ss writes the UE4SS text mod folder build/UnstraightenedText instead of a pak."
         ),
     )
     shape = build.add_mutually_exclusive_group()
@@ -200,5 +234,13 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         const="partial",
         default="target",
         help="pack only the edited entries as en/Unstraightened.locres; the game was seen to ignore it for entries Game.locres holds",
+    )
+    shape.add_argument(
+        "--ue4ss",
+        dest="shape",
+        action="store_const",
+        const="ue4ss",
+        default="target",
+        help="write the UE4SS text mod folder build/UnstraightenedText with the edits in edits.txt, instead of a pak",
     )
     build.set_defaults(fn=cmd_build)

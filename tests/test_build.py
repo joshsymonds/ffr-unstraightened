@@ -1,13 +1,20 @@
+import shutil
 import subprocess
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from pylocres import Entry, LocresFile, Namespace
 
 from ffrd import cli
-from ffrd.build import PAK_SHAPES, pack, pak_files
+from ffrd.build import PAK_SHAPES, edits_text, pack, pak_files
 from ffrd.game import LOCRES, MOD_NAME, vanilla, vanilla_hash
+
+WORKSPACE = Path(__file__).resolve().parents[1]
+UE4SS_MOD = WORKSPACE / "ue4ss/UnstraightenedText/Scripts/main.lua"
+UE4SS_SRC = Path("ue4ss/UnstraightenedText/Scripts/main.lua")
+UE4SS_OUT = "build/UnstraightenedText"
 
 # Made-up lines. Not game text. They match SYNTHETIC_LINES in tests/conftest.py.
 TEN = "Synthetic line ten."
@@ -329,3 +336,188 @@ def test_build_with_a_game_build_mismatch_exits_1(
         cli.main(["build"])
     assert exit_info.value.code == 1
     assert capsys.readouterr().err == "ffrd: the game updated to build 424242; run `ffrd extract` and rebuild\n"
+
+
+def test_edits_text_escapes_and_sorts_synthetic_edits() -> None:
+    overrides = {
+        ("ST_Synth_002", "1"): "Second\ttabbed",
+        ("ST_Synth_001", "2"): "Line\nbreak, back\\slash and\rreturn.",
+        ("ST_Synth_001", "10"): "Plain.",
+    }
+    assert edits_text(overrides) == (
+        "ST_Synth_001\t10\tPlain.\nST_Synth_001\t2\tLine\\nbreak, back\\\\slash and\\rreturn.\nST_Synth_002\t1\tSecond\\ttabbed\n"
+    )
+
+
+def test_edits_text_is_empty_without_edits() -> None:
+    assert edits_text({}) == ""
+
+
+def test_ue4ss_build_writes_the_text_mod_folder_and_no_pak(
+    fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_edits(repo, "scenes/one.toml", edit("ST_C01_001_01", "10", TEN, "Edited ten."))
+    write_edits(repo, "scenes/deep/two.toml", edit("ST_C01_001_01", "2", TWO, "Edited two."))
+    mod_source = repo / UE4SS_SRC
+    mod_source.parent.mkdir(parents=True)
+    mod_source.write_bytes(b"-- synthetic mod\n")
+    cli.main(["build", "--ue4ss"])
+    build = repo / UE4SS_OUT
+    assert {p.relative_to(build).as_posix() for p in build.rglob("*") if p.is_file()} == {
+        "Scripts/main.lua",
+        "enabled.txt",
+        "edits.txt",
+    }
+    assert (build / "Scripts/main.lua").read_bytes() == b"-- synthetic mod\n"
+    assert (build / "enabled.txt").read_bytes() == b""
+    assert (build / "edits.txt").read_text(encoding="utf-8") == ("ST_C01_001_01\t10\tEdited ten.\nST_C01_001_01\t2\tEdited two.\n")
+    assert capsys.readouterr().out == f"2 lines overridden -> {UE4SS_OUT}/\n"
+
+
+@pytest.mark.parametrize("shape_flag", ["--full", "--partial"])
+def test_ue4ss_is_exclusive_with_the_other_shape_flags(shape_flag: str, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build", "--ue4ss", shape_flag])
+    assert exit_info.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+# Made-up (namespace, key, text) edits for the text mod. Not game text.
+MOD_OVERRIDES = {
+    ("ST_Synth_001", "1"): "Line one\twith a tab.",
+    ("ST_Synth_001", "2"): "Line two\nwith a newline, a back\\slash and a\rreturn.",
+    ("ST_Synth_002", "9"): "Plain line nine.",
+}
+
+
+@dataclass(frozen=True)
+class Registration:
+    tick: int
+    namespace: str
+    key: str
+    culture: str
+    category: str
+    minimal_patch: str
+    native: str
+    cached: str
+
+
+# Stubs the game globals the text mod reads. The stub records each PolyglotDataToText call as hex-encoded
+# fields so the text never reaches stdout, and it stops the loop after the mod returns true.
+TEXT_STUB_HEAD = """
+local tick = 0
+local out = assert(io.open(RECORD, "w"))
+local function hex(s) return (tostring(s):gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
+local function ready() return tick >= READY_AT end
+local KTL = {
+  IsValid = function() return ready() end,
+  PolyglotDataToText = function(_, args)
+    local cached = args.CachedText and args.CachedText.text or "<none>"
+    out:write(table.concat({
+      tostring(tick), hex(args.Namespace), hex(args.Key), hex(args.NativeCulture),
+      tostring(args.Category), tostring(args.bIsMinimalPatch), hex(args.NativeString), hex(cached),
+    }, " "), "\\n")
+  end,
+}
+local KIL = {
+  IsValid = function() return ready() end,
+  GetCurrentCulture = function() return { ToString = function() return CULTURE end } end,
+}
+function StaticFindObject(path)
+  if path == "/Script/Engine.Default__KismetTextLibrary" then return KTL end
+  if path == "/Script/Engine.Default__KismetInternationalizationLibrary" then return KIL end
+  error("unexpected object " .. path)
+end
+function FText(s) return { text = s } end
+function ExecuteInGameThread(f) f() end
+function LoopAsync(ms, f)
+  assert(ms == 1000, "text loop does not retry each second")
+  repeat
+    tick = tick + 1
+    assert(tick <= 1000, "text loop did not stop")
+  until f()
+end
+"""
+
+
+def unhex(s: str) -> str:
+    return bytes.fromhex(s).decode("utf-8")
+
+
+def run_text_mod(root: Path, edits: str, culture: str, ready_at: int = 1) -> tuple[list[Registration], int, str, dict[str, bytes]]:
+    """Run the shipped text mod under plain Lua with the game globals stubbed.
+
+    Returns the registrations, the tick the loop stopped on, the stdout, and the mod folder's files as they were after the run.
+    """
+    mod_dir = root / "UnstraightenedText"
+    scripts = mod_dir / "Scripts"
+    scripts.mkdir(parents=True)
+    copied = scripts / "main.lua"
+    shutil.copyfile(UE4SS_MOD, copied)
+    (mod_dir / "enabled.txt").write_bytes(b"")
+    (mod_dir / "edits.txt").write_bytes(edits.encode("utf-8"))
+    record = root / "record.txt"
+    prelude = f"RECORD = {lua_string(str(record))}\nCULTURE = {lua_string(culture)}\nREADY_AT = {ready_at}\n"
+    epilogue = f'dofile({lua_string(str(copied))})\nout:write("end " .. tick .. "\\n")\nout:close()\n'
+    stub = root / "stub.lua"
+    stub.write_text(prelude + TEXT_STUB_HEAD + epilogue, encoding="utf-8")
+    result = subprocess.run(["lua", str(stub)], capture_output=True, text=True, encoding="utf-8", timeout=60, check=True)
+    registrations: list[Registration] = []
+    final_tick = -1
+    for text_line in record.read_text(encoding="utf-8").splitlines():
+        parts = text_line.split(" ")
+        if parts[0] == "end":
+            final_tick = int(parts[1])
+            continue
+        registrations.append(
+            Registration(
+                tick=int(parts[0]),
+                namespace=unhex(parts[1]),
+                key=unhex(parts[2]),
+                culture=unhex(parts[3]),
+                category=parts[4],
+                minimal_patch=parts[5],
+                native=unhex(parts[6]),
+                cached=unhex(parts[7]),
+            )
+        )
+    files = {p.relative_to(mod_dir).as_posix(): p.read_bytes() for p in mod_dir.rglob("*") if p.is_file()}
+    return registrations, final_tick, result.stdout, files
+
+
+def lua_string(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+@pytest.mark.parametrize("culture", ["en", "en-US", "en-GB"])
+def test_text_mod_registers_each_edit_once_for_english_cultures(culture: str, tmp_path: Path) -> None:
+    edits = edits_text(MOD_OVERRIDES)
+    registrations, final_tick, _, _ = run_text_mod(tmp_path, edits, culture)
+    assert registrations == [
+        Registration(1, "ST_Synth_001", "1", "en", "0", "false", "Line one\twith a tab.", ""),
+        Registration(1, "ST_Synth_001", "2", "en", "0", "false", "Line two\nwith a newline, a back\\slash and a\rreturn.", ""),
+        Registration(1, "ST_Synth_002", "9", "en", "0", "false", "Plain line nine.", ""),
+    ]
+    assert final_tick == 2
+
+
+@pytest.mark.parametrize("culture", ["de", "ja", "eng"])
+def test_text_mod_registers_nothing_outside_english_cultures(culture: str, tmp_path: Path) -> None:
+    registrations, final_tick, _, _ = run_text_mod(tmp_path, edits_text(MOD_OVERRIDES), culture)
+    assert registrations == []
+    assert final_tick == 2
+
+
+def test_text_mod_retries_each_second_until_the_libraries_are_valid_then_registers_once(tmp_path: Path) -> None:
+    registrations, final_tick, _, _ = run_text_mod(tmp_path, edits_text(MOD_OVERRIDES), "en", ready_at=4)
+    assert [r.tick for r in registrations] == [4, 4, 4]
+    assert len(registrations) == len(MOD_OVERRIDES)
+    assert final_tick == 5
+
+
+def test_text_mod_writes_no_file_and_prints_no_text(tmp_path: Path) -> None:
+    edits = edits_text(MOD_OVERRIDES)
+    registrations, _, stdout, files = run_text_mod(tmp_path, edits, "en")
+    assert registrations
+    assert stdout == ""
+    assert files == {"Scripts/main.lua": UE4SS_MOD.read_bytes(), "enabled.txt": b"", "edits.txt": edits.encode("utf-8")}
