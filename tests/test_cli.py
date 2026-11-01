@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -8,8 +9,11 @@ import polib
 import pytest
 from pylocres import Entry, LocresFile, Namespace
 
-from ffrd import cli, extract, install, probe
+from ffrd import cli, extract, install, probe, scenes
 from ffrd.game import LOCRES, MOD_NAME, vanilla_hash
+from ffrd.scenes import SceneLine
+from ffrd.voice import cli as voice_cli
+from ffrd.voice import pairs
 
 EXTS = ("pak", "utoc", "ucas")
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -384,6 +388,7 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.pipeline.report",
         "ffrd.pipeline.diff",
         "ffrd.scenes",
+        "ffrd.voice.cli",
         "ffrd.probe",
     ]
     with pytest.raises(SystemExit) as exit_info:
@@ -441,3 +446,68 @@ def test_report_without_a_lens_file_exits_1_through_the_cli(repo: Path, capsys: 
     assert err.startswith("ffrd: ")
     assert "made-up-lens.toml" in err
     assert err.endswith("\n")
+
+
+def test_voice_is_registered_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert voice_cli in cli.COMMANDS
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "build the voice models' training data and evaluate them" in capsys.readouterr().out
+
+
+def test_voice_lists_pairs_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["voice", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "pairs" in out
+    assert "write four paraphrases per story line to work/voice/, or print split and call counts" in out
+
+
+def test_voice_without_a_subcommand_exits_2(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["voice"])
+    assert exit_info.value.code == 2
+    assert "required" in capsys.readouterr().err
+
+
+def test_voice_subcommands_are_pairs_only() -> None:
+    assert (pairs,) == voice_cli.SUBCOMMANDS
+
+
+def test_voice_pairs_check_through_the_cli_prints_counts_only(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Made-up scenes and text. Every line shares one text, so the one held-out scene's line is excluded.
+    lines = [
+        SceneLine(scene=f"made-up-scene-{i:02d}", order=0, namespace="ST_Made_Up", key=f"{i:02d}", speaker="SENTINEL-SPEAKER", voice=None)
+        for i in range(10)
+    ]
+    texts = {(line.namespace, line.key): "Made-up SENTINEL-TEXT line. Not game text." for line in lines}
+    root = tmp_path / "work"
+    root.mkdir()
+    calls = [
+        {"scene": "made-up-scene-00", "slot": 0, "model": "made-up", "account": 3, "outcome": "ok"},
+        {"scene": "made-up-scene-01", "slot": 0, "model": "made-up", "account": 3, "outcome": "ok"},
+        {"scene": "made-up-scene-02", "slot": 1, "model": "made-up", "account": 7, "outcome": "ok"},
+    ]
+    (root / pairs.CALLS).write_text("".join(json.dumps(row) + "\n" for row in calls), encoding="utf-8")
+    monkeypatch.setattr(scenes, "load", lambda: lines)
+    monkeypatch.setattr(pairs, "english", lambda: texts)
+    monkeypatch.setattr(pairs, "work_dir", lambda lens: root)
+    cli.main(["voice", "pairs", "--check"])
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "scenes 10",
+        "train scenes 9",
+        "heldout scenes 1",
+        "train lines 9",
+        "heldout lines 0",
+        "excluded lines 1",
+        "account 3 calls 2",
+        "account 7 calls 1",
+    ]
+    assert "SENTINEL" not in out
