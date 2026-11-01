@@ -20,6 +20,9 @@ Never read, grep, list or print anything in the gitignored `vanilla/` directory
 or in the game install. The only permitted way to see game text is
 `ffrd find`, which is progress-gated.
 
+`vanilla/scenes.json` is covered by this rule too. Read it only through the counts that
+`ffrd scenes --check` prints, or through code that reduces it to counts and keys.
+
 Probe-host logs are read only through `ffrd probe` and `ffrd usmap`, never directly.
 
 ## Tests

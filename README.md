@@ -37,8 +37,12 @@ flowchart LR
     install["ffrd install"]:::repo
     mods["Paks/~mods"]:::game
     leak["ffrd leak-check"]:::repo
+    scenes["ffrd scenes"]:::repo
+    mappings["vanilla/Mappings.usmap"]:::local
 
     paks --> extract --> vanilla
+    paks --> scenes --> vanilla
+    mappings --> scenes
     progress --> find
     vanilla --> find --> edits
     edits --> build
@@ -59,14 +63,15 @@ flowchart LR
 `ffrd extract` copies the game's text into `vanilla/`. `ffrd find` prints entries from
 `vanilla/` as TOML stubs for you to edit. `ffrd build` checks `dialog/` against
 `vanilla/` and writes the mod files to `build/`. `ffrd install` copies them into the
-game. `ffrd leak-check` checks the git history for game text.
+game. `ffrd leak-check` checks the git history for game text. `ffrd scenes` writes
+`vanilla/scenes.json`, which lists the story lines with their speakers and voice cues.
 
 ## Install
 
 You need Nix with devenv, and the game installed through Steam.
 
 Run `direnv allow` to load the devenv environment through `.envrc`, or run `devenv shell`.
-devenv provides repak with Epic's Oodle runtime, Python with pylocres, ruff,
+devenv provides repak with Epic's Oodle runtime, the .NET 10 SDK, Python with pylocres, ruff,
 basedpyright, just, mermaid-cli, and the `ffrd` script. `ffrd` always runs from the
 repository root.
 
@@ -85,6 +90,7 @@ Set the game's Text Language to English before you play.
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
 | `ffrd probe` | Checks which text shape the game honours, by running the game on the probe host. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
+| `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
 
 Edits go in any `dialog/**/*.toml` file. Each edit is one table, keyed by namespace
 and key, with `vanilla` (the hash of the current English line) and `text` (your
@@ -106,6 +112,25 @@ has `ST_C<n>_` at the start or a later `C<n>` underscore segment.
 
 To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck`.
 
+### Scene data
+
+`ffrd scenes` needs `ffrd extract`, for `vanilla/BUILDID` and the English text, and
+`ffrd usmap`, for `vanilla/Mappings.usmap`. Both must come from the same game build.
+The first run restores NuGet packages over the network. The command writes
+`vanilla/scenes.json` and prints counts only.
+
+Each line record in `vanilla/scenes.json` has a scene id (the line table's package
+path), the order within the scene, the namespace, the key, the speaker, and a voice
+cue `{sheet, index}` or `null`. The speaker is the event data's speaker id, or `null`
+when the line is unattributed. It is never guessed. Story lines are the keyed lines of
+the line tables that event data references, and that have English text. A cue is set
+only when exactly one cue name in the referencing event's cue sheet contains the line's
+key. `ffrd.scenes.load()` returns the records as `SceneLine` and `Voice` dataclasses.
+
+`ffrd scenes --check` prints story lines, scenes, attributed, unattributed, with cue,
+and the attributed percentage. It exits 1 when the table is missing, when its build
+differs from `vanilla/BUILDID`, or when less than 95% of lines are attributed.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
@@ -117,6 +142,7 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
 | `FFR_DECK_PAKS` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE/FFRS/Content/Paks` | The Steam Deck's game Paks folder for `--deck`. |
 | `FFR_PROBE_HOST` | `gnomon` | The `ssh` host for `ffrd probe` and `ffrd usmap`. |
 | `FFR_PROBE_GAME` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE` | The installed game on the probe host. |
+| `FFR_OODLE` | Set by devenv | The Oodle library the `ffrd scenes` extractor loads. |
 
 `ffrd probe` and `ffrd usmap` also use `FFR_DECK_HOST` for the Deck check.
 
