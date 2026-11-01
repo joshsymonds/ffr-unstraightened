@@ -103,6 +103,37 @@ SCHEMA: dict[str, Any] = {
 }
 
 
+SETUP_STAGE = "bible_setups"
+
+SETUP_INSTRUCTIONS = (
+    "Read this chapter's lines and the later bibles. Return JSON with one list, setups. "
+    "setups: lines of this chapter that lines in the later bibles rely on, each with the line, "
+    "the later lines that depend on it (at least one), and its meaning. "
+    "Refer to lines only by namespace and key."
+)
+
+SETUP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "setups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "line": REF,
+                    "depends": {"type": "array", "items": REF, "minItems": 1},
+                    "meaning": {"type": "string"},
+                },
+                "required": ["line", "depends", "meaning"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["setups"],
+    "additionalProperties": False,
+}
+
+
 @dataclass(frozen=True)
 class Line:
     namespace: str
@@ -135,6 +166,14 @@ def _label(number: int | None) -> str:
     return "unplaced" if number is None else f"chapter {number}"
 
 
+def _heading(number: int | None) -> str:
+    return "Unplaced lines:" if number is None else f"Chapter {number} lines:"
+
+
+def _line_json(lines: Sequence[Line]) -> str:
+    return json.dumps([asdict(line) for line in lines], sort_keys=True, ensure_ascii=False)
+
+
 def _check(
     output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]], speakers: Set[str]
 ) -> Rejected | None:
@@ -161,10 +200,8 @@ def chapter(
     speakers: Set[str],
     ask: Ask,
 ) -> dict[str, Any] | Unfinished | Rejected:
-    line_json = json.dumps([asdict(line) for line in lines], sort_keys=True, ensure_ascii=False)
     earlier_json = json.dumps(list(earlier), sort_keys=True, ensure_ascii=False)
-    heading = "Unplaced lines:" if number is None else f"Chapter {number} lines:"
-    parts = [INSTRUCTIONS, f"Earlier bibles:\n{earlier_json}", f"{heading}\n{line_json}"]
+    parts = [INSTRUCTIONS, f"Earlier bibles:\n{earlier_json}", f"{_heading(number)}\n{_line_json(lines)}"]
 
     def call() -> dict[str, Any]:
         output = ask(parts, SCHEMA)
@@ -182,6 +219,47 @@ def chapter(
         return refused.failure
 
 
+def _check_setups(output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]]) -> Rejected | None:
+    chapter_refs = {(line.namespace, line.key) for line in lines}
+    for setup in output["setups"]:
+        namespace, key = setup["line"]["namespace"], setup["line"]["key"]
+        if (namespace, key) not in chapter_refs:
+            return Rejected(f"{_label(number)} setup line {namespace}/{key} is no line of this chapter")
+        for ref in setup["depends"]:
+            if (ref["namespace"], ref["key"]) not in scope:
+                return Rejected(
+                    f"{_label(number)} setup depends ref {ref['namespace']}/{ref['key']} names no line passed to the story bible"
+                )
+    return None
+
+
+def setups(
+    store: Store,
+    number: int | None,
+    lines: Sequence[Line],
+    later: Sequence[Mapping[str, Any]],
+    scope: Set[tuple[str, str]],
+    ask: Ask,
+) -> list[dict[str, Any]] | Unfinished | Rejected:
+    later_json = json.dumps(list(later), sort_keys=True, ensure_ascii=False)
+    parts = [SETUP_INSTRUCTIONS, f"Later bibles:\n{later_json}", f"{_heading(number)}\n{_line_json(lines)}"]
+
+    def call() -> list[dict[str, Any]]:
+        output = ask(parts, SETUP_SCHEMA)
+        if isinstance(output, Unfinished | Rejected):
+            raise _Refused(output)
+        problem = _check_setups(output, number, lines, scope)
+        if problem is not None:
+            raise _Refused(problem)
+        return output["setups"]
+
+    inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
+    try:
+        return store.run(SETUP_STAGE, inputs, None, call).value
+    except _Refused as refused:
+        return refused.failure
+
+
 def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], ask: Ask) -> list[dict[str, Any]] | Unfinished | Rejected:
     scope = {(line.namespace, line.key) for _, lines in chapters for line in lines}
     speakers = {line.speaker for _, lines in chapters for line in lines if line.speaker}
@@ -191,7 +269,14 @@ def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], a
         if not isinstance(result, dict):
             return result
         bibles.append(result)
-    return bibles
+    found: list[list[dict[str, Any]]] = [[] for _ in bibles]
+    for index in reversed(range(len(bibles))):
+        number, lines = chapters[index]
+        result = setups(store, number, lines, bibles[index + 1 :], scope, ask)
+        if not isinstance(result, list):
+            return result
+        found[index] = result
+    return [{**bible, "callbacks": [*bible["callbacks"], *found[index]]} for index, bible in enumerate(bibles)]
 
 
 def touching(bibles: Sequence[Mapping[str, Any]], namespace: str, key: str) -> list[dict[str, Any]]:

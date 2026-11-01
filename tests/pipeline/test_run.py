@@ -424,6 +424,8 @@ class FakeClaude:
                 return self.unplaced.pop(0) if self.unplaced else EMPTY_BIBLE
             number = int(_part(parts, "Chapter ").split()[0])
             return self.bible.get(number, EMPTY_BIBLE)
+        if schema is bible.SETUP_SCHEMA:
+            return {"setups": []}
         if schema is SCREEN_SCHEMA:
             return self._screen(parts)
         if schema is INTENT_SCHEMA:
@@ -579,6 +581,15 @@ def test_one_batch_for_the_bible_and_one_per_scene(tmp_path: Path) -> None:
     claude = _claude()
     _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
     assert claude.batches == 1 + len(SCENES)
+
+
+def test_one_setup_call_per_bible_chapter(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    forward = [parts[-1].split("\n", 1)[0] for _, parts, schema in claude.calls if schema is bible.SCHEMA]
+    setup = [parts[-1].split("\n", 1)[0] for _, parts, schema in claude.calls if schema is bible.SETUP_SCHEMA]
+    assert forward
+    assert sorted(setup) == sorted(forward)
 
 
 def test_no_triage_never_calls_jev_and_screens_every_scene(tmp_path: Path) -> None:

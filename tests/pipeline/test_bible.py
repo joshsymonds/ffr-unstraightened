@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from ffrd.pipeline.bible import SCHEMA, Line, build, chapter, touching
+from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, Line, build, chapter, setups, touching
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.store import Store
 
@@ -62,6 +62,31 @@ BIBLE_TWO = {
         }
     ],
 }
+
+
+# Made-up setups of chapters one and two, each reaching a line of the other chapter. Not game text.
+SETUP_ONE = {
+    "setups": [
+        {
+            "line": {"namespace": "ST_C01_001_01", "key": "1"},
+            "depends": [{"namespace": "ST_C02_001_01", "key": "1"}],
+            "meaning": "Made-up setup meaning one. Not game text.",
+        }
+    ]
+}
+
+SETUP_TWO = {
+    "setups": [
+        {
+            "line": {"namespace": "ST_C02_001_01", "key": "1"},
+            "depends": [{"namespace": "ST_C01_001_01", "key": "2"}],
+            "meaning": "Made-up setup meaning two. Not game text.",
+        }
+    ]
+}
+
+NO_SETUPS = {"setups": []}
+SCOPE_ALL = C1_SCOPE | {(line.namespace, line.key) for line in C2_LINES}
 
 
 class FakeAsk:
@@ -148,28 +173,28 @@ def test_build_passes_earlier_bible_and_rerun_asks_only_the_failed_chapter(tmp_p
     assert len(first.calls) == 2
     assert "Made-up callback meaning one. Not game text." in _prompt(first, 1)
 
-    rerun = FakeAsk(BIBLE_TWO)
+    rerun = FakeAsk(BIBLE_TWO, NO_SETUPS, NO_SETUPS)
     built = build(Store(tmp_path), chapters, rerun)
 
     assert built == [{**BIBLE_ONE, "chapter": 1}, {**BIBLE_TWO, "chapter": 2}]
-    assert len(rerun.calls) == 1
+    assert [schema for _, schema in rerun.calls] == [SCHEMA, SETUP_SCHEMA, SETUP_SCHEMA]
     assert "Made-up chapter two line. Not game text." in _prompt(rerun, 0)
 
 
 def test_build_stores_an_arc_that_continues_from_an_earlier_chapter(tmp_path: Path) -> None:
     store = Store(tmp_path)
 
-    built = build(store, [(1, C1_LINES), (2, C2_LINES)], FakeAsk(BIBLE_ONE, BIBLE_TWO))
+    built = build(store, [(1, C1_LINES), (2, C2_LINES)], FakeAsk(BIBLE_ONE, BIBLE_TWO, NO_SETUPS, NO_SETUPS))
 
     assert built == [{**BIBLE_ONE, "chapter": 1}, {**BIBLE_TWO, "chapter": 2}]
-    assert len(store.finished()) == 2
+    assert len(store.finished()) == 4
 
 
 def test_build_accepts_arc_character_who_speaks_in_a_later_passed_chapter(tmp_path: Path) -> None:
     answer = {**BIBLE_ONE, "arcs": [{**MADE_UP_ARC, "characters": ["Cass"], "beats": []}]}
     late = {"characters": [], "facts": [], "callbacks": [], "arcs": []}
 
-    built = build(Store(tmp_path), [(1, C1_LINES), (2, LATE_SPEAKER_LINES)], FakeAsk(answer, late))
+    built = build(Store(tmp_path), [(1, C1_LINES), (2, LATE_SPEAKER_LINES)], FakeAsk(answer, late, NO_SETUPS, NO_SETUPS))
 
     assert built == [{**answer, "chapter": 1}, {**late, "chapter": 2}]
 
@@ -285,19 +310,19 @@ BIBLE_LATER_REF = {
 
 
 def test_build_sends_unplaced_lines_last_as_chapter_none_reading_earlier_bibles(tmp_path: Path) -> None:
-    ask = FakeAsk(BIBLE_ONE, BIBLE_UNPLACED)
+    ask = FakeAsk(BIBLE_ONE, BIBLE_UNPLACED, NO_SETUPS, NO_SETUPS)
 
     built = build(Store(tmp_path), [(1, C1_LINES), (None, UNPLACED_LINES)], ask)
 
     assert built == [{**BIBLE_ONE, "chapter": 1}, {**BIBLE_UNPLACED, "chapter": None}]
-    assert len(ask.calls) == 2
+    assert len(ask.calls) == 4
     assert "Unplaced lines:\n" in _prompt(ask, 1)
     assert "Made-up unplaced line. Not game text." in _prompt(ask, 1)
     assert "Made-up callback meaning one. Not game text." in _prompt(ask, 1)
 
 
 def test_build_accepts_ref_to_a_line_of_a_later_passed_chapter(tmp_path: Path) -> None:
-    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], FakeAsk(BIBLE_LATER_REF, BIBLE_TWO))
+    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], FakeAsk(BIBLE_LATER_REF, BIBLE_TWO, NO_SETUPS, NO_SETUPS))
 
     assert built == [{**BIBLE_LATER_REF, "chapter": 1}, {**BIBLE_TWO, "chapter": 2}]
 
@@ -313,3 +338,105 @@ def test_build_rejects_ref_to_no_passed_line_and_stores_nothing(tmp_path: Path) 
 
     assert isinstance(failed, Rejected)
     assert store.finished() == []
+
+
+def test_setup_schema_requires_line_depends_and_meaning_with_no_extra_properties() -> None:
+    assert SETUP_SCHEMA["additionalProperties"] is False
+    assert SETUP_SCHEMA["required"] == ["setups"]
+    setup = SETUP_SCHEMA["properties"]["setups"]["items"]
+
+    assert set(setup["required"]) == {"line", "depends", "meaning"}
+    assert setup["additionalProperties"] is False
+    assert setup["properties"]["depends"]["minItems"] == 1
+    assert setup["properties"]["meaning"] == {"type": "string"}
+
+
+def test_build_runs_setups_backward_and_each_reads_only_later_forward_bibles(tmp_path: Path) -> None:
+    ask = FakeAsk(BIBLE_ONE, BIBLE_TWO, SETUP_TWO, SETUP_ONE)
+
+    build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], ask)
+
+    assert [schema for _, schema in ask.calls] == [SCHEMA, SCHEMA, SETUP_SCHEMA, SETUP_SCHEMA]
+    assert "Chapter 2 lines:\n" in _prompt(ask, 2)
+    assert "Later bibles:\n[]" in _prompt(ask, 2)
+    assert "Chapter 1 lines:\n" in _prompt(ask, 3)
+    assert "Later bibles:\n" in _prompt(ask, 3)
+    assert "Made-up callback meaning two. Not game text." in _prompt(ask, 3)
+    assert "Made-up setup meaning two. Not game text." not in _prompt(ask, 3)
+
+
+def test_build_appends_setups_after_forward_callbacks_and_touching_finds_them(tmp_path: Path) -> None:
+    built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], FakeAsk(BIBLE_ONE, BIBLE_TWO, SETUP_TWO, SETUP_ONE))
+
+    assert isinstance(built, list)
+    assert built == [
+        {**BIBLE_ONE, "chapter": 1, "callbacks": [*BIBLE_ONE["callbacks"], *SETUP_ONE["setups"]]},
+        {**BIBLE_TWO, "chapter": 2, "callbacks": [*BIBLE_TWO["callbacks"], *SETUP_TWO["setups"]]},
+    ]
+    assert touching(built, "ST_C01_001_01", "1") == [{**SETUP_ONE["setups"][0], "chapter": 1}]
+    assert {**SETUP_ONE["setups"][0], "chapter": 1} in touching(built, "ST_C02_001_01", "1")
+
+
+def test_setups_asks_with_setup_schema_and_later_bibles_and_returns_them(tmp_path: Path) -> None:
+    ask = FakeAsk(SETUP_ONE)
+
+    result = setups(Store(tmp_path), 1, C1_LINES, [{**BIBLE_TWO, "chapter": 2}], SCOPE_ALL, ask)
+
+    assert result == SETUP_ONE["setups"]
+    assert ask.calls[0][1] == SETUP_SCHEMA
+    assert "Made-up first line. Not game text." in _prompt(ask, 0)
+    assert "Made-up callback meaning two. Not game text." in _prompt(ask, 0)
+
+
+def test_fresh_store_on_same_root_returns_stored_setups_without_asking(tmp_path: Path) -> None:
+    later = [{**BIBLE_TWO, "chapter": 2}]
+    setups(Store(tmp_path), 1, C1_LINES, later, SCOPE_ALL, FakeAsk(SETUP_ONE))
+    ask = FakeAsk()
+
+    result = setups(Store(tmp_path), 1, C1_LINES, later, SCOPE_ALL, ask)
+
+    assert result == SETUP_ONE["setups"]
+    assert ask.calls == []
+
+
+OUTSIDE_LINE = {
+    "setups": [
+        {
+            "line": {"namespace": "ST_C02_001_01", "key": "1"},
+            "depends": [{"namespace": "ST_C01_001_01", "key": "2"}],
+            "meaning": "Made-up setup outside its chapter. Not game text.",
+        }
+    ]
+}
+
+UNKNOWN_DEPENDENT = {
+    "setups": [
+        {
+            "line": {"namespace": "ST_C01_001_01", "key": "1"},
+            "depends": [{"namespace": "ST_C09_001_01", "key": "1"}],
+            "meaning": "Made-up setup with an unknown dependent. Not game text.",
+        }
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    ("answer", "failure"),
+    [
+        (Unfinished("Made-up unfinished detail. Not game text."), Unfinished),
+        (Rejected("Made-up rejected detail. Not game text."), Rejected),
+        (OUTSIDE_LINE, Rejected),
+        (UNKNOWN_DEPENDENT, Rejected),
+    ],
+    ids=["unfinished", "rejected", "line-outside-chapter", "unknown-dependent"],
+)
+def test_failed_setups_are_returned_store_nothing_and_stay_unfinished(
+    tmp_path: Path, answer: Any, failure: type[Unfinished] | type[Rejected]
+) -> None:
+    store = Store(tmp_path)
+
+    result = setups(store, 1, C1_LINES, [{**BIBLE_TWO, "chapter": 2}], SCOPE_ALL, FakeAsk(answer))
+
+    assert isinstance(result, failure)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
