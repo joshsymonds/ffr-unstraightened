@@ -38,6 +38,36 @@ def fake_vanilla(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+# Made-up (namespace, key, English) lines for the progress gate. Not game text.
+# Chapters: C01=1, C02=2, C03=3; SubEv lines carry a C<n> segment; Misc and Scene carry no chapter.
+GATE_LINES: tuple[tuple[str, str, str], ...] = (
+    ("ST_C01_001_01", "1", "Made-up gate line chapter one. Not game text."),
+    ("ST_C02_001_01", "1", "Made-up gate line chapter two. Not game text."),
+    ("ST_C02_001_02", "1", ""),
+    ("ST_SubEv_004_C2_01", "1", "Made-up gate sub-event line chapter two. Not game text."),
+    ("ST_C03_001_01", "1", "Made-up later sentinel chapter three. Not game text."),
+    ("ST_SubEv_004_C3_01", "1", "Made-up later sentinel sub-event chapter three. Not game text."),
+    ("ST_Misc_001", "1", "Made-up gate line without a chapter. Not game text."),
+    ("ST_Scene_C1x_001", "1", "Made-up gate line with a non-chapter segment. Not game text."),
+)
+
+
+@pytest.fixture
+def gate_vanilla(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "gate-vanilla"
+    namespaces: dict[str, Namespace] = {}
+    for ns_name, key, english in GATE_LINES:
+        namespaces.setdefault(ns_name, Namespace(ns_name)).add(Entry(key, english, english, is_hash=False))
+    locres = LocresFile()
+    for ns in namespaces.values():
+        locres.add(ns)
+    path = root / "pak" / LOCRES / "en" / "Game.locres"
+    path.parent.mkdir(parents=True)
+    locres.write(str(path))
+    monkeypatch.setenv("FFR_VANILLA", str(root))
+    return root
+
+
 @pytest.fixture
 def fake_game(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     steamapps = tmp_path / "steamapps"

@@ -32,6 +32,14 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+@pytest.fixture
+def recorded_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "progress"
+    path.write_text("3\n")
+    monkeypatch.setenv("FFR_PROGRESS", str(path))
+    return path
+
+
 def mods_dir(game: Path) -> Path:
     return game / "FFRS/Content/Paks/~mods"
 
@@ -129,51 +137,57 @@ STUB_TEN = '["ST_C01_001_01".10]\nvanilla = "49c8ad88d95de4f8"\ntext = "Syntheti
 STUB_SAME = '["ST_C03_002_01".1]\nvanilla = "6ff2fc2682a12379"\ntext = "Same in both."\n\n'
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_without_arguments_prints_every_non_empty_english_stub_in_scene_order(
     fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cli.main(["find"])
     captured = capsys.readouterr()
     assert captured.out == STUB_TWO + STUB_TEN + STUB_SAME
-    assert captured.err == "# 3 entries\n"
+    assert captured.err == "# 3 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_pattern_matches_text_case_insensitively(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "SYNTHETIC LINE TWO"])
     captured = capsys.readouterr()
     assert captured.out == STUB_TWO
-    assert captured.err == "# 1 entries\n"
+    assert captured.err == "# 1 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_pattern_matches_key(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "^10$"])
     captured = capsys.readouterr()
     assert captured.out == STUB_TEN
-    assert captured.err == "# 1 entries\n"
+    assert captured.err == "# 1 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_ns_option_filters_namespaces_by_regex(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "--ns", "^ST_C03_"])
     captured = capsys.readouterr()
     assert captured.out == STUB_SAME
-    assert captured.err == "# 1 entries\n"
+    assert captured.err == "# 1 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_does_not_read_japanese_text(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (fake_vanilla / "pak" / LOCRES / "ja" / "Game.locres").unlink()
     cli.main(["find", "--ns", "^ST_C03_"])
     captured = capsys.readouterr()
     assert captured.out == STUB_SAME
-    assert captured.err == "# 1 entries\n"
+    assert captured.err == "# 1 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_stubs_parse_back_to_the_exact_english_text_and_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     lines = (
-        ('ST_"T"\\01', 'key "quoted" 1', 'Quote " and backslash \\ here.'),
-        ('ST_"T"\\01', "plain_key-9", "line one\nline two\rthree\tfour"),
-        ("ST_T02_001", "del\x7fchar", "del\x7f, ctrl\x01 and é 日本語 ✓"),
+        ('ST_C01_"T"\\01', 'key "quoted" 1', 'Quote " and backslash \\ here.'),
+        ('ST_C01_"T"\\01', "plain_key-9", "line one\nline two\rthree\tfour"),
+        ("ST_C02_001", "del\x7fchar", "del\x7f, ctrl\x01 and é 日本語 ✓"),
     )
     root = tmp_path / "vanilla"
     path = root / "pak" / LOCRES / "en" / "Game.locres"
@@ -186,16 +200,18 @@ def test_find_stubs_parse_back_to_the_exact_english_text_and_hash(
     for ns, key, text in lines:
         expected.setdefault(ns, {})[key] = {"vanilla": vanilla_hash(text), "text": text}
     assert tomllib.loads(captured.out) == expected
-    assert captured.err == "# 3 entries\n"
+    assert captured.err == "# 3 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_skips_empty_english_lines(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["find", "--ns", "^ST_C01_001_02$"])
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "# 0 entries\n"
+    assert captured.err == "# 0 shown, 0 withheld\n"
 
 
+@pytest.mark.usefixtures("recorded_progress")
 def test_find_without_vanilla_text_exits_1(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
