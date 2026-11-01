@@ -419,7 +419,7 @@ class FakeClaude:
     def __init__(self) -> None:
         self.batches = 0
         self.calls: list[tuple[str, list[str], Mapping[str, Any]]] = []
-        self.bible: dict[int, dict[str, Any] | Unfinished] = {1: CHAPTER_ONE_BIBLE}
+        self.bible: dict[int, dict[str, Any] | Unfinished | Rejected] = {1: CHAPTER_ONE_BIBLE}
         self.unplaced: dict[str, dict[str, Any]] = {}
         self.screen_failure: Unfinished | None = None
         # Screens of the scene holding the line get this transport failure, or raise, and nothing else changes. Not game text.
@@ -784,13 +784,17 @@ def test_a_kept_line_is_untouched_with_its_reasons_and_never_drafted_or_judged(t
     assert (NS_A, "1") not in judged
 
 
-def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up bible failure. Not game text."), Rejected("Made-up bible rejection. Not game text.")],
+)
+def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path, failure: Unfinished | Rejected) -> None:
     claude = _claude()
-    claude.bible[1] = Unfinished("Made-up bible failure. Not game text.")
+    claude.bible[1] = failure
     printed: list[str] = []
     with pytest.raises(Fail, match="story bible unfinished; rerun ffrd run"):
         _run(tmp_path, claude, printed, jev=FakeJev(JEV_HIGH))
-    assert printed == ["bible: unfinished"]
+    assert printed == [f"bible: unfinished ({failure.detail})"]
     assert all(schema is bible.SCHEMA for _, _, schema in claude.calls)
     assert claude.batches == 1
     assert not (tmp_path / "work" / LENS / report.OUTCOMES).exists()

@@ -570,7 +570,7 @@ def run(
     bible_ask = batch()
     built = bible.build(store, _chapters(scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema))
     if not isinstance(built, list):
-        out("bible: unfinished")
+        out(f"bible: unfinished ({built.detail})")
         raise Fail("story bible unfinished; rerun ffrd run")
     ctx = _Context(
         lens=lens,
