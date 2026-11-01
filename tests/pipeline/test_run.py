@@ -836,9 +836,13 @@ def test_writer_retry_names_only_its_line_and_the_gate_it_failed(tmp_path: Path)
         for _, parts, schema in claude.calls
         if schema is DRAFT_SCHEMA and any(part.startswith("The previous candidates failed") for part in parts)
     ]
-    assert [_draft_refs(parts) for parts in retries] == [[(NS_A, "2")], [(NS_A, "3")]]
-    assert any(part == "The previous candidates failed the minimal_change gate. Write candidates that pass it." for part in retries[0])
-    assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in retries[1])
+    # The scene's lines are gated concurrently, so the retries are told apart by their line, not by call order.
+    assert sorted(_draft_refs(parts) for parts in retries) == [[(NS_A, "2")], [(NS_A, "3")]]
+    by_line = {_draft_refs(parts)[0]: parts for parts in retries}
+    assert any(
+        part == "The previous candidates failed the minimal_change gate. Write candidates that pass it." for part in by_line[(NS_A, "2")]
+    )
+    assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in by_line[(NS_A, "3")])
     for parts in retries:
         scene_refs = {(line["namespace"], line["key"]) for line in json.loads(_part(parts, "Scene lines:\n"))}
         assert {(NS_A, "1"), (NS_A, "2"), (NS_A, "3"), (NS_A, "4")} <= scene_refs
@@ -1526,6 +1530,15 @@ SLOW = 0.1
 
 
 @pytest.fixture(autouse=True)
+def no_live_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A test that reaches the real claude.ask without installing its own fake call fails here instead of running cswap.
+    def refuse(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("a test reached the live Claude call")
+
+    monkeypatch.setattr(claude_module, "call", refuse)
+
+
+@pytest.fixture(autouse=True)
 def restore_concurrency() -> Iterator[None]:
     # cmd_run sets the process-wide Claude limit, so every test in this file puts the default back.
     yield
@@ -1580,6 +1593,50 @@ def _delay_by_prompt(text: str, *, named: bool) -> Callable[[Sequence[str]], flo
 
 def _through_claude_limit() -> Ask:
     return stages.Batch(choose=lambda: 1, ask=claude_module.ask).ask
+
+
+# A call that waits this long at a barrier for its partners fails, so a call that runs alone never hangs the suite. Not game text.
+MEET_TIMEOUT = 5
+
+
+class MeetingCalls:
+    """Stands in for claude.call. Calls with the given schema wait at the barrier before they answer from FakeClaude. Not game text."""
+
+    def __init__(self, claude: FakeClaude, schema: Mapping[str, Any], meet: threading.Barrier) -> None:
+        self.claude = claude
+        self.schema = schema
+        self.meet = meet
+
+    def __call__(
+        self, _account: int, model: str, parts: Sequence[str], schema: Mapping[str, Any]
+    ) -> dict[str, Any] | Unfinished | Rejected:
+        if schema is self.schema:
+            self.meet.wait()
+        return self.claude.ask(model, parts, schema)
+
+
+class MeetingJev(FakeJev):
+    """Stands in for the Jev triage call, which waits at the barrier before it answers. Not game text."""
+
+    def __init__(self, answer: dict[str, float] | Unfinished, meet: threading.Barrier) -> None:
+        super().__init__(answer)
+        self.meet = meet
+
+    def __call__(self, scene: str, questions: Sequence[TriageQuestion]) -> dict[str, float] | Unfinished:
+        self.meet.wait()
+        return super().__call__(scene, questions)
+
+
+class MeetingRenderer(FakeRenderer):
+    """Stands in for the voice render, which waits at the barrier before it answers. Not game text."""
+
+    def __init__(self, voiced: Mapping[str, str], meet: threading.Barrier) -> None:
+        super().__init__(voiced)
+        self.meet = meet
+
+    def render(self, speaker: str | None, text: str) -> str:
+        self.meet.wait()
+        return super().render(speaker, text)
 
 
 def _three_arc_claude() -> FakeClaude:
@@ -1672,6 +1729,86 @@ def test_a_transport_failed_scene_stays_unfinished_while_the_others_change(tmp_p
         EXPECTED_OUTCOMES[6],
     ]
     assert _dialog_files(tmp_path / "repo" / "dialog" / LENS) == ["chapter-01.toml", "unattributed.toml"]
+
+
+OPUS_A4 = "Made-up opus rewrite four. Not game text."
+VOICE_A2 = "Made-up voiced rewrite two. Not game text."
+
+
+def test_screen_and_jev_triage_of_a_scene_are_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, SCREEN_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=MeetingJev(JEV_HIGH, meet), scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert outcomes == EXPECTED_OUTCOMES[:4]
+
+
+def test_two_rescreens_of_a_scene_are_in_flight_together_and_join_in_lens_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    claude.flags = {}
+    claude.rescreen_flags = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [BETA]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, RESCREEN_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert _outcome_of(outcomes, (NS_A, "1")).reasons == (ALPHA,)
+    assert _outcome_of(outcomes, (NS_A, "2")).reasons == (BETA,)
+    assert _recall(tmp_path) == {ALPHA: {"disagreements": 1, "confirmed": 1}, BETA: {"disagreements": 1, "confirmed": 1}}
+
+
+def test_the_intents_of_a_scenes_flagged_lines_are_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    meet = threading.Barrier(3, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, INTENT_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert outcomes == EXPECTED_OUTCOMES[:4]
+
+
+def test_the_judges_of_a_scenes_two_flagged_lines_are_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "2"): [BETA], (NS_A, "4"): [BETA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2], (NS_A, "4"): [OPUS_A4]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, JUDGE_SCHEMA, meet))
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=(SCENE_A,), batch=_through_claude_limit)
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "4")).outcome == "changed"
+
+
+def test_the_two_candidates_of_one_gating_round_are_judged_in_flight_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "2"): [BETA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    monkeypatch.setattr(claude_module, "call", MeetingCalls(claude, JUDGE_SCHEMA, meet))
+    outcomes = _run(
+        tmp_path, claude, [], jev=None, renderer=FakeRenderer({OPUS_A2: VOICE_A2}), scenes=(SCENE_A,), batch=_through_claude_limit
+    )
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+
+
+def test_the_drafts_of_one_line_are_rendered_in_flight_together(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "2"): [BETA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2, OPUS_A3]}
+    meet = threading.Barrier(2, timeout=MEET_TIMEOUT)
+    claude_module.set_concurrency(8)
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=MeetingRenderer({}, meet), scenes=(SCENE_A,))
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+
+
+def test_each_candidate_text_is_classified_and_judged_once_per_line_even_when_a_retry_repeats_it(tmp_path: Path) -> None:
+    claude = _claude()
+    classifier = FakeClassifier()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), classifier=classifier)
+    judged = _judged(claude, JUDGE_SCHEMA)
+    assert judged.count(((NS_A, "2"), OPUS_A2)) == 1
+    assert len(judged) == len(set(judged))
+    assert len(classifier.scored) == len(set(classifier.scored))
 
 
 def test_concurrency_option_defaults_to_eight() -> None:
