@@ -1,10 +1,12 @@
 """probe and usmap: run the game on the gnomon host under UE4SS.
 
 `ffrd probe` checks which text shape FFR honours. It refuses while FFR runs on the Steam Deck or on the gnomon host,
-and when the gnomon build is not the vanilla build. For each shape it packs one edited line of PROBE_KEY, with .utoc
+and when the gnomon build is not the vanilla build. For each pak shape it packs one edited line of PROBE_KEY, with .utoc
 and .ucas copied from the host's global container, installs it in the host's Paks/~mods and runs the probe mod. The
 target shape (the default build shape) is tried first and the full shape only when the target one is not honoured.
-`--shape` runs one shape alone: target, full or partial. It prints only keys and hashes, never the probe text.
+`--shape` runs one shape alone: target, full, partial or ue4ss. The ue4ss shape installs no pak: it runs the probe mod
+with the repo's UE4SS text mod beside it, whose edits.txt holds the one probe edit. It prints only keys and hashes,
+never the probe text.
 
 `ffrd usmap` dumps the game's mappings with the usmap mod and saves them as Mappings.usmap in the vanilla folder.
 """
@@ -19,7 +21,7 @@ from pathlib import Path
 from pylocres import LocresFile
 
 from ffrd import deck, gnomon
-from ffrd.build import PAK_SHAPES, pack, pak_files
+from ffrd.build import PAK_SHAPES, UE4SS_NAME, edits_text, pack, pak_files
 from ffrd.game import Fail, repo_root, vanilla, vanilla_dir, vanilla_hash
 
 PROBE_KEY = ("ST_UI_TitleMenu", "UI_Title_Copyright")
@@ -27,6 +29,9 @@ PROBE_MOD = "FFRS-UnstraightenedProbe_P"
 MOD_DIR = "ue4ss/UnstraightenedProbe"
 LOG = "probe.log"
 SHAPES = ("target", "full")
+UE4SS_SHAPE = "ue4ss"
+SHAPE_CHOICES = (*PAK_SHAPES, UE4SS_SHAPE)
+TEXT_MOD_DIR = f"ue4ss/{UE4SS_NAME}"
 USMAP_MOD = "ue4ss/UnstraightenedUsmap"
 USMAP_LOG = "usmap.log"
 USMAP_NAME = "Mappings.usmap"
@@ -65,14 +70,23 @@ def _pack(shape: str, en: LocresFile, text: str, out: Path, fetched: dict[str, b
     return files
 
 
+def _run_probe(companion: tuple[Path, dict[str, bytes]] | None) -> list[str]:
+    return gnomon.run_mod(repo_root() / MOD_DIR, {"keys.txt": f"{PROBE_KEY[0]},{PROBE_KEY[1]}\n".encode()}, LOG, companion)
+
+
 def _launch(files: list[Path]) -> list[str]:
     host = gnomon.host()
     dest = f"{gnomon.paks()}/~mods"
     try:
         deck.put(host, dest, files)
-        return gnomon.run_mod(repo_root() / MOD_DIR, {"keys.txt": f"{PROBE_KEY[0]},{PROBE_KEY[1]}\n".encode()}, LOG)
+        return _run_probe(None)
     finally:
         deck.delete(host, dest, [f.name for f in files])
+
+
+def _launch_ue4ss(text: str) -> list[str]:
+    edits = edits_text({PROBE_KEY: text}).encode("utf-8")
+    return _run_probe((repo_root() / TEXT_MOD_DIR, {"edits.txt": edits}))
 
 
 def _verdict(shape: str, lines: list[str], marker: str, vanilla_digest: str) -> bool:
@@ -97,9 +111,12 @@ def _run_shape(shape: str, fetched: dict[str, bytes]) -> bool:
     if entry is None:
         raise Fail(f"the probe key {ns},{key} is not in the vanilla text")
     vanilla_digest = vanilla_hash(entry.translation)
-    with tempfile.TemporaryDirectory() as tmp:
-        files = _pack(shape, en, text, Path(tmp), fetched)
-        lines = _launch(files)
+    if shape == UE4SS_SHAPE:
+        lines = _launch_ue4ss(text)
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            files = _pack(shape, en, text, Path(tmp), fetched)
+            lines = _launch(files)
     return _verdict(shape, lines, vanilla_hash(text), vanilla_digest)
 
 
@@ -108,8 +125,10 @@ def cmd_probe(args: argparse.Namespace) -> None:
     if gnomon.running():
         raise Fail(f"FINAL FANTASY RESONANCE is running on {gnomon.host()}; refusing to probe")
     _check_build()
-    fetched = {ext: gnomon.fetch(f"{gnomon.paks()}/global.{ext}") for ext in ("utoc", "ucas")}
     shapes = (args.shape,) if args.shape else SHAPES
+    fetched: dict[str, bytes] = {}
+    if any(shape != UE4SS_SHAPE for shape in shapes):
+        fetched = {ext: gnomon.fetch(f"{gnomon.paks()}/global.{ext}") for ext in ("utoc", "ucas")}
     for shape in shapes:
         if _run_shape(shape, fetched):
             print(f"shape honoured: {shape}")
@@ -149,8 +168,8 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     probe = subparsers.add_parser("probe", help="run the UE4SS probe on the gnomon host to see which text shape FFR honours")
     probe.add_argument(
         "--shape",
-        choices=PAK_SHAPES,
-        help="probe only this shape: target, full or partial (default: target, then full, stopping at the first honoured)",
+        choices=SHAPE_CHOICES,
+        help="probe only this shape: target, full, partial or ue4ss (default: target, then full, stopping at the first honoured)",
     )
     probe.set_defaults(fn=cmd_probe)
     usmap = subparsers.add_parser("usmap", help="dump the game's usmap on the gnomon host and save it as Mappings.usmap in vanilla")

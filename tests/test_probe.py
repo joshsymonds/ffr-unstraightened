@@ -17,7 +17,7 @@ import pytest
 from pylocres import LocresFile
 
 from ffrd import cli, deck, gnomon, probe
-from ffrd.build import USER_GAME_TEXT
+from ffrd.build import USER_GAME_TEXT, edits_text
 from ffrd.game import APP_ID, LOCRES, Fail, vanilla_hash
 
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -496,16 +496,16 @@ def test_run_mod_raises_when_exe_never_appears(make_remote: Callable[..., FakeRe
     assert fake.launch_count == 1
 
 
-@pytest.mark.parametrize(
-    "launches",
-    [
-        pytest.param([HEALTHY], id="healthy"),
-        pytest.param([STALL] * 4, id="all-stalled"),
-        pytest.param([Launch(exit_after=20)], id="early-exit"),
-        pytest.param([Launch(lines=((10, SYNTH_LINE),))], id="no-done"),
-        pytest.param([Launch(exe=False)], id="never-starts"),
-    ],
-)
+OUTCOMES = [
+    pytest.param([HEALTHY], id="healthy"),
+    pytest.param([STALL] * 4, id="all-stalled"),
+    pytest.param([Launch(exit_after=20)], id="early-exit"),
+    pytest.param([Launch(lines=((10, SYNTH_LINE),))], id="no-done"),
+    pytest.param([Launch(exe=False)], id="never-starts"),
+]
+
+
+@pytest.mark.parametrize("launches", OUTCOMES)
 def test_game_killed_and_mod_removed_in_every_outcome(make_remote: Callable[..., FakeRemote], mod: Path, launches: list[Launch]) -> None:
     fake = make_remote(launches)
     with contextlib.suppress(Fail):
@@ -513,6 +513,70 @@ def test_game_killed_and_mod_removed_in_every_outcome(make_remote: Callable[...,
     assert EXE_PKILL in fake.commands
     assert not fake.game_running()
     assert not [key for key in fake.fs if key.startswith(DEST)]
+
+
+COMP_DEST = f"{GAME}/FFRS/Binaries/Win64/ue4ss/Mods/UnstraightenedText"
+COMP_FILES = {"edits.txt": b"ST_SYNTH_001\t1\tSynthetic text.\n"}
+
+
+@pytest.fixture
+def companion(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
+    folder = tmp_path / "UnstraightenedText"
+    (folder / "Scripts").mkdir(parents=True)
+    (folder / "Scripts/main.lua").write_text("-- synthetic text mod\n", encoding="utf-8")
+    return folder, COMP_FILES
+
+
+def test_run_mod_installs_companion_tree_enabled_txt_and_files(
+    make_remote: Callable[..., FakeRemote], mod: Path, companion: tuple[Path, dict[str, bytes]]
+) -> None:
+    fake = make_remote([HEALTHY])
+    assert gnomon.run_mod(mod, FILES, LOG, companion=companion) == [SYNTH_LINE, "done"]
+    installed = fake.snapshots[0]
+    assert {key for key in installed if key.startswith(COMP_DEST)} == {
+        f"{COMP_DEST}/Scripts/main.lua",
+        f"{COMP_DEST}/enabled.txt",
+        f"{COMP_DEST}/edits.txt",
+    }
+    assert installed[f"{COMP_DEST}/Scripts/main.lua"] == b"-- synthetic text mod\n"
+    assert installed[f"{COMP_DEST}/enabled.txt"] == b""
+    assert installed[f"{COMP_DEST}/edits.txt"] == COMP_FILES["edits.txt"]
+    assert installed[f"{DEST}/keys.txt"] == FILES["keys.txt"]
+
+
+def test_run_mod_refuses_a_nameless_companion_before_any_remote_command(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    fake = make_remote()
+    with pytest.raises(Fail, match="no name"):
+        gnomon.run_mod(mod, FILES, LOG, companion=(Path("/"), COMP_FILES))
+    assert fake.commands == []
+
+
+@pytest.mark.parametrize("launches", OUTCOMES)
+def test_companion_removed_in_every_outcome(
+    make_remote: Callable[..., FakeRemote], mod: Path, companion: tuple[Path, dict[str, bytes]], launches: list[Launch]
+) -> None:
+    fake = make_remote(launches)
+    with contextlib.suppress(Fail):
+        gnomon.run_mod(mod, FILES, LOG, companion=companion)
+    assert EXE_PKILL in fake.commands
+    assert not fake.game_running()
+    assert not [key for key in fake.fs if key.startswith((DEST, COMP_DEST))]
+
+
+def test_companion_removed_even_when_the_main_mod_removal_fails(
+    make_remote: Callable[..., FakeRemote], mod: Path, companion: tuple[Path, dict[str, bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = make_remote([HEALTHY])
+
+    def failing_removal(host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
+        if command == f"rm -rf {DEST}" and fake.launch_count:
+            raise Fail("synthetic ssh failure")
+        return fake.ssh(host, command, stdin)
+
+    monkeypatch.setattr(deck, "ssh", failing_removal)
+    with pytest.raises(Fail, match="synthetic ssh failure"):
+        gnomon.run_mod(mod, FILES, LOG, companion=companion)
+    assert not [key for key in fake.fs if key.startswith(COMP_DEST)]
 
 
 # ffrd probe: deck and gnomon refusals, verdicts, paks removed, and the packed shapes. Made-up keys and text only.
@@ -596,7 +660,7 @@ class ProbeRemote:
         self.fetched: list[str] = []
         self.puts: list[tuple[str, dict[str, bytes]]] = []
         self.deletes: list[tuple[str, list[str]]] = []
-        self.runs: list[tuple[Path, dict[str, bytes], str]] = []
+        self.runs: list[tuple[Path, dict[str, bytes], str, tuple[Path, dict[str, bytes]] | None]] = []
 
     def next_text(self) -> str:
         text = f"Unstraightened probe {len(self.texts) + 1:08x}"
@@ -619,8 +683,8 @@ class ProbeRemote:
     def delete(self, host: str, dest: str, names: list[str]) -> None:
         self.deletes.append((dest, names))
 
-    def run(self, mod: Path, files: dict[str, bytes], log: str) -> list[str]:
-        self.runs.append((mod, files, log))
+    def run(self, mod: Path, files: dict[str, bytes], log: str, companion: tuple[Path, dict[str, bytes]] | None = None) -> list[str]:
+        self.runs.append((mod, files, log, companion))
         if not self.responders:
             raise AssertionError("more launches than the test expects")
         answer = self.responders.pop(0)
@@ -788,10 +852,63 @@ def test_refuses_when_gnomon_build_differs_from_vanilla(make_probe: Callable[...
 def test_probe_asks_the_mod_for_the_probe_key(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
     fake = make_probe([edited_line])
     assert run_ffrd_probe() == 0
-    mod, files, log = fake.runs[0]
+    mod, files, log, companion = fake.runs[0]
     assert mod == tmp_path / "repo" / "ue4ss/UnstraightenedProbe"
     assert files == {"keys.txt": b"ST_C01_001_01,10\n"}
     assert log == "probe.log"
+    assert companion is None
+
+
+def test_ue4ss_shape_puts_fetches_and_deletes_no_pak(make_probe: Callable[..., ProbeRemote]) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe("--shape", "ue4ss") == 0
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.deletes == []
+
+
+def test_ue4ss_shape_runs_the_probe_mod_with_the_text_mod_beside_it(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe("--shape", "ue4ss") == 0
+    assert len(fake.runs) == 1
+    mod, files, log, companion = fake.runs[0]
+    assert mod == tmp_path / "repo" / "ue4ss/UnstraightenedProbe"
+    assert files == {"keys.txt": b"ST_C01_001_01,10\n"}
+    assert log == "probe.log"
+    assert companion == (
+        tmp_path / "repo" / "ue4ss/UnstraightenedText",
+        {"edits.txt": edits_text({PROBE_KEY_SYNTH: fake.texts[0]}).encode("utf-8")},
+    )
+
+
+def test_ue4ss_shape_honoured_prints_the_verdict_and_exits_0(
+    make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe("--shape", "ue4ss") == 0
+    marker = vanilla_hash(fake.texts[0])
+    vanilla_digest = vanilla_hash(SYNTH_VANILLA)
+    assert capsys.readouterr().out == (
+        f"ue4ss: ST_C01_001_01,10 marker {marker} vanilla {vanilla_digest} seen {marker}: honoured\nshape honoured: ue4ss\n"
+    )
+
+
+def test_ue4ss_shape_not_honoured_exits_1(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([vanilla_line])
+    assert run_ffrd_probe("--shape", "ue4ss") == 1
+    assert len(fake.runs) == 1
+    assert capsys.readouterr().err == "ffrd: shape ue4ss is not honoured by the game\n"
+
+
+def test_default_order_never_runs_the_text_mod(make_probe: Callable[..., ProbeRemote]) -> None:
+    fake = make_probe([vanilla_line, edited_line])
+    assert run_ffrd_probe() == 0
+    assert [run[3] for run in fake.runs] == [None, None]
+
+
+def test_probe_help_names_the_ue4ss_shape(capsys: pytest.CaptureFixture[str]) -> None:
+    assert run_ffrd_probe("--help") == 0
+    assert "target, full, partial or ue4ss" in " ".join(capsys.readouterr().out.split())
 
 
 def test_paks_are_installed_beside_the_global_container_copies(make_probe: Callable[..., ProbeRemote]) -> None:

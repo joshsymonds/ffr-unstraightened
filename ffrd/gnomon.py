@@ -1,5 +1,6 @@
 """Runs the UE4SS probe mod on a Steam machine over ssh: install it, launch FFR, read its log, quit."""
 
+import contextlib
 import os
 import re
 import shlex
@@ -63,14 +64,27 @@ def fetch(path: str) -> bytes:
     return deck.ssh(host(), f"cat {deck.remote(path)}")
 
 
-def run_mod(mod: Path, files: dict[str, bytes], log: str) -> list[str]:
+def run_mod(
+    mod: Path,
+    files: dict[str, bytes],
+    log: str,
+    companion: tuple[Path, dict[str, bytes]] | None = None,
+) -> list[str]:
     if mod.name in ("", ".."):
         raise Fail(f"mod folder {mod} has no name")
+    if companion is not None:
+        companion_mod = companion[0]
+        if companion_mod.name in ("", ".."):
+            raise Fail(f"companion mod folder {companion_mod} has no name")
     if running():
         raise Fail(f"FINAL FANTASY RESONANCE is running on {host()}; refusing to start the probe")
     dest = f"{ue4ss()}/Mods/{mod.name}"
+    installs = [(dest, mod, files)]
+    if companion is not None:
+        installs.append((f"{ue4ss()}/Mods/{companion[0].name}", companion[0], companion[1]))
     try:
-        _install(dest, mod, files)
+        for target, folder, data in installs:
+            _install(target, folder, data)
         for attempt in range(LAUNCH_ATTEMPTS):
             if attempt:
                 _quit()
@@ -82,7 +96,9 @@ def run_mod(mod: Path, files: dict[str, bytes], log: str) -> list[str]:
         try:
             _quit()
         finally:
-            deck.ssh(host(), f"rm -rf {deck.remote(dest)}")
+            with contextlib.ExitStack() as stack:
+                for target, _, _ in installs:
+                    stack.callback(deck.ssh, host(), f"rm -rf {deck.remote(target)}")
 
 
 def _install(dest: str, mod: Path, files: dict[str, bytes]) -> None:
