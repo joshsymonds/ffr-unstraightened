@@ -12,6 +12,7 @@ from ffrd.pipeline import accounts
 
 OPUS = "opus"
 SONNET = "sonnet"
+SYSTEM_PROMPT = "You follow the instructions in the user message and answer only through the structured output."
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,14 @@ def call(
         "--json-schema",
         json.dumps(schema, separators=(",", ":")),
         "--no-session-persistence",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--setting-sources",
+        "",
+        "--tools",
+        "",
+        "--system-prompt",
+        SYSTEM_PROMPT,
     ]
     try:
         run = subprocess.run(
@@ -67,13 +76,21 @@ def call(
         raise Fail("cswap not found on PATH") from e
     except subprocess.TimeoutExpired:
         return Unfinished(f"timeout after {timeout:g} seconds")
-    try:
-        document = json.loads(run.stdout)
-    except ValueError:
-        document = None
-    if not isinstance(document, dict) or document.get("type") != "result":
+    document = _result_object(run.stdout)
+    if document is None:
         return Unfinished(f"exit {run.returncode}, stdout was not a result object")
     return _classify(document)
+
+
+def _result_object(stdout: str) -> dict[str, Any] | None:
+    for line in reversed(stdout.splitlines()):
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get("type") == "result":
+            return document
+    return None
 
 
 def _classify(document: dict[str, Any]) -> dict[str, Any] | Failure:

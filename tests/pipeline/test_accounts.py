@@ -10,7 +10,7 @@ import pytest
 
 from ffrd.game import Fail
 from ffrd.pipeline.accounts import WEEKLY_LIMIT, Account, choose, read
-from ffrd.pipeline.claude import OPUS, RateLimited, Rejected, Unfinished, ask, call
+from ffrd.pipeline.claude import OPUS, SYSTEM_PROMPT, RateLimited, Rejected, Unfinished, ask, call
 
 NOW = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
 
@@ -304,10 +304,24 @@ def test_call_runs_cswap_run_with_exact_claude_argv_and_stdin(cswap: FakeCswap) 
                 "--json-schema",
                 SCHEMA_JSON,
                 "--no-session-persistence",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--setting-sources",
+                "",
+                "--tools",
+                "",
+                "--system-prompt",
+                SYSTEM_PROMPT,
             ],
             "stdin": "SYNTHETIC-PROMPT first part\n\nSYNTHETIC-PROMPT second part",
         }
     ]
+
+
+def test_call_with_banner_line_before_result_object_parses_that_result(cswap: FakeCswap) -> None:
+    banner = "Account-1 (synthetic@example.invalid) is already the active default login — launching claude directly."
+    cswap.answer(1, f"{banner}\n{json.dumps(document(structured_output=MADE_UP))}\n")
+    assert call(1, OPUS, PARTS, SCHEMA) == MADE_UP
 
 
 def test_call_with_api_rate_limit_is_rate_limited(cswap: FakeCswap) -> None:
