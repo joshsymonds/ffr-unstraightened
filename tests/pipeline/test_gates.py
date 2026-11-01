@@ -1,7 +1,9 @@
+from collections.abc import Sequence
+
 import pytest
 
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
-from ffrd.pipeline.gates import GATES, Candidate, Failed, Judgment, Passed, Verdict, check
+from ffrd.pipeline.gates import GATES, Candidate, Failed, Judgment, Kept, Passed, Verdict, check, gate_line
 
 # Made-up lines only. Not game text.
 ENGLISH = "Made-up line one. Not game text."
@@ -251,3 +253,164 @@ def test_transport_or_rate_limit_comes_back_unchanged(result: Unfinished | RateL
     verdict, _, _ = _run(_candidate(TEXT_OK), result=result)
 
     assert verdict is result
+
+
+class FakeWriter:
+    """Returns scripted rounds in call order and records the gate name each call was told."""
+
+    def __init__(self, *rounds: Sequence[Candidate] | Unfinished | RateLimited) -> None:
+        self.rounds = list(rounds)
+        self.calls: list[str | None] = []
+
+    def __call__(self, gate: str | None) -> Sequence[Candidate] | Unfinished | RateLimited:
+        self.calls.append(gate)
+        return self.rounds[len(self.calls) - 1]
+
+
+PASS_A = _candidate("Made-up line 1. Not game text.")
+PASS_B = _candidate("Made-up line 2. Not game text.")
+FAIL_PLACEHOLDER = FAILING["placeholder"][0]
+FAIL_TAGS = FAILING["tags"][0]
+FAIL_LENGTH = FAILING["length"][0]
+
+
+def _gate(
+    writer: FakeWriter, result: Judgment | Unfinished | RateLimited | Rejected = ALL_TRUE, score: float = 1.0
+) -> tuple[Verdict | Kept | tuple[Passed, ...], FakeClassify, FakeJudge]:
+    classify = FakeClassify(score)
+    judge = FakeJudge(result)
+    verdict = gate_line(writer, classify=classify, threshold=THRESHOLD, judge=judge)
+    return verdict, classify, judge
+
+
+def test_passing_first_round_is_returned_without_a_retry() -> None:
+    writer = FakeWriter([PASS_A])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == (Passed(PASS_A, ALL_TRUE),)
+    assert writer.calls == [None]
+
+
+def test_every_passing_candidate_of_a_round_is_returned_in_candidate_order() -> None:
+    writer = FakeWriter([PASS_B, FAIL_PLACEHOLDER, PASS_A])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == (Passed(PASS_B, ALL_TRUE), Passed(PASS_A, ALL_TRUE))
+    assert writer.calls == [None]
+
+
+def test_failed_first_round_retries_once_told_the_first_failing_gate() -> None:
+    writer = FakeWriter([FAIL_TAGS, FAIL_PLACEHOLDER], [PASS_A])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == (Passed(PASS_A, ALL_TRUE),)
+    assert writer.calls == [None, "tags"]
+
+
+def test_retry_candidates_are_gated_and_the_retry_round_is_returned() -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [PASS_B, FAIL_LENGTH, PASS_A])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == (Passed(PASS_B, ALL_TRUE), Passed(PASS_A, ALL_TRUE))
+    assert writer.calls == [None, "placeholder"]
+
+
+def test_failed_retry_keeps_the_line_with_the_retry_round_gate() -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [FAIL_LENGTH])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == Kept("length")
+    assert writer.calls == [None, "placeholder"]
+
+
+def test_writer_is_never_asked_a_third_time() -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [FAIL_LENGTH], [PASS_A])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == Kept("length")
+    assert writer.calls == [None, "placeholder"]
+
+
+def test_retry_judge_failure_is_the_kept_gate() -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [PASS_A])
+
+    verdict, _, _ = _gate(writer, result=_judgment(meaning=False))
+
+    assert verdict == Kept("meaning")
+    assert writer.calls == [None, "placeholder"]
+
+
+def test_empty_first_round_retries_told_writer() -> None:
+    writer = FakeWriter([], [PASS_A])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == (Passed(PASS_A, ALL_TRUE),)
+    assert writer.calls == [None, "writer"]
+
+
+def test_empty_retry_keeps_the_line_as_writer() -> None:
+    writer = FakeWriter([], [])
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict == Kept("writer")
+    assert writer.calls == [None, "writer"]
+
+
+@pytest.mark.parametrize("stop", [Unfinished("synthetic transport"), RateLimited("synthetic limit")])
+def test_writer_stop_in_first_round_is_returned_and_not_retried(stop: Unfinished | RateLimited) -> None:
+    writer = FakeWriter(stop)
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict is stop
+    assert writer.calls == [None]
+
+
+@pytest.mark.parametrize("stop", [Unfinished("synthetic transport"), RateLimited("synthetic limit")])
+def test_writer_stop_in_retry_is_returned_and_not_kept(stop: Unfinished | RateLimited) -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], stop)
+
+    verdict, _, _ = _gate(writer)
+
+    assert verdict is stop
+    assert writer.calls == [None, "placeholder"]
+
+
+@pytest.mark.parametrize("stop", [Unfinished("synthetic transport"), RateLimited("synthetic limit")])
+def test_judge_stop_in_first_round_is_returned_and_not_retried(stop: Unfinished | RateLimited) -> None:
+    writer = FakeWriter([PASS_A])
+
+    verdict, _, _ = _gate(writer, result=stop)
+
+    assert verdict is stop
+    assert writer.calls == [None]
+
+
+@pytest.mark.parametrize("stop", [Unfinished("synthetic transport"), RateLimited("synthetic limit")])
+def test_judge_stop_in_retry_is_returned_and_not_kept(stop: Unfinished | RateLimited) -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [PASS_A])
+
+    verdict, _, _ = _gate(writer, result=stop)
+
+    assert verdict is stop
+    assert writer.calls == [None, "placeholder"]
+
+
+def test_stop_ends_the_round_so_an_earlier_pass_is_not_returned() -> None:
+    writer = FakeWriter([PASS_A, PASS_B])
+
+    def judge(candidate: Candidate) -> Judgment | Unfinished:
+        return Unfinished("synthetic transport") if candidate == PASS_B else ALL_TRUE
+
+    verdict = gate_line(writer, classify=FakeClassify(1.0), threshold=THRESHOLD, judge=judge)
+
+    assert verdict == Unfinished("synthetic transport")
+    assert writer.calls == [None]

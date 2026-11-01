@@ -1,6 +1,6 @@
-"""Single-candidate gate chain: a rewrite passes placeholder, tag, length, classifier and judge gates in that order, and the first failure is named."""
+"""Gate chain for rewrites: a candidate passes placeholder, tag, length, classifier and judge gates in that order with the first failure named, and a line gets one writer retry before it stays vanilla."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from ffrd.build import PLACEHOLDER, STYLE_OPEN
@@ -66,3 +66,55 @@ def check(candidate: Candidate, *, classify: Classifier, threshold: float, judge
         if not ok:
             return Failed(candidate, gate)
     return Passed(candidate, verdict)
+
+
+@dataclass(frozen=True)
+class Kept:
+    gate: str
+
+
+Writer = Callable[[str | None], Sequence[Candidate] | Unfinished | RateLimited]
+
+
+def _gate_round(
+    produced: Sequence[Candidate] | Unfinished | RateLimited,
+    *,
+    classify: Classifier,
+    threshold: float,
+    judge: Judge,
+) -> tuple[Passed, ...] | str | Unfinished | RateLimited:
+    """Gates one writer round. A str result is the round's failing gate, or "writer" when it gave no candidates."""
+    if isinstance(produced, Unfinished | RateLimited):
+        return produced
+    passed: list[Passed] = []
+    first_failure: str | None = None
+    for candidate in produced:
+        verdict = check(candidate, classify=classify, threshold=threshold, judge=judge)
+        if isinstance(verdict, Unfinished | RateLimited):
+            return verdict
+        if isinstance(verdict, Passed):
+            passed.append(verdict)
+        elif first_failure is None:
+            first_failure = verdict.gate
+    if passed:
+        return tuple(passed)
+    if first_failure is None:
+        return "writer"
+    return first_failure
+
+
+def gate_line(
+    write: Writer,
+    *,
+    classify: Classifier,
+    threshold: float,
+    judge: Judge,
+) -> tuple[Passed, ...] | Kept | Unfinished | RateLimited:
+    """Gates a line's first round; on failure asks the writer once more, told the failing gate, and keeps the line vanilla if that also fails."""
+    first = _gate_round(write(None), classify=classify, threshold=threshold, judge=judge)
+    if not isinstance(first, str):
+        return first
+    retry = _gate_round(write(first), classify=classify, threshold=threshold, judge=judge)
+    if isinstance(retry, str):
+        return Kept(retry)
+    return retry
