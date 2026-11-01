@@ -168,7 +168,7 @@ def _intent(store: _CountingStore, ref: tuple[str, str]) -> tuple[dict[str, Any]
     """The inputs and value of the intent the run returned for the line, if it returned one."""
     for inputs, intent in store.returned("intent"):
         if (inputs["line"]["namespace"], inputs["line"]["key"]) == ref:
-            return inputs, intent
+            return inputs, intent["text"]
     return None
 
 

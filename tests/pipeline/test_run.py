@@ -431,6 +431,8 @@ class FakeClaude:
         self.rescreen_flags: dict[tuple[str, str], list[str]] = {}
         self.rescreen_failures: dict[str, Unfinished | Rejected] = {}
         self.intents: dict[tuple[str, str], str | Unfinished] = {}
+        # Lines whose intent answer says keep, so the line stays unchanged. Not game text.
+        self.keeps: set[tuple[str, str]] = set()
         self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         self.judgments: dict[str, dict[str, bool]] = {}
         self.judge_failures: dict[str, Unfinished | Rejected] = {}
@@ -460,8 +462,9 @@ class FakeClaude:
         if schema is RESCREEN_SCHEMA:
             return self._rescreen(parts)
         if schema is INTENT_SCHEMA:
-            answer = self.intents.get(_target(parts), "Made-up intent. Not game text.")
-            return answer if isinstance(answer, Unfinished) else {"intent": answer}
+            ref = _target(parts)
+            answer = self.intents.get(ref, "Made-up intent. Not game text.")
+            return answer if isinstance(answer, Unfinished) else {"intent": answer, "keep": ref in self.keeps}
         if schema is DRAFT_SCHEMA:
             refs = _draft_refs(parts)
             for ref in refs:
@@ -768,6 +771,17 @@ def test_intent_failure_leaves_that_line_unfinished_and_drafts_nothing(tmp_path:
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
+
+
+def test_a_kept_line_is_untouched_with_its_reasons_and_never_drafted_or_judged(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.keeps = {(NS_A, "1")}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "untouched", None, None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
+    judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
+    assert (NS_A, "1") not in judged
 
 
 def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path) -> None:

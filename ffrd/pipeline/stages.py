@@ -384,16 +384,23 @@ def _line_dicts(lines: Sequence[SceneLine]) -> list[dict[str, Any]]:
 
 INTENT_INSTRUCTIONS = (
     "State the intent of the target line: what the rewritten line must do for the player in this scene, in one "
-    "sentence. Follow the intent rule. Use the callbacks and the scene lines for context. Return JSON with intent. "
-    "Refer to lines only by namespace and key."
+    "sentence. Follow the intent rule. Use the callbacks and the scene lines for context. Set keep to true when the "
+    "intent rule leaves the target line unchanged, and to false when it calls for a rewrite. Return JSON with intent "
+    "and keep. Refer to lines only by namespace and key."
 )
 
 INTENT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"intent": {"type": "string"}},
-    "required": ["intent"],
+    "properties": {"intent": {"type": "string"}, "keep": {"type": "boolean"}},
+    "required": ["intent", "keep"],
     "additionalProperties": False,
 }
+
+
+@dataclass(frozen=True)
+class Intent:
+    text: str
+    keep: bool
 
 
 def intent(
@@ -405,7 +412,7 @@ def intent(
     callbacks: Sequence[Mapping[str, Any]],
     context: Mapping[str, Any],
     ask: Ask,
-) -> str | Unfinished | Rejected:
+) -> Intent | Unfinished | Rejected:
     parts = [
         INTENT_INSTRUCTIONS,
         f"Intent rule:\n{lens.stage_text('intent')}",
@@ -415,11 +422,11 @@ def intent(
         f"Target line:\n{_json({**_line_ref(line), 'reasons': list(reasons)})}",
     ]
 
-    def call() -> str:
+    def call() -> dict[str, Any]:
         answer = ask(claude.OPUS, parts, INTENT_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
-        return answer["intent"]
+        return asdict(Intent(text=answer["intent"], keep=answer["keep"]))
 
     inputs = {
         **_inputs(scene),
@@ -429,7 +436,7 @@ def intent(
         "context": context,
     }
     try:
-        return store.run("intent", inputs, lens.stage_text("intent"), call).value
+        return Intent(**store.run("intent", inputs, lens.stage_text("intent"), call).value)
     except _Unanswered as unanswered:
         return unanswered.failure
 
