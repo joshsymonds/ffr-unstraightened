@@ -4,10 +4,10 @@ import argparse
 import sys
 from types import ModuleType
 
-from ffrd import install
+from ffrd import find, install
 from ffrd.game import Fail
 
-COMMANDS: tuple[ModuleType, ...] = (install,)
+COMMANDS: tuple[ModuleType, ...] = (find, install)
 
 
 def main(argv: list[str] | None = None) -> None:

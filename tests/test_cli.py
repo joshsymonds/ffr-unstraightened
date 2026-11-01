@@ -119,3 +119,70 @@ def test_python_m_ffrd_runs_cli_main(repo: Path, tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert result.stderr == f"ffrd: no game install at {missing} (set FFR_GAME)\n"
+
+
+ENTRY_TWO = '#. ja: 合成テキスト二\nmsgctxt "ST_C01_001_01,2"\nmsgid "Synthetic line two."\nmsgstr ""\n\n'
+ENTRY_TEN = '#. ja: 合成テキスト十\nmsgctxt "ST_C01_001_01,10"\nmsgid "Synthetic line ten."\nmsgstr ""\n\n'
+ENTRY_SAME = 'msgctxt "ST_C03_002_01,1"\nmsgid "Same in both."\nmsgstr ""\n\n'
+
+
+def test_find_without_arguments_prints_every_non_empty_english_entry_in_scene_order(
+    fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["find"])
+    captured = capsys.readouterr()
+    assert captured.out == ENTRY_TWO + ENTRY_TEN + ENTRY_SAME
+    assert captured.err == "# 3 entries\n"
+
+
+def test_find_pattern_matches_text_case_insensitively(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["find", "SYNTHETIC LINE TWO"])
+    captured = capsys.readouterr()
+    assert captured.out == ENTRY_TWO
+    assert captured.err == "# 1 entries\n"
+
+
+def test_find_pattern_matches_key(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["find", "^10$"])
+    captured = capsys.readouterr()
+    assert captured.out == ENTRY_TEN
+    assert captured.err == "# 1 entries\n"
+
+
+def test_find_ns_option_filters_namespaces_by_regex(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["find", "--ns", "^ST_C03_"])
+    captured = capsys.readouterr()
+    assert captured.out == ENTRY_SAME
+    assert captured.err == "# 1 entries\n"
+
+
+def test_find_skips_empty_english_lines(fake_vanilla: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["find", "--ns", "^ST_C01_001_02$"])
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "# 0 entries\n"
+
+
+def test_find_without_vanilla_text_exits_1(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FFR_VANILLA", str(tmp_path / "no-vanilla"))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["find"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: no vanilla text yet; run `ffrd extract`\n"
+
+
+def test_find_is_registered_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert any(module.__name__ == "ffrd.find" for module in cli.COMMANDS)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "print vanilla entries as .po, ready to paste into dialog/" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["find", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "regex matched against text or key (case-insensitive)" in out
+    assert "regex the namespace must match, e.g. '^ST_C01_023_'" in out
