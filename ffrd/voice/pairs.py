@@ -368,12 +368,27 @@ def _positive(text: str) -> int:
     return n
 
 
+def _counts(report: Sequence[str]) -> dict[str, int]:
+    found: dict[str, int] = {}
+    for line in report:
+        name, _, value = line.partition(" ")
+        if name in ("calls", "failed"):
+            found[name] = int(value)
+    return found
+
+
 def cmd_pairs(args: argparse.Namespace) -> None:
     lines = scenes.load()
     texts = english()
     root = work_dir("voice")
-    report = check(lines, texts, root) if args.check else run(lines, texts, root, limit=args.limit)
+    if args.check:
+        print("\n".join(check(lines, texts, root)))
+        return
+    report = run(lines, texts, root, limit=args.limit)
     print("\n".join(report))
+    counts = _counts(report)
+    if counts["calls"] and counts["failed"] == counts["calls"]:
+        raise Fail(f"all {counts['calls']} calls failed; no paraphrase was saved")
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

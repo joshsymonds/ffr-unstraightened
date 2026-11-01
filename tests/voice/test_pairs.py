@@ -198,7 +198,8 @@ cat "$FAKE_CSWAP_LISTING"
 
 # Stands in for claude. Logs the account, argv and stdin of each call, sleeps for the seconds the test set, then answers
 # the ids in the scene it was sent. The test's mode picks the answer: "answer" paraphrases every id, "blank" blanks the
-# first paraphrase, "gap" leaves out the last id, and "unfinished" answers with an error result.
+# first paraphrase, "blank-scene-00" blanks the first paraphrase only for calls about made-up-scene-00, "gap" leaves out
+# the last id, and "unfinished" answers with an error result.
 FAKE_CLAUDE = """#!PYTHON
 import json
 import os
@@ -219,6 +220,8 @@ else:
     ids = [line["id"] for line in json.loads(stdin.rsplit("\\n\\n", 1)[-1])["lines"]]
     rows = [{"id": n, "paraphrase": f"Made-up paraphrase {n}. Not game text."} for n in ids]
     if spec["mode"] == "blank":
+        rows[0]["paraphrase"] = " "
+    if spec["mode"] == "blank-scene-00" and "made-up-scene-00" in stdin:
         rows[0]["paraphrase"] = " "
     if spec["mode"] == "gap":
         rows = rows[:-1]
@@ -476,6 +479,60 @@ def test_pairs_command_prints_counts_only(
     assert out
     assert all(re.fullmatch(r"[a-z ]+\d+( calls \d+)?", line) for line in out.splitlines())
     assert "SENTINEL" not in out
+
+
+def _command(fakes: Fakes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> argparse.Namespace:
+    lines, texts = _small()
+    monkeypatch.setattr(scenes, "load", lambda: lines)
+    monkeypatch.setattr(pairs, "english", lambda: texts)
+    monkeypatch.setattr(pairs, "work_dir", lambda lens: tmp_path / "work")
+    parser = argparse.ArgumentParser()
+    pairs.register(parser.add_subparsers(required=True))
+    return parser.parse_args(argv)
+
+
+@pytest.mark.parametrize(("argv", "calls"), [(["pairs"], 12), (["pairs", "--limit", "1"], 4)])
+def test_pairs_command_prints_its_report_then_fails_when_every_call_failed(
+    fakes: Fakes,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    calls: int,
+) -> None:
+    fakes.accounts((3, 10.0))
+    fakes.behave("blank")
+    args = _command(fakes, tmp_path, monkeypatch, argv)
+    with pytest.raises(Fail, match=re.escape(f"all {calls} calls failed")):
+        args.fn(args)
+    out = capsys.readouterr().out.splitlines()
+    assert f"calls {calls}" in out
+    assert f"failed {calls}" in out
+    assert "SENTINEL" not in "\n".join(out)
+
+
+def test_pairs_command_does_not_fail_when_some_calls_succeeded(
+    fakes: Fakes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fakes.accounts((3, 10.0))
+    fakes.behave("blank-scene-00")
+    args = _command(fakes, tmp_path, monkeypatch, ["pairs"])
+    args.fn(args)
+    out = capsys.readouterr().out.splitlines()
+    assert "calls 12" in out
+    assert "failed 4" in out
+
+
+def test_pairs_command_does_not_fail_when_every_call_was_resumed(
+    fakes: Fakes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fakes.accounts((3, 10.0))
+    args = _command(fakes, tmp_path, monkeypatch, ["pairs"])
+    args.fn(args)
+    capsys.readouterr()
+    args.fn(args)
+    out = capsys.readouterr().out.splitlines()
+    assert out[:3] == ["calls 0", "resumed 12", "failed 0"]
 
 
 def test_read_missing_file_raises_fail_naming_the_run_command(tmp_path: Path) -> None:
