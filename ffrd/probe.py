@@ -1,10 +1,11 @@
 """probe and usmap: run the game on the gnomon host under UE4SS.
 
-`ffrd probe` checks which text shape FFR honours. It refuses while FFR runs on the Steam Deck or on the gnomon host,
-and when the gnomon build is not the vanilla build. For each pak shape it packs one edited line of PROBE_KEY, with .utoc
-and .ucas copied from the host's global container, installs it in the host's Paks/~mods and runs the probe mod. The
-target shape (the default build shape) is tried first and the full shape only when the target one is not honoured.
-`--shape` runs one shape alone: target, full, partial or ue4ss. The ue4ss shape installs no pak: it runs the probe mod
+`ffrd probe` checks whether FFR honours the built mod. It refuses while FFR runs on the Steam Deck or on the gnomon host,
+when the gnomon build is not the vanilla build, and when a file of build/FFRS-Unstraightened_P is missing. It puts the
+three build files on the host in Paks/~mods unchanged, beside a marker pak FFRS-UnstraightenedProbe_P: the full shape with
+one edited line of PROBE_KEY, its .utoc and .ucas copied from the host's global container. It runs the probe mod and
+passes only when the marker is honoured. Every file it put is removed in every outcome.
+`--shape` probes one shape instead: target, full, partial or ue4ss. The ue4ss shape installs no pak: it runs the probe mod
 with the repo's UE4SS text mod beside it, whose edits.txt holds the one probe edit. A launch whose log holds no
 observation line for the probe key is inconclusive: the probe stops there and fails, without trying another shape.
 It prints only keys and hashes, never the probe text.
@@ -23,13 +24,13 @@ from pylocres import LocresFile
 
 from ffrd import deck, gnomon
 from ffrd.build import PAK_SHAPES, UE4SS_NAME, edits_text, pack, pak_files
-from ffrd.game import Fail, repo_root, vanilla, vanilla_dir, vanilla_hash
+from ffrd.game import MOD_NAME, Fail, repo_root, vanilla, vanilla_dir, vanilla_hash
+from ffrd.install import EXTS
 
 PROBE_KEY = ("ST_UI_TitleMenu", "UI_Title_Copyright")
 PROBE_MOD = "FFRS-UnstraightenedProbe_P"
 MOD_DIR = "ue4ss/UnstraightenedProbe"
 LOG = "probe.log"
-SHAPES = ("target", "full")
 UE4SS_SHAPE = "ue4ss"
 SHAPE_CHOICES = (*PAK_SHAPES, UE4SS_SHAPE)
 TEXT_MOD_DIR = f"ue4ss/{UE4SS_NAME}"
@@ -59,6 +60,18 @@ def _check_build() -> None:
     remote = gnomon.build_id()
     if local != remote:
         raise Fail(f"gnomon on {gnomon.host()} runs build {remote}, not vanilla build {local}; run `ffrd extract` first")
+
+
+def _build_files() -> list[Path]:
+    files = [repo_root() / "build" / f"{MOD_NAME}.{ext}" for ext in EXTS]
+    missing = [f.name for f in files if not f.exists()]
+    if missing:
+        raise Fail(f"missing {missing}; run `ffrd build`")
+    return files
+
+
+def _fetch_globals() -> dict[str, bytes]:
+    return {ext: gnomon.fetch(f"{gnomon.paks()}/global.{ext}") for ext in ("utoc", "ucas")}
 
 
 def _pack(shape: str, en: LocresFile, text: str, out: Path, fetched: dict[str, bytes]) -> list[Path]:
@@ -106,14 +119,18 @@ def _verdict(shape: str, lines: list[str], marker: str, vanilla_digest: str) -> 
     return honoured
 
 
-def _run_shape(shape: str, fetched: dict[str, bytes]) -> bool:
+def _vanilla_digest(en: LocresFile) -> str:
     ns, key = PROBE_KEY
-    text = _probe_text()
-    en = vanilla()
     entry = en[ns][key] if en[ns] else None
     if entry is None:
         raise Fail(f"the probe key {ns},{key} is not in the vanilla text")
-    vanilla_digest = vanilla_hash(entry.translation)
+    return vanilla_hash(entry.translation)
+
+
+def _run_shape(shape: str, fetched: dict[str, bytes]) -> bool:
+    text = _probe_text()
+    en = vanilla()
+    vanilla_digest = _vanilla_digest(en)
     if shape == UE4SS_SHAPE:
         lines = _launch_ue4ss(text)
     else:
@@ -123,22 +140,30 @@ def _run_shape(shape: str, fetched: dict[str, bytes]) -> bool:
     return _verdict(shape, lines, vanilla_hash(text), vanilla_digest)
 
 
+def _run_build(build: list[Path], fetched: dict[str, bytes]) -> bool:
+    text = _probe_text()
+    en = vanilla()
+    vanilla_digest = _vanilla_digest(en)
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = _pack("full", en, text, Path(tmp), fetched)
+        lines = _launch([*build, *marker])
+    return _verdict("build", lines, vanilla_hash(text), vanilla_digest)
+
+
 def cmd_probe(args: argparse.Namespace) -> None:
+    build = _build_files() if args.shape is None else []
     _check_deck()
     if gnomon.running():
         raise Fail(f"FINAL FANTASY RESONANCE is running on {gnomon.host()}; refusing to probe")
     _check_build()
-    shapes = (args.shape,) if args.shape else SHAPES
-    fetched: dict[str, bytes] = {}
-    if any(shape != UE4SS_SHAPE for shape in shapes):
-        fetched = {ext: gnomon.fetch(f"{gnomon.paks()}/global.{ext}") for ext in ("utoc", "ucas")}
-    for shape in shapes:
-        if _run_shape(shape, fetched):
-            print(f"shape honoured: {shape}")
-            return
-    if args.shape:
+    if args.shape is None:
+        if not _run_build(build, _fetch_globals()):
+            raise Fail("build is not honoured by the game")
+        return
+    fetched = {} if args.shape == UE4SS_SHAPE else _fetch_globals()
+    if not _run_shape(args.shape, fetched):
         raise Fail(f"shape {args.shape} is not honoured by the game")
-    raise Fail("no shape is honoured by the game")
+    print(f"shape honoured: {args.shape}")
 
 
 def _newest_usmap(host: str) -> str | None:
@@ -172,7 +197,8 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     probe.add_argument(
         "--shape",
         choices=SHAPE_CHOICES,
-        help="probe only this shape: target, full, partial or ue4ss (default: target, then full, stopping at the first honoured)",
+        help="probe only this shape instead of the built mod: target, full, partial or ue4ss "
+        "(default: the built mod, with a full-shape marker pak beside it)",
     )
     probe.set_defaults(fn=cmd_probe)
     usmap = subparsers.add_parser("usmap", help="dump the game's usmap on the gnomon host and save it as Mappings.usmap in vanilla")
