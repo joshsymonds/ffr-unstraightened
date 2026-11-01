@@ -10,13 +10,14 @@ import subprocess
 import tarfile
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import IO, Any, Self
 
 from ffrd import deck
 from ffrd.game import Fail, repo_root
+from ffrd.pipeline.store import work_dir
 
 DEFAULT_HOST = "gnomon"
 DEFAULT_SCRATCH = "~/.local/share/ffr-unstraightened/voice"
@@ -84,6 +85,26 @@ def push(local: Path, name: str) -> None:
     with local.open("rb") as data:
         command = f"{_prefix()} && mkdir -p -- {shlex.quote(str(parent))} && cat > {shlex.quote(name)}"
         _require_ok(_ssh(command, stdin=data), "push")
+
+
+def stage(rows: Iterable[Mapping[str, Any]], name: str) -> int:
+    _check_name(name)
+    staging = work_dir("voice") / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    path = staging / PurePosixPath(name).name
+    fd, tmp = tempfile.mkstemp(dir=staging, prefix=f".{path.name}.", suffix=".tmp")
+    count = 0
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                count += 1
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    push(path, name)
+    return count
 
 
 def pull(name: str, local: Path) -> None:

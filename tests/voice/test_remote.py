@@ -367,3 +367,55 @@ def test_tunnel_never_ready_raises_fail_on_timeout_and_terminates(monkeypatch: p
     assert str(err.value) == "ssh tunnel to gnomon was not ready within 0.2 s"
     assert process.terminated
     assert process.waits == [remote.WAIT_SECONDS]
+
+
+@pytest.fixture
+def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "work"
+    monkeypatch.setattr(remote, "work_dir", lambda lens: root / lens)
+    return root
+
+
+# Made-up rows for stage. Not game text.
+STAGE_ROWS = [{"text": "SYNTH-ROW-ONE wording", "label": 1}, {"text": "SYNTH-ROW-TWO café", "label": 0}]
+STAGED_LINES = '{"text": "SYNTH-ROW-ONE wording", "label": 1}\n{"text": "SYNTH-ROW-TWO café", "label": 0}\n'
+
+
+def test_stage_writes_exact_json_lines_and_returns_count(ssh: Ssh, work: Path) -> None:
+    assert remote.stage(STAGE_ROWS, "data/synth.jsonl") == 2
+    assert (work / "voice" / "staging" / "synth.jsonl").read_text(encoding="utf-8") == STAGED_LINES
+
+
+def test_stage_leaves_no_temp_file_beside_staged_file(ssh: Ssh, work: Path) -> None:
+    remote.stage(STAGE_ROWS, "data/synth.jsonl")
+    assert sorted(p.name for p in (work / "voice" / "staging").iterdir()) == ["synth.jsonl"]
+
+
+def test_stage_pushes_staged_file_to_name_under_scratch(ssh: Ssh, work: Path) -> None:
+    remote.stage(STAGE_ROWS, "data/synth.jsonl")
+    assert ssh.calls[0][0] == ["ssh", "gnomon", f"{PREFIX} && mkdir -p -- data && cat > data/synth.jsonl"]
+    assert ssh.sent == STAGED_LINES.encode("utf-8")
+
+
+@pytest.mark.parametrize("name", ["", "/abs/x.jsonl", "../x.jsonl", "a/../b.jsonl", "a//b.jsonl", "a/"])
+def test_stage_rejects_bad_name_before_writing(ssh: Ssh, work: Path, name: str) -> None:
+    with pytest.raises(Fail):
+        remote.stage(STAGE_ROWS, name)
+    assert ssh.calls == []
+    assert not (work / "voice").exists()
+
+
+def test_stage_failure_keeps_existing_staged_file_and_removes_temp(ssh: Ssh, work: Path) -> None:
+    staging = work / "voice" / "staging"
+    staging.mkdir(parents=True)
+    (staging / "synth.jsonl").write_bytes(b"old\n")
+
+    def failing_rows() -> Iterator[dict[str, object]]:
+        yield STAGE_ROWS[0]
+        raise RuntimeError("synthetic write failure")
+
+    with pytest.raises(RuntimeError, match="synthetic write failure"):
+        remote.stage(failing_rows(), "data/synth.jsonl")
+    assert (staging / "synth.jsonl").read_bytes() == b"old\n"
+    assert sorted(p.name for p in staging.iterdir()) == ["synth.jsonl"]
+    assert ssh.calls == []

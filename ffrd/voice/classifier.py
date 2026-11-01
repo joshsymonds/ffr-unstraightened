@@ -1,5 +1,6 @@
 """Paraphrase pair loader shared by the voice-model modules, the labelled examples the game-vs-LLM classifier trains on, and the game-likeness Scorer the classifier gate calls."""
 
+import argparse
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from ffrd.pipeline.store import work_dir
 from ffrd.voice import remote
 
 SPLITS = ("train", "heldout")
+DATA = "data/classifier.jsonl"
 MODEL_DIR = "models/classifier"
 MALFORMED_REPLY = "classifier worker sent a malformed reply"
 
@@ -107,3 +109,23 @@ class Scorer:
 
 def _is_score(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= 1
+
+
+def train(epochs: int = 1) -> None:
+    rows = [{"text": text, "label": label} for text, label in examples(load_pairs("train"))]
+    remote.sync()
+    count = remote.stage(rows, DATA)
+    remote.run(["python3", "-m", "tools.voice.classify", "train", DATA, MODEL_DIR, "--epochs", str(epochs)])
+    print(f"staged {count} classifier examples")
+
+
+def cmd_train(args: argparse.Namespace) -> None:
+    train(args.epochs)
+
+
+def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    clf = subparsers.add_parser("classifier", help="stage classifier examples and run the remote classifier training")
+    actions = clf.add_subparsers(dest="action", required=True)
+    train_p = actions.add_parser("train", help="stage the train examples and train the classifier on the GPU host")
+    train_p.add_argument("--epochs", type=int, default=1, help="passes over the training examples")
+    train_p.set_defaults(fn=cmd_train)

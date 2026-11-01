@@ -1,4 +1,7 @@
+import argparse
+import io
 import json
+import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -7,7 +10,7 @@ import pytest
 
 from ffrd.game import Fail
 from ffrd.pipeline.gates import Classifier
-from ffrd.voice import classifier
+from ffrd.voice import classifier, remote
 from ffrd.voice.classifier import MODEL_DIR, Pair, Scorer, examples, load_pairs
 
 # Made-up strings for the pairs loader. Not game text.
@@ -269,3 +272,94 @@ def test_score_returns_single_score_and_closes_worker(fake_worker: Callable[[obj
     assert made[0].asks == [{"texts": [SCORE_TEXTS[0]]}]
     assert made[0].entered is True
     assert made[0].exited is True
+
+
+# The same prefix and NIX wrapper every remote command builds in the default scratch dir.
+REMOTE_PREFIX = "umask 077 && mkdir -p ~/.local/share/ffr-unstraightened/voice/logs && cd ~/.local/share/ffr-unstraightened/voice"
+REMOTE_NIX = "nix develop path:./tools/voice#cuda --command"
+
+
+class RecordingSsh:
+    """Stands in for the ssh layer. Records each remote command in order and keeps the bytes pushed to it."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+        self.pushed: bytes | None = None
+
+    def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        self.commands.append(args[2])
+        stdin = kwargs.get("stdin")
+        if isinstance(stdin, io.IOBase):
+            self.pushed = stdin.read()
+        return subprocess.CompletedProcess(args, 0)
+
+
+@pytest.fixture
+def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[RecordingSsh, Path]:
+    ssh = RecordingSsh()
+    monkeypatch.setattr(remote.subprocess, "run", ssh)
+    monkeypatch.setattr(remote, "repo_root", lambda: tmp_path / "repo")
+    voice = tmp_path / "repo" / "tools" / "voice"
+    voice.mkdir(parents=True)
+    (voice / "flake.nix").write_text("{}\n", encoding="utf-8")
+    work = tmp_path / "work"
+    monkeypatch.setattr(remote, "work_dir", lambda lens: work / lens)
+    monkeypatch.setattr(
+        classifier,
+        "load_pairs",
+        lambda split: (
+            [make_pair(SYNTH_TEXTS[2], SYNTH_TEXTS[1]), make_pair(SYNTH_TEXTS[4], SYNTH_TEXTS[3])]
+            if split == "train"
+            else pytest.fail(f"train must load only the train split, not {split!r}")
+        ),
+    )
+    return ssh, work
+
+
+def test_train_syncs_then_stages_examples_then_runs_remote_trainer(train_env: tuple[RecordingSsh, Path]) -> None:
+    ssh, _ = train_env
+    classifier.train(epochs=3)
+
+    assert len(ssh.commands) == 3
+    assert ssh.commands[0] == f"{REMOTE_PREFIX} && rm -rf -- tools/voice && tar -x -f -"
+    assert ssh.commands[1] == f"{REMOTE_PREFIX} && mkdir -p -- data && cat > data/classifier.jsonl"
+    assert ssh.commands[2] == (
+        f"{REMOTE_PREFIX} && {REMOTE_NIX} python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
+    )
+
+
+def test_train_stages_text_and_label_rows_for_each_example(train_env: tuple[RecordingSsh, Path]) -> None:
+    ssh, work = train_env
+    classifier.train()
+
+    expected = [
+        (SYNTH_TEXTS[2], 1),
+        (SYNTH_TEXTS[4], 1),
+        (SYNTH_TEXTS[1], 0),
+        (SYNTH_TEXTS[3], 0),
+    ]
+    staged = "".join(json.dumps({"text": text, "label": label}, ensure_ascii=False) + "\n" for text, label in expected)
+    assert (work / "voice" / "staging" / "classifier.jsonl").read_text(encoding="utf-8") == staged
+    assert ssh.pushed == staged.encode("utf-8")
+
+
+def test_train_prints_only_the_staged_count(train_env: tuple[RecordingSsh, Path], capsys: pytest.CaptureFixture[str]) -> None:
+    classifier.train()
+    assert capsys.readouterr().out == "staged 4 classifier examples\n"
+
+
+def test_register_parses_classifier_train_epochs_and_dispatches_to_train(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(classifier, "train", lambda epochs=1: calls.append(epochs))
+    parser = argparse.ArgumentParser()
+    classifier.register(parser.add_subparsers(required=True))
+
+    args = parser.parse_args(["classifier", "train", "--epochs", "3"])
+    args.fn(args)
+    assert calls == [3]
+
+
+def test_register_train_epochs_defaults_to_one() -> None:
+    parser = argparse.ArgumentParser()
+    classifier.register(parser.add_subparsers(required=True))
+    assert parser.parse_args(["classifier", "train"]).epochs == 1
