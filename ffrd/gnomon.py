@@ -1,5 +1,6 @@
 """Runs the UE4SS probe mod on a Steam machine over ssh: install it, launch FFR, read its log, quit."""
 
+import contextlib
 import os
 import re
 import shlex
@@ -63,14 +64,27 @@ def fetch(path: str) -> bytes:
     return deck.ssh(host(), f"cat {deck.remote(path)}")
 
 
-def run_mod(mod: Path, files: dict[str, bytes], log: str) -> list[str]:
+def run_mod(
+    mod: Path,
+    files: dict[str, bytes],
+    log: str,
+    companion: tuple[Path, dict[str, bytes]] | None = None,
+) -> list[str]:
     if mod.name in ("", ".."):
         raise Fail(f"mod folder {mod} has no name")
+    if companion is not None:
+        companion_mod = companion[0]
+        if companion_mod.name in ("", ".."):
+            raise Fail(f"companion mod folder {companion_mod} has no name")
     if running():
         raise Fail(f"FINAL FANTASY RESONANCE is running on {host()}; refusing to start the probe")
     dest = f"{ue4ss()}/Mods/{mod.name}"
+    installs = [(dest, mod, files)]
+    if companion is not None:
+        installs.append((f"{ue4ss()}/Mods/{companion[0].name}", companion[0], companion[1]))
     try:
-        _install(dest, mod, files)
+        for target, folder, data in installs:
+            _install(target, folder, data)
         for attempt in range(LAUNCH_ATTEMPTS):
             if attempt:
                 _quit()
@@ -82,7 +96,9 @@ def run_mod(mod: Path, files: dict[str, bytes], log: str) -> list[str]:
         try:
             _quit()
         finally:
-            deck.ssh(host(), f"rm -rf {deck.remote(dest)}")
+            with contextlib.ExitStack() as stack:
+                for target, _, _ in installs:
+                    stack.callback(deck.ssh, host(), f"rm -rf {deck.remote(target)}")
 
 
 def _install(dest: str, mod: Path, files: dict[str, bytes]) -> None:
@@ -110,7 +126,8 @@ def _write(path: str, data: bytes) -> None:
 def _launch(log: str) -> list[str] | None:
     # A log left by an earlier launch could already end in done, so it goes before every launch.
     deck.ssh(host(), f"rm -f {deck.remote(log)}")
-    deck.ssh(host(), f"timeout 30 steam steam://rungameid/{APP_ID}")
+    # -RenderOffscreen keeps the game thread ticking while the game window is unfocused on the gnomon desktop.
+    deck.ssh(host(), f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen")
     _wait_for_exe()
     started = time.monotonic()
     while True:
