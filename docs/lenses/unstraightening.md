@@ -13,11 +13,13 @@ missing from a stage fails the lens test.
 - Keep the story: its plot, relationships and stakes.
 - Do not make a queer rewrite.
 - Dial back romance that is forced to matter, and earnest melodrama.
-- Give women their own center of gravity. Their goals, fears and worth belong to them.
+- Give every character their own center of gravity. Their goals, fears and worth belong to them.
 - Keep character traits.
 - Keep the game's operatic moments.
-- Make the smallest change. Touch the fewest lines, and fix each touched line fully.
-  Josh chose this over the brief's "maximum change in social texture".
+- Act on every clear rule hit, and change each changed line minimally and fully.
+  Josh first chose the fewest lines touched over the brief's "maximum change in
+  social texture", then asked for a more aggressive lens: a clear hit is fixed,
+  not left vanilla.
 - Leave a line alone when fixing it needs a plot change.
 
 ## What a line must hit
@@ -52,9 +54,10 @@ allowed.
 
 - Trigger: A character in this scene explains their own goal, fear or worth in terms
   of what another specific character thinks of them or needs from them.
-- Fix: When the line is about a woman, return her own stake. Her goal, fear or
-  worth goes back to her, not through a man.
-- The screen applies the woman clause. It receives cast notes with gender.
+- Fix: When the line is about that character, return their own stake. Their
+  goal, fear or worth goes back to them, not through the other character. Keep the
+  other character and the relationship; change only the routing.
+- This rule applies to every character, whatever their gender.
 
 ### u5-rivalry-over-one-person
 
@@ -100,7 +103,7 @@ allowed.
   who has no partner as incomplete counts. So does treating marriage as what a life
   is for. The same earned and trait exemptions apply.
 - `all-characters`. The rules apply to every character's romance framing, not only
-  women's.
+  women's. u4 applies to every character. Only u5 keeps a woman clause.
 
 ## Protections
 
@@ -121,7 +124,11 @@ A change that touches a protection is rejected by the judge.
 
 ## Precedence
 
-- `fewest-lines`. Touch the fewest lines. Each touched line must be fully fixed.
+- `act-on-clear-hits`. Change every flagged line that clearly hits a rule. A clear
+  hit stays vanilla only when an exemption applies, when it does not really hit the
+  rule, or under `leave-for-plot`. The screen flags mild and brief hits too.
+- `minimal-fix`. Change each changed line minimally: only the words the fix needs,
+  and never a neighboring line. Each changed line must be fully fixed.
 - `leave-for-plot`. A line that needs a plot change stays vanilla.
 
 ## How it is checked
@@ -130,6 +137,9 @@ A change that touches a protection is rejected by the judge.
   Jev scores 0.5 or more on, and that the screen flagged on no line, Opus rechecks
   the scene for that rule. Lines the recheck flags join the screen's flags.
 - The judge reads the arc beats for `earned`.
+- When the intent stage keeps a flagged line unchanged, the report counts it as
+  untouched. The `writer` gate counts only a writer that returns no usable
+  candidate after being asked to change the line.
 - The report counts arc-judge and scene-coherence reverts as the `arc` and `scene`
   gate counts.
 

@@ -35,7 +35,7 @@ criteria = [
     "[u1-presumed-opposite-sex] Flag u1-presumed-opposite-sex when a character presumes that another character's partner or future partner is of the opposite sex, or when a line treats closeness between two characters of the same sex as a joke, an insult or a threat. Flag the presumption made about another character. Do not flag the sentiment itself, and do not flag a character's own wish for an opposite-sex partner (see first-person-desire).",
     "[u2-romance-outranks] Flag u2-romance-outranks when a character says or implies that a romantic feeling matters more than a duty, a friendship, their own life, or the fate of other people. Flag it broadly: do not decide whether the feeling is earned. The intent and judge stages decide that from the arc beats.",
     "[u3-devotion-as-vow] Flag u3-devotion-as-vow when a character describes devotion to a romantic partner or love interest as a sacred vow, as fate, or as giving up their own self. Oaths to lords, causes and comrades are not flagged here (see romantic-partner-only).",
-    "[u4-stake-through-other] Flag u4-stake-through-other when a line about a woman explains her own goal, fear or worth in terms of what a specific man thinks of her or needs from her. The cast notes give each character's gender. This criterion covers only a woman whose stake runs through a man.",
+    "[u4-stake-through-other] Flag u4-stake-through-other when a line about a character explains that character's own goal, fear or worth in terms of what another specific character thinks of them or needs from them. It applies to every character, whatever their gender or the other character's gender.",
     "[u5-rivalry-over-one-person] Flag u5-rivalry-over-one-person when two women in the scene compete or quarrel over the affection or attention of one man. The cast notes give each character's gender. This criterion covers only two women rivaling over a man.",
     "[u6-overwrought-declaration] Flag u6-overwrought-declaration when a character declares romantic love or longing in extreme, breathless or life-or-death terms. Flag it broadly: do not decide whether the declaration is earned. The intent and judge stages decide that from the arc beats.",
     "[u7-gender-rule] Flag u7-gender-rule when a line states what men or women may do, must do, or are like.",
@@ -43,7 +43,8 @@ criteria = [
     "[romantic-partner-only] u3-devotion-as-vow covers devotion to a romantic partner or love interest only. Oaths to lords, causes and comrades are untouched and must not be flagged under u3-devotion-as-vow.",
     "[gender-rule-narrow] u7-gender-rule is narrow. Do not flag a line in which a character is vulnerable or protective, even when the line mentions a gender. Flag only a line that states what men or women may do, must do, or are like.",
     "[romance-as-default] Flag under u2-romance-outranks a line that treats romance as the default frame, such as being unpartnered as incomplete or marriage as what a life is for. Flag it broadly: the intent and judge stages apply the same earned and established-trait exemptions as for u2-romance-outranks.",
-    "[all-characters] The romance rules u1-presumed-opposite-sex, u2-romance-outranks, u3-devotion-as-vow and u6-overwrought-declaration, and the romance-as-default framing, apply to every character's romance framing, men's as well as women's, not only women's. The woman and man clauses of u4-stake-through-other and u5-rivalry-over-one-person are stated in their own criteria.",
+    "[all-characters] The rules u1-presumed-opposite-sex, u2-romance-outranks, u3-devotion-as-vow, u4-stake-through-other and u6-overwrought-declaration, and the romance-as-default framing, apply to every character, men's as well as women's. The woman and man clause of u5-rivalry-over-one-person is stated in its own criterion.",
+    "[act-on-clear-hits] Flag every line that clearly hits a rule above, including a brief or mild hit and a hit inside an otherwise ordinary line. Do not leave a hit unflagged because it seems minor or because the intent stage may keep it: the intent and judge stages apply the exemptions. A line with no hit stays unflagged, whatever its tone.",
     "[protect-love-and-couples] Heterosexual attraction, couples, marriages, promises, and who loves whom are protected. Do not flag a line only because it states that two characters are a couple, that a marriage or promise exists, that a character is attracted to someone of the opposite sex, or who loves whom. Only the rules above flag a line.",
     "[protect-plot] Plot facts are protected: what happens, who does what, the decisions characters make, and the events of the scene. Do not flag a line in order to change a plot fact, and do not flag a line whose only defect would be fixed by changing one.",
     "[protect-traits] Character traits are protected, including a character's own straight desire and a flirt's flirting. Flag the framing of a romance, never the trait itself. A flirt stays a flirt.",
@@ -56,9 +57,11 @@ criteria = [
 
 [intent]
 rule = """
-You fix only the lines the screen flagged under the triage ids. Change as few lines as you can, and fully fix each line you change. Keep the original story.
+You fix only the lines the screen flagged under the triage ids. Change every flagged line that clearly hits a rule, change each one minimally, and fully fix it. Keep the original story.
 
-[fewest-lines] Touch the fewest lines possible, and each line you touch must be fully fixed. A partial fix that leaves the flagged trigger in place is not a fix. When a flagged trigger can be fixed by touching fewer lines, touch only those.
+[act-on-clear-hits] Rewrite a flagged line whenever it clearly hits the rule it is flagged under. Do not keep a clear hit vanilla because the hit is mild or brief, because the line is otherwise ordinary, or because leaving it is safer. Keep a flagged line unchanged only when it does not actually hit the rule, when an exemption below applies (earned, no-invented-motive, gender-rule-narrow, a character's own wish for an opposite-sex partner, oaths outside romance), when every fix would touch a protection or exclusion below (the protect and exclude rules always win), or when fixing it needs a plot change (leave-for-plot).
+
+[minimal-fix] Change each rewritten line minimally: change only the words the fix needs, keep the rest of the line, and fix only the flagged line, never its neighbors. Each rewritten line must be fully fixed. A partial fix that leaves the flagged trigger in place is not a fix.
 
 [u1-presumed-opposite-sex] For a presumption that another character's partner or future partner is of the opposite sex, or for closeness between two characters of the same sex treated as a joke, an insult or a threat: remove the presumption, keep the sentiment, and make no one queer. Do not add a new romance.
 
@@ -68,7 +71,7 @@ You fix only the lines the screen flagged under the triage ids. Change as few li
 
 [u3-devotion-as-vow] For devotion to a romantic partner or love interest described as a sacred vow, as fate, or as giving up the speaker's own self: make it a choice between equals, with the same commitment and the same action. Oaths to lords, causes and comrades are not in scope.
 
-[u4-stake-through-other] For a woman's own goal, fear or worth routed through a man when the line is about her: return the stake to her, so that the goal, fear or worth is hers.
+[u4-stake-through-other] For a character's own goal, fear or worth routed through what another specific character thinks of them or needs from them, when the line is about them: return the stake to them, so that the goal, fear or worth is their own. This applies to every character, whatever their gender. Keep the other character and the relationship in the scene; change only the routing of the stake.
 
 [u5-rivalry-over-one-person] For two women competing or quarreling over a man: keep the tension and make it about them, not about the man.
 
@@ -101,7 +104,7 @@ You fix only the lines the screen flagged under the triage ids. Change as few li
 rubric = """
 You judge one rewrite of a flagged line against its vanilla line. A change that touches any protected item below is rejected. Reject a rewrite that fails any check, and name the label it fails.
 
-[fewest-lines] Reject a rewrite that touches more lines than the fix needs, or a touched line whose flagged trigger is still present. A rewrite passes only when it answers no to the reason question of its line.
+[minimal-fix] Reject a rewrite that changes more than the fix needs, or a touched line whose flagged trigger is still present. A rewrite passes only when it answers no to the reason question of its line.
 
 [leave-for-plot] Reject a rewrite that changes a plot fact to fix a line. A line that needs a plot change to be fixed must stay vanilla, because the story must stay as written.
 
@@ -117,7 +120,7 @@ You judge one rewrite of a flagged line against its vanilla line. A change that 
 
 [romantic-partner-only] Reject a rewrite that changes an oath to a lord, a cause or a comrade under u3-devotion-as-vow. That rule covers devotion to a romantic partner or love interest only.
 
-[u4-stake-through-other] A passing rewrite returns a woman's own goal, fear or worth to her. Reject a rewrite that leaves the stake routed through a man.
+[u4-stake-through-other] A passing rewrite returns a character's own goal, fear or worth to them, whatever their gender. Reject a rewrite that leaves the stake routed through what another specific character thinks of them or needs from them.
 
 [u5-rivalry-over-one-person] A passing rewrite keeps the tension between the two women and makes it about them, not about the man. Reject a rewrite that removes the tension.
 
