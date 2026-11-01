@@ -1,8 +1,7 @@
 # Dialog edits
 
-`ffrd build` writes the `FFRS-Unstraightened_P.*` mod files from the TOML files in this
-directory. Every file under `dialog/` with a `.toml` extension is read, in any
-subdirectory.
+`ffrd build` packs the edits from the TOML files in this directory into a mod in `build/`.
+Every file under `dialog/` with a `.toml` extension is read, in any subdirectory.
 
 ## Format
 
@@ -48,3 +47,28 @@ text = "Example traveller, the lantern is now lit, brighter than before."
 - A field is missing or has the wrong type, or the file is not valid TOML.
 
 Dropped placeholders only produce a warning.
+
+## Build shapes
+
+`ffrd build` writes one of four shapes. Each one carries the same edits, in a different
+form. Use the default unless you have a reason to pick another.
+
+- **Default (target).** Writes `FFRS-Unstraightened_P.pak` with two files. The first is
+  `FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres`, which holds only the
+  edited lines, each under its namespace, key and the game's source-string hash. The second is
+  `FFRS/Config/UserGame.ini`, which lists that localization target ahead of the game's own
+  `Game` target, so the edits take precedence. The game was seen to honour this shape.
+- **`--full`.** Writes the same pak with `FFRS/Content/Localization/Game/en/Game.locres`, which
+  holds the whole English table with the edits applied. It replaces the game's table, so the
+  file carries every line of the game, including the edited ones. The game was seen to honour
+  this shape.
+- **`--partial`.** Writes `FFRS/Content/Localization/Game/en/Unstraightened.locres` with only
+  the edited lines. It is kept for comparison. The game was seen to ignore it for lines that
+  `Game.locres` already holds, and every line an edit can change is one of those.
+- **`--ue4ss`.** Writes no pak. It writes `build/UnstraightenedText/`, a UE4SS mod folder with
+  `Scripts/main.lua`, an empty `enabled.txt` and `edits.txt`, which lists each edit. The folder
+  needs UE4SS installed on the player's game. The mod registers the edits only when the game
+  runs in English (culture `en` or `en-*`). In any other language the game's own text stays.
+
+Use `--ue4ss` only for players who already run UE4SS, since the folder does nothing without it.
+Use `--full` when you want one table in the mod instead of a list of overrides.
