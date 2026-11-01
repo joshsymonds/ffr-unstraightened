@@ -197,7 +197,19 @@ def tunnel(remote_port: int) -> Iterator[int]:
         local = probe.getsockname()[1]
     try:
         proc = subprocess.Popen(
-            ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-L", f"127.0.0.1:{local}:127.0.0.1:{remote_port}", host()],
+            [
+                "ssh",
+                "-N",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-L",
+                f"127.0.0.1:{local}:127.0.0.1:{remote_port}",
+                host(),
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
