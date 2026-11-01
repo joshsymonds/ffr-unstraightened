@@ -489,12 +489,13 @@ def test_run_is_registered_last_with_its_help_and_no_tune_command(
 
 
 def test_run_no_jev_through_the_cli_exits_1_before_any_work_is_written(
-    repo: Path, made_up_lens: Path, capsys: pytest.CaptureFixture[str]
+    repo: Path, made_up_lens: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setenv("FFR_VANILLA", str(tmp_path / "no-vanilla"))
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["run", "--lens", RUN_LENS, "--no-jev"])
     assert exit_info.value.code == 1
-    assert capsys.readouterr().err == "ffrd: no scene source, classifier and renderer are bound yet\n"
+    assert capsys.readouterr().err == "ffrd: no vanilla text yet; run `ffrd extract`\n"
     assert not (repo / "work").exists()
     assert not (repo / "dialog").exists()
 

@@ -24,7 +24,6 @@ from ffrd.pipeline.stages import (
     Scene,
     SceneLine,
     Target,
-    bindings,
     cross_judge,
     draft,
     intent,
@@ -296,13 +295,6 @@ def test_batch_default_choice_uses_the_least_used_cswap_account(monkeypatch: pyt
     Batch(ask=ask).ask(claude.SONNET, [], SCREEN_SCHEMA)
 
     assert ask.calls[0][0] == 2
-
-
-def test_bindings_fails_until_a_later_effort_binds_them() -> None:
-    with pytest.raises(Fail) as excinfo:
-        bindings()
-
-    assert str(excinfo.value) == "no scene source, classifier and renderer are bound yet"
 
 
 # Made-up line-stage fixtures. Not game text.

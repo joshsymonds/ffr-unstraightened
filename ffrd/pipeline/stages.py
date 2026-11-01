@@ -1,16 +1,24 @@
 """Pipeline stages: Jev triage and the Sonnet screen per scene, then Opus intent, draft, scene judge and cross-scene judge and the voice render per line, each stored by its inputs and the lens text it reads; plus the per-batch Claude account and the injected scene, classifier and renderer interfaces."""
 
+import atexit
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
-from ffrd.game import Fail
+from ffrd import find
+from ffrd import scenes as scene_file
+from ffrd.game import Fail, entries, vanilla
 from ffrd.pipeline import accounts, claude
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.store import Store
+from ffrd.voice import classifier, remote
+from ffrd.voice import render as voice_render
+from ffrd.voice.evals import RENDER_SCORE_BAR
 
 
 @dataclass(frozen=True)
@@ -53,8 +61,90 @@ class Bindings:
     renderer: Renderer
 
 
+_SCENE_FAMILY = re.compile(r"ST_(?:DialogChoice|MainSummary|UnitDescription)(?:_|\Z)")
+
+
+def _texts(lang: str) -> dict[tuple[str, str], str]:
+    return {(namespace, key): text for namespace, key, text in entries(vanilla(lang))}
+
+
+def _line(namespace: str, key: str, speaker: str | None, english: str, japanese: dict[tuple[str, str], str]) -> SceneLine:
+    return SceneLine(
+        namespace=namespace,
+        key=key,
+        speaker=speaker,
+        english=english,
+        japanese=japanese.get((namespace, key), ""),
+        chapter=find.chapter(namespace),
+    )
+
+
+def _table_scenes(
+    rows: Sequence[scene_file.SceneLine], english: dict[tuple[str, str], str], japanese: dict[tuple[str, str], str]
+) -> list[Scene]:
+    grouped: dict[str, list[SceneLine]] = {}
+    for row in rows:
+        text = english.get((row.namespace, row.key))
+        if not text:
+            raise Fail(f"scene table line {row.namespace}/{row.key} has no English text; run `ffrd scenes`")
+        grouped.setdefault(row.scene, []).append(_line(row.namespace, row.key, row.speaker, text, japanese))
+    return [Scene(key=key, lines=tuple(lines)) for key, lines in grouped.items()]
+
+
+def _family_scenes(
+    english: dict[tuple[str, str], str], japanese: dict[tuple[str, str], str], table_refs: set[tuple[str, str]]
+) -> list[Scene]:
+    grouped: dict[str, list[SceneLine]] = {}
+    for (namespace, key), text in english.items():
+        if not text or (namespace, key) in table_refs or _SCENE_FAMILY.match(namespace) is None:
+            continue
+        grouped.setdefault(namespace, []).append(_line(namespace, key, None, text, japanese))
+    return [Scene(key=namespace, lines=tuple(lines)) for namespace, lines in grouped.items()]
+
+
+class _SceneTable:
+    scene_table = True
+
+    def scenes(self) -> list[Scene]:
+        english = _texts("en")
+        japanese = _texts("ja")
+        rows = scene_file.load()
+        found = _table_scenes(rows, english, japanese)
+        table_refs = {(row.namespace, row.key) for row in rows}
+        return found + _family_scenes(english, japanese, table_refs)
+
+
+class _Classifier:
+    threshold = RENDER_SCORE_BAR
+
+    def __init__(self, stack: ExitStack) -> None:
+        self._stack = stack
+        self._scorer: classifier.Scorer | None = None
+
+    def score(self, text: str) -> float:
+        if self._scorer is None:
+            remote.sync()
+            self._scorer = self._stack.enter_context(classifier.Scorer())
+        return self._scorer.score(text)
+
+
+class _Renderer:
+    def __init__(self, stack: ExitStack) -> None:
+        self._stack = stack
+        self._render: Callable[[str, str], str] | None = None
+
+    def render(self, speaker: str | None, text: str) -> str:
+        if speaker is None:
+            return text
+        if self._render is None:
+            self._render = self._stack.enter_context(voice_render.rendering())
+        return self._render(speaker, text)
+
+
 def bindings() -> Bindings:
-    raise Fail("no scene source, classifier and renderer are bound yet")
+    stack = ExitStack()
+    atexit.register(stack.close)
+    return Bindings(scenes=_SceneTable(), classifier=_Classifier(stack), renderer=_Renderer(stack))
 
 
 Ask = Callable[[str, Sequence[str], Mapping[str, Any]], dict[str, Any] | Unfinished | Rejected]
