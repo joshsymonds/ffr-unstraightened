@@ -180,12 +180,15 @@ def _screen_lines(scene: Scene) -> str:
     )
 
 
-def screen(store: Store, lens: Lens, scene: Scene, ask: Ask) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+def screen(
+    store: Store, lens: Lens, scene: Scene, cast: Sequence[Mapping[str, Any]], ask: Ask
+) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
     parts = [
         SCREEN_INSTRUCTIONS,
         f"Screen criteria:\n{lens.stage_text('screen')}",
         f"Triage questions:\n{lens.stage_text('triage')}",
         f"Scene lines:\n{_screen_lines(scene)}",
+        f"Cast:\n{_json(list(cast))}",
     ]
 
     def call() -> list[dict[str, Any]]:
@@ -199,7 +202,7 @@ def screen(store: Store, lens: Lens, scene: Scene, ask: Ask) -> dict[tuple[str, 
 
     lens_text = lens.stage_text("screen") + "\n" + lens.stage_text("triage")
     try:
-        flagged = store.run("screen", _inputs(scene), lens_text, call).value
+        flagged = store.run("screen", {**_inputs(scene), "cast": list(cast)}, lens_text, call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["reasons"]) for entry in flagged}
@@ -233,6 +236,7 @@ def rescreen(
     lens: Lens,
     scene: Scene,
     question: TriageQuestion,
+    cast: Sequence[Mapping[str, Any]],
     ask: Ask,
 ) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
     parts = [
@@ -240,6 +244,7 @@ def rescreen(
         f"Screen criteria:\n{lens.stage_text('screen')}",
         f"Triage question:\n{_json({'id': question.id, 'question': question.question})}",
         f"Scene lines:\n{_screen_lines(scene)}",
+        f"Cast:\n{_json(list(cast))}",
     ]
 
     def call() -> list[dict[str, str]]:
@@ -253,7 +258,7 @@ def rescreen(
                 raise _Unanswered(Rejected(f"flagged line {namespace}/{key} is not in scene {scene.key}"))
         return [{"namespace": namespace, "key": key} for namespace, key in refs]
 
-    inputs = {**_inputs(scene), "question": question.id, "text": question.question}
+    inputs = {**_inputs(scene), "cast": list(cast), "question": question.id, "text": question.question}
     try:
         flagged = store.run("rescreen", inputs, lens.stage_text("screen"), call).value
     except _Unanswered as unanswered:
@@ -297,12 +302,14 @@ def intent(
     line: SceneLine,
     reasons: Sequence[str],
     callbacks: Sequence[Mapping[str, Any]],
+    context: Mapping[str, Any],
     ask: Ask,
 ) -> str | Unfinished | Rejected:
     parts = [
         INTENT_INSTRUCTIONS,
         f"Intent rule:\n{lens.stage_text('intent')}",
         f"Callbacks:\n{_json(list(callbacks))}",
+        f"Arc context:\n{_json(context)}",
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
         f"Target line:\n{_json({**_line_ref(line), 'reasons': list(reasons)})}",
     ]
@@ -313,7 +320,13 @@ def intent(
             raise _Unanswered(answer)
         return answer["intent"]
 
-    inputs = {**_inputs(scene), "line": _line_ref(line), "reasons": list(reasons), "callbacks": list(callbacks)}
+    inputs = {
+        **_inputs(scene),
+        "line": _line_ref(line),
+        "reasons": list(reasons),
+        "callbacks": list(callbacks),
+        "context": context,
+    }
     try:
         return store.run("intent", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:
@@ -343,6 +356,7 @@ def draft(
     intent: str,
     callbacks: Sequence[Mapping[str, Any]],
     retry: str | None,
+    context: Mapping[str, Any],
     ask: Ask,
 ) -> tuple[str, ...] | Unfinished | Rejected:
     parts = [
@@ -350,6 +364,7 @@ def draft(
         f"Intent rule:\n{lens.stage_text('intent')}",
         f"Intent:\n{intent}",
         f"Callbacks:\n{_json(list(callbacks))}",
+        f"Arc context:\n{_json(context)}",
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
         f"Target line:\n{_json(_line_ref(line))}",
     ]
@@ -362,7 +377,14 @@ def draft(
             raise _Unanswered(answer)
         return list(answer["drafts"])
 
-    inputs = {**_inputs(scene), "line": _line_ref(line), "intent": intent, "callbacks": list(callbacks), "retry": retry}
+    inputs = {
+        **_inputs(scene),
+        "line": _line_ref(line),
+        "intent": intent,
+        "callbacks": list(callbacks),
+        "retry": retry,
+        "context": context,
+    }
     try:
         return tuple(store.run("draft", inputs, lens.stage_text("intent"), call).value)
     except _Unanswered as unanswered:
@@ -416,6 +438,7 @@ def judge(
     callbacks: Sequence[Mapping[str, Any]],
     reasons: Sequence[str],
     intent: str,
+    context: Mapping[str, Any],
     ask: Ask,
 ) -> Judgment | Unfinished | Rejected:
     parts = [
@@ -426,6 +449,7 @@ def judge(
         f"Target line:\n{_json({**_line_ref(line), 'english': line.english, 'japanese': line.japanese})}",
         f"Candidate:\n{text}",
         f"Callbacks:\n{_json(list(callbacks))}",
+        f"Arc context:\n{_json(context)}",
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
     ]
 
@@ -442,6 +466,7 @@ def judge(
         "callbacks": list(callbacks),
         "reasons": list(reasons),
         "intent": intent,
+        "context": context,
     }
     try:
         return Judgment(**store.run("judge", inputs, _judge_lens_text(lens), call).value)
@@ -473,6 +498,7 @@ def cross_judge(
     related: Sequence[SceneLine],
     reasons: Sequence[str],
     intent: str,
+    context: Mapping[str, Any],
     ask: Ask,
 ) -> bool | Unfinished | Rejected:
     parts = [
@@ -483,6 +509,7 @@ def cross_judge(
         f"Target line:\n{_json({**_line_ref(line), 'english': line.english})}",
         f"Candidate:\n{text}",
         f"Callbacks:\n{_json(list(callbacks))}",
+        f"Arc context:\n{_json(context)}",
         f"Related lines:\n{_json(_line_dicts(related))}",
     ]
 
@@ -499,6 +526,7 @@ def cross_judge(
         "related": _line_dicts(related),
         "reasons": list(reasons),
         "intent": intent,
+        "context": context,
     }
     try:
         return store.run("cross_judge", inputs, _judge_lens_text(lens), call).value

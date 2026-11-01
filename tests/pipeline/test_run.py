@@ -1118,3 +1118,81 @@ def test_run_command_scopes_by_the_bound_source_scene_table(
 
     outcome_text = (lens_repo / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
     assert (NS_STORY in outcome_text) is present
+
+
+# Made-up arcs and character notes for the arc context and cast. Not game text.
+ARC_A = "made-up-arc-a"
+ARC_B = "made-up-arc-b"
+NOTES_A = {"speaker": "made-up-speaker-a", "notes": "Made-up notes for speaker a. Not game text.", "gender": "made-up-gender-a"}
+NOTES_B = {"speaker": "made-up-speaker-b", "notes": "Made-up notes for speaker b. Not game text.", "gender": "made-up-gender-b"}
+ARC_A_ENTRY = {
+    "id": ARC_A,
+    "characters": ["made-up-speaker-a"],
+    "state": "Made-up state of arc a. Not game text.",
+    "beats": [{"line": {"namespace": NS_A, "key": "1"}, "kind": "setup", "earned": True}],
+}
+ARC_B_ENTRY = {
+    "id": ARC_B,
+    "characters": ["made-up-speaker-b"],
+    "state": "Made-up state of arc b. Not game text.",
+    "beats": [{"line": {"namespace": NS_B, "key": "1"}, "kind": "setup", "earned": True}],
+}
+BIBLE_ONE: dict[str, Any] = {**CHAPTER_ONE_BIBLE, "characters": [NOTES_A], "arcs": [ARC_A_ENTRY]}
+BIBLE_TWO: dict[str, Any] = {"characters": [NOTES_B], "facts": [], "callbacks": [], "arcs": [ARC_B_ENTRY]}
+LINE_SCHEMAS = (INTENT_SCHEMA, DRAFT_SCHEMA, JUDGE_SCHEMA, CROSS_SCHEMA)
+CAST_A = {**NOTES_A, "chapter": 1}
+CAST_B = {**NOTES_B, "chapter": 2}
+CAST_A_NOTES = {"chapter": 1, "gender": "made-up-gender-a", "notes": NOTES_A["notes"]}
+CAST_B_NOTES = {"chapter": 2, "gender": "made-up-gender-b", "notes": NOTES_B["notes"]}
+
+
+def _context_of(parts: Sequence[str]) -> dict[str, Any]:
+    return json.loads(_part(parts, "Arc context:\n"))
+
+
+def _arc_ids(parts: Sequence[str]) -> list[str]:
+    return [arc["id"] for arc in _context_of(parts)["arcs"]]
+
+
+def test_line_stages_receive_the_arcs_of_the_scene_speakers_and_the_target_speakers_notes(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.bible = {1: BIBLE_ONE, 2: BIBLE_TWO}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    expected_arcs = {NS_A: [ARC_A], NS_B: [ARC_B], NS_C: []}
+    expected_notes = {(NS_A, "1"): [CAST_A_NOTES], (NS_A, "3"): [CAST_A_NOTES], (NS_B, "1"): [CAST_B_NOTES]}
+    line_calls = [(schema, parts) for _, parts, schema in claude.calls if schema in LINE_SCHEMAS]
+
+    covered = {(LINE_SCHEMAS.index(schema), _target(parts)) for schema, parts in line_calls}
+    # Cross-judge runs only on the callback line, so the second scene's line reaches intent, draft and judge alone.
+    assert {(index, (NS_A, "1")) for index in range(len(LINE_SCHEMAS))} | {(index, (NS_B, "1")) for index in range(3)} <= covered
+    for _, parts in line_calls:
+        target = _target(parts)
+        assert _arc_ids(parts) == expected_arcs[target[0]]
+        assert _context_of(parts)["characters"] == expected_notes.get(target, [])
+
+
+def test_screen_receives_the_scene_cast_entries_of_its_speakers(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.bible = {1: BIBLE_ONE, 2: BIBLE_TWO}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    screens = [parts for _, parts, schema in claude.calls if schema is SCREEN_SCHEMA]
+    scene_a = next(parts for parts in screens if any(line["namespace"] == NS_A for line in json.loads(_part(parts, "Scene lines:\n"))))
+    scene_b = next(parts for parts in screens if any(line["namespace"] == NS_B for line in json.loads(_part(parts, "Scene lines:\n"))))
+
+    assert json.loads(_part(scene_a, "Cast:\n")) == [CAST_A]
+    assert json.loads(_part(scene_b, "Cast:\n")) == [CAST_B]
+
+
+def test_rescreen_receives_the_scene_cast(tmp_path: Path) -> None:
+    scene = Scene(
+        "made-up-scene-recheck",
+        (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1), _line(NS_A, "3", "made-up-speaker-a", EN_A3, 1)),
+    )
+    claude = _claude()
+    claude.bible = {1: BIBLE_ONE}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(scene,))
+    rescreens = [parts for _, parts, schema in claude.calls if schema is RESCREEN_SCHEMA]
+
+    assert rescreens
+    for parts in rescreens:
+        assert json.loads(_part(parts, "Cast:\n")) == [CAST_A]

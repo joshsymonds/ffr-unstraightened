@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from ffrd.find import BARE_KEY, toml_string
 from ffrd.game import Fail, natural, repo_root, vanilla_hash
-from ffrd.pipeline import bible, claude, stages
+from ffrd.pipeline import arcs, bible, claude, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, gate_line
@@ -163,6 +163,7 @@ class _Context:
     run_id: str
     jev: Triage | None
     bibles: Sequence[Mapping[str, Any]]
+    arcs: Sequence[Mapping[str, Any]]
     lines: Mapping[tuple[str, str], SceneLine]
 
 
@@ -183,6 +184,10 @@ def _chapters(scenes: Sequence[Scene]) -> list[tuple[int | None, list[bible.Line
     numbered: list[tuple[int | None, list[bible.Line]]] = [(number, list(seen.values())) for number, seen in sorted(by_chapter.items())]
     loose = [(None, list(unplaced[namespace].values())) for namespace in sorted(unplaced, key=lambda ns: (natural(ns), ns))]
     return numbered + loose
+
+
+def _speakers(scene: Scene) -> set[str | None]:
+    return {line.speaker for line in scene.lines}
 
 
 def _first_lines(scenes: Sequence[Scene]) -> dict[tuple[str, str], SceneLine]:
@@ -227,11 +232,12 @@ def _candidates(
     line: SceneLine,
     intended: str,
     callbacks: Sequence[Mapping[str, Any]],
+    context: Mapping[str, Any],
     retry: str | None,
     ask: Ask,
     origin: dict[str, WriterName],
 ) -> Sequence[Candidate] | Unfinished:
-    drafted = stages.draft(ctx.store, ctx.lens, scene, line, intended, callbacks, retry, ask)
+    drafted = stages.draft(ctx.store, ctx.lens, scene, line, intended, callbacks, retry, context, ask)
     if isinstance(drafted, Unfinished):
         return drafted
     texts = () if isinstance(drafted, Rejected) else drafted
@@ -257,15 +263,16 @@ def _judge(
     candidate: Candidate,
     reasons: tuple[str, ...],
     intent: str,
+    context: Mapping[str, Any],
     ask: Ask,
 ) -> Judgment | Unfinished | Rejected:
-    verdict = stages.judge(ctx.store, ctx.lens, scene, line, candidate.text, callbacks, reasons, intent, ask)
+    verdict = stages.judge(ctx.store, ctx.lens, scene, line, candidate.text, callbacks, reasons, intent, context, ask)
     if not isinstance(verdict, Judgment) or not callbacks:
         return verdict
     if not (verdict.meaning and verdict.plot and verdict.minimal_change and verdict.callback and verdict.fixed):
         return verdict
     consistent = stages.cross_judge(
-        ctx.store, ctx.lens, line, candidate.text, callbacks, _related(ctx, line, callbacks), reasons, intent, ask
+        ctx.store, ctx.lens, line, candidate.text, callbacks, _related(ctx, line, callbacks), reasons, intent, context, ask
     )
     if isinstance(consistent, Unfinished | Rejected):
         return consistent
@@ -280,16 +287,17 @@ def _line(
     ask: Ask,
 ) -> tuple[Outcome, Change | None]:
     callbacks = bible.touching(ctx.bibles, line.namespace, line.key)
-    intended = stages.intent(ctx.store, ctx.lens, scene, line, reasons, callbacks, ask)
+    context = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
+    intended = stages.intent(ctx.store, ctx.lens, scene, line, reasons, callbacks, context, ask)
     if not isinstance(intended, str):
         return _outcome(line, reasons, "unfinished"), None
     origin: dict[str, WriterName] = {}
 
     def write(retry: str | None) -> Sequence[Candidate] | Unfinished:
-        return _candidates(ctx, scene, line, intended, callbacks, retry, ask, origin)
+        return _candidates(ctx, scene, line, intended, callbacks, context, retry, ask, origin)
 
     def judge_candidate(candidate: Candidate) -> Judgment | Unfinished | Rejected:
-        return _judge(ctx, scene, line, callbacks, candidate, reasons, intended, ask)
+        return _judge(ctx, scene, line, callbacks, candidate, reasons, intended, context, ask)
 
     verdict = gate_line(write, classify=ctx.classifier.score, threshold=ctx.classifier.threshold, judge=judge_candidate)
     if isinstance(verdict, Kept):
@@ -330,7 +338,8 @@ def _join(
 
 
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall]:
-    flagged = stages.screen(ctx.store, ctx.lens, scene, ask)
+    cast = arcs.cast(ctx.bibles, _speakers(scene))
+    flagged = stages.screen(ctx.store, ctx.lens, scene, cast, ask)
     if not isinstance(flagged, dict):
         return _every_line(scene, "unfinished"), [], _Recall()
     recall = _Recall()
@@ -342,7 +351,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
             if probabilities[question.id] < RECHECK_AT or any(question.id in reasons for reasons in flagged.values()):
                 continue
             recall.disagreements[question.id] += 1
-            rechecked = stages.rescreen(ctx.store, ctx.lens, scene, question, ask)
+            rechecked = stages.rescreen(ctx.store, ctx.lens, scene, question, cast, ask)
             if not isinstance(rechecked, dict):
                 return _every_line(scene, "unfinished"), [], _Recall()
             if rechecked:
@@ -398,6 +407,7 @@ def run(
         run_id=run_id,
         jev=jev,
         bibles=built,
+        arcs=arcs.consolidate(built),
         lines=_first_lines(scenes),
     )
     outcomes: list[Outcome] = []
