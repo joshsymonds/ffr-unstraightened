@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -272,6 +273,30 @@ def test_interrupted_wait_leaves_the_job_running_to_finish(remote_host: Path, tm
     assert exit_file.read_text(encoding="ascii") == "0\n"
     assert (exit_file.parent / "out.log").read_text(encoding="utf-8") == "SYNTH-STEP 1\nSYNTH-STEP 2\n"
     assert starts.read_text(encoding="ascii") == "start\n"
+
+
+# Long enough that the first poll always lands before the shimmed setsid has made the job's process group.
+SLOW_SETSID_SECONDS = 1
+
+
+def test_run_does_not_poll_before_a_slow_setsid_has_made_the_job_group(
+    remote_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_setsid = shutil.which("setsid")
+    assert real_setsid is not None
+    shim_dir = tmp_path / "slow"
+    shim_dir.mkdir()
+    shim = shim_dir / "setsid"
+    shim.write_text(f'#!/bin/sh\nsleep {SLOW_SETSID_SECONDS}\nexec {real_setsid} "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+    stand_in_job(monkeypatch, "echo SYNTH-STEP 1")
+    out = Terminal()
+    monkeypatch.setattr("sys.stdout", out)
+
+    remote.run(RUN_ARGV)
+
+    assert out.getvalue() == "SYNTH-STEP 1\n"
 
 
 def test_rerun_while_the_job_runs_reattaches_without_a_second_copy(

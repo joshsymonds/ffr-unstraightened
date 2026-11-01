@@ -31,6 +31,8 @@ DEVENV = "env -C tools/voice devenv shell --profile cuda --"
 CLEAR_VOICE = "mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {} +"
 EXCLUDED_PARTS = frozenset({"__pycache__", ".devenv"})
 WAIT_SECONDS = 30
+# A fresh start waits up to WAIT_SECONDS, in 0.1 s ticks, for its job's process group or its exit file.
+START_TICKS = WAIT_SECONDS * 10
 # Each poll of a remote job is one short ssh; a poll reports whether the job finished with one of these statuses.
 POLL_SECONDS = 5
 POLL_FINISHED = 0
@@ -109,7 +111,10 @@ def run(argv: Sequence[str]) -> None:
     start = (
         f"{_prefix()} && mkdir -p {job} && {{ if {alive}; then :; else "
         f"rm -f {exit_file} {exit_file}.tmp && : > {out} && "
-        f"{{ setsid nohup sh -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null & echo $! > {pid}; }}; fi; }}"
+        f"{{ setsid nohup sh -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null & echo $! > {pid}; }} && "
+        # The background child has not called setsid yet, so its process group may not exist; wait until it does.
+        f"i=0 && while [ ! -f {exit_file} ] && ! kill -0 -- -$(cat {pid}) 2>/dev/null && [ $i -lt {START_TICKS} ]; "
+        f"do sleep 0.1; i=$((i+1)); done; fi; }}"
     )
     _require_ok(_ssh(start, stdin=subprocess.DEVNULL).returncode, "command")
     offset = 0
