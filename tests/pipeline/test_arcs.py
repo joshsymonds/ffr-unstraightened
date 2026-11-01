@@ -1,5 +1,8 @@
 import copy
 import json
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +24,7 @@ from ffrd.pipeline.arcs import (
 )
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.stages import Scene, SceneLine
+from ffrd.pipeline.stages import Ask, Scene, SceneLine
 from ffrd.pipeline.store import Store
 
 # Made-up bibles and arcs. Not game text.
@@ -272,6 +275,16 @@ PLAIN_ARC = {
     "characters": ["Corr"],
     "beats": [{"line": {"namespace": "ST_C00_001_01", "key": "5"}}],
 }
+ARC_BRIN = {
+    "id": "made-up-arc-brin. Not game text.",
+    "characters": ["Brin"],
+    "beats": [{"line": {"namespace": "ST_C01_001_01", "key": "2"}}],
+}
+ARC_THIRD = {
+    "id": "made-up-arc-third. Not game text.",
+    "characters": ["Ash"],
+    "beats": [{"line": {"namespace": "ST_C02_001_01", "key": "1"}}],
+}
 CORR_ARC = {"id": "made-up-corr-arc. Not game text.", "characters": ["Corr"], "beats": []}
 UNKNOWN_REF = {"namespace": "ST_C99_999_99", "key": "9"}
 LENS = Lens(
@@ -328,7 +341,41 @@ class Fake:
         return answer
 
 
-def _judge(store: Store, ask: Fake, arcs: list[dict[str, Any]]) -> Verdicts:
+def _arc_id(parts: Sequence[str]) -> str:
+    return json.loads(parts[2].removeprefix("Arc:\n"))["id"]
+
+
+class ArcFake:
+    """Stands in for the Opus call when arcs are judged concurrently: each arc's passes take that arc's queued answers in the arc's own call order, chosen by the arc named in the prompt. Answers that are exceptions are raised. Records every call's arguments."""
+
+    def __init__(self, answers: Mapping[str, Sequence[Any]]) -> None:
+        self.answers = {arc_id: list(queued) for arc_id, queued in answers.items()}
+        self.calls: list[tuple[Any, ...]] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, *args: Any) -> Any:
+        arc_id = _arc_id(args[1])
+        with self._lock:
+            self.calls.append(args)
+            answer = self.answers[arc_id].pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def parts_for(self, arc: Mapping[str, Any]) -> list[list[str]]:
+        return [parts for _, parts, _ in self.calls if _arc_id(parts) == arc["id"]]
+
+
+@contextmanager
+def _concurrency(limit: int) -> Iterator[None]:
+    claude.set_concurrency(limit)
+    try:
+        yield
+    finally:
+        claude.set_concurrency(claude.DEFAULT_CONCURRENCY)
+
+
+def _judge(store: Store, ask: Ask, arcs: list[dict[str, Any]]) -> Verdicts:
     return judge(store, LENS, arcs, SCENES, REWRITES, ask)
 
 
@@ -398,16 +445,58 @@ def test_holds_on_recheck_reverts_nothing(tmp_path: Path) -> None:
     assert len(ask.calls) == 2
 
 
-def test_second_arc_sees_first_arc_reverts(tmp_path: Path) -> None:
-    ask = Fake(_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE), _answer(True))
+def test_each_arc_is_judged_against_the_full_rewrites_whatever_other_arcs_revert(tmp_path: Path) -> None:
+    ask = ArcFake({ARC["id"]: [_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE)], ARC_TWO["id"]: [_answer(True)]})
 
-    assert _judge(Store(tmp_path), ask, [ARC, ARC_TWO]) == Verdicts(frozenset({_ref(LINE_ASH_ONE)}), frozenset())
-    assert len(ask.calls) == 3
+    with _concurrency(2):
+        assert _judge(Store(tmp_path), ask, [ARC, ARC_TWO]) == Verdicts(frozenset({_ref(LINE_ASH_ONE)}), frozenset())
 
-    _, second_parts, _ = ask.calls[2]
-    assert second_parts[3] == "Arc lines:\n" + _j(
-        _line_dicts([LINE_ASH_ONE, LINE_ASH_TWO], {("ST_C02_001_01", "1"): REWRITES[("ST_C02_001_01", "1")]})
-    )
+    (second_parts,) = ask.parts_for(ARC_TWO)
+    assert second_parts[3] == "Arc lines:\n" + _j(_line_dicts([LINE_ASH_ONE, LINE_ASH_TWO], REWRITES))
+
+
+def test_arcs_are_judged_at_once_and_never_beyond_the_concurrency_bound(tmp_path: Path) -> None:
+    arcs = [ARC, ARC_TWO, ARC_BRIN, ARC_THIRD]
+    fake = ArcFake({arc["id"]: [_answer(True)] for arc in arcs})
+    gate = threading.Barrier(2, timeout=10)
+    lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+
+    def ask(*args: Any) -> Any:
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            gate.wait()
+            return fake(*args)
+        finally:
+            with lock:
+                in_flight -= 1
+
+    with _concurrency(2):
+        assert _judge(Store(tmp_path), ask, arcs) == Verdicts(frozenset(), frozenset())
+
+    assert peak == 2
+    assert len(fake.calls) == 4
+
+
+@pytest.mark.parametrize("limit", [1, 2], ids=["sequential", "concurrent"])
+def test_verdicts_are_the_same_whatever_order_arcs_come_in_or_finish(tmp_path: Path, limit: int) -> None:
+    expected = Verdicts(frozenset({_ref(LINE_ASH_ONE), _ref(LINE_BRIN_ONE)}), frozenset())
+    orders = [[ARC, ARC_BRIN, ARC_TWO], [ARC_TWO, ARC_BRIN, ARC]]
+
+    for index, arcs in enumerate(orders):
+        ask = ArcFake(
+            {
+                ARC["id"]: [_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE)],
+                ARC_BRIN["id"]: [_answer(False, LINE_BRIN_ONE), _answer(False, LINE_BRIN_ONE)],
+                ARC_TWO["id"]: [_answer(True)],
+            }
+        )
+        with _concurrency(limit):
+            assert _judge(Store(tmp_path / f"order-{index}"), ask, arcs) == expected
 
 
 @pytest.mark.parametrize(
@@ -427,11 +516,35 @@ def test_failed_pass_puts_every_changed_line_of_the_arc_in_unfinished(tmp_path: 
     assert _judge(Store(tmp_path), ask, [ARC]) == Verdicts(frozenset(), frozenset({_ref(LINE_ASH_ONE), _ref(LINE_ASH_TWO)}))
 
 
-def test_unfinished_keys_are_removed_for_later_arcs(tmp_path: Path) -> None:
-    ask = Fake(Unfinished("Made-up unfinished detail. Not game text."))
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_arc_is_unfinished_alone_and_a_rerun_asks_only_that_arc(tmp_path: Path, failure: Unfinished | Rejected) -> None:
+    arcs = [ARC, ARC_BRIN]
+    ask = ArcFake({ARC["id"]: [failure], ARC_BRIN["id"]: [_answer(False, LINE_BRIN_ONE), _answer(False, LINE_BRIN_ONE)]})
 
-    assert _judge(Store(tmp_path), ask, [ARC, ARC_TWO]) == Verdicts(frozenset(), frozenset({_ref(LINE_ASH_ONE), _ref(LINE_ASH_TWO)}))
-    assert len(ask.calls) == 1
+    with _concurrency(2):
+        assert _judge(Store(tmp_path), ask, arcs) == Verdicts(
+            frozenset({_ref(LINE_BRIN_ONE)}), frozenset({_ref(LINE_ASH_ONE), _ref(LINE_ASH_TWO)})
+        )
+
+    rerun = ArcFake({ARC["id"]: [_answer(True)]})
+    with _concurrency(2):
+        assert _judge(Store(tmp_path), rerun, arcs) == Verdicts(frozenset({_ref(LINE_BRIN_ONE)}), frozenset())
+    assert len(rerun.calls) == 1
+
+
+def test_crashed_arc_keeps_the_other_arcs_saved_results(tmp_path: Path) -> None:
+    ask = ArcFake({ARC["id"]: [RuntimeError("Made-up crash detail. Not game text.")], ARC_BRIN["id"]: [_answer(True)]})
+
+    with _concurrency(2), pytest.raises(RuntimeError, match="Made-up crash detail"):
+        _judge(Store(tmp_path), ask, [ARC, ARC_BRIN])
+
+    rerun = ArcFake({ARC["id"]: [_answer(True)]})
+    assert _judge(Store(tmp_path), rerun, [ARC, ARC_BRIN]) == Verdicts(frozenset(), frozenset())
+    assert len(rerun.calls) == 1
 
 
 def test_fresh_store_on_same_root_returns_stored_verdicts_without_asking(tmp_path: Path) -> None:

@@ -129,24 +129,29 @@ def judge(
     rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
 ) -> Verdicts:
-    reverted: set[tuple[str, str]] = set()
-    unfinished: set[tuple[str, str]] = set()
-    standing = dict(rewrites)
-    for arc in arcs:
-        arc_lines = lines(arc, scenes, standing)
-        changed = frozenset(_ref(line) for line in arc_lines if _ref(line) in standing)
-        if not changed:
-            continue
-        outcome = _arc(store, lens, arc, arc_lines, standing, ask)
-        if isinstance(outcome, Unfinished | Rejected):
-            unfinished |= changed
-            dropped = changed
-        else:
-            reverted |= outcome
-            dropped = outcome
-        for ref in dropped:
-            del standing[ref]
-    return Verdicts(frozenset(reverted), frozenset(unfinished))
+    verdicts = claude.fan_out(lambda arc: _judge_arc(store, lens, arc, scenes, rewrites, ask), arcs)
+    return Verdicts(
+        frozenset(ref for verdict in verdicts for ref in verdict.reverted),
+        frozenset(ref for verdict in verdicts for ref in verdict.unfinished),
+    )
+
+
+def _judge_arc(
+    store: Store,
+    lens: Lens,
+    arc: Mapping[str, Any],
+    scenes: Sequence[Scene],
+    rewrites: Mapping[tuple[str, str], str],
+    ask: Ask,
+) -> Verdicts:
+    arc_lines = lines(arc, scenes, rewrites)
+    changed = frozenset(_ref(line) for line in arc_lines if _ref(line) in rewrites)
+    if not changed:
+        return Verdicts(frozenset(), frozenset())
+    outcome = _arc(store, lens, arc, arc_lines, rewrites, ask)
+    if isinstance(outcome, Unfinished | Rejected):
+        return Verdicts(frozenset(), changed)
+    return Verdicts(outcome, frozenset())
 
 
 def _arc(
