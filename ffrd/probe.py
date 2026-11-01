@@ -3,8 +3,8 @@
 `ffrd probe` checks which text shape FFR honours. It refuses while FFR runs on the Steam Deck or on the gnomon host,
 and when the gnomon build is not the vanilla build. For each shape it packs one edited line of PROBE_KEY, with .utoc
 and .ucas copied from the host's global container, installs it in the host's Paks/~mods and runs the probe mod. The
-partial shape is tried first and the full shape only when the partial one is not honoured. It prints only keys and
-hashes, never the probe text.
+target shape (the default build shape) is tried first and the full shape only when the target one is not honoured.
+`--shape` runs one shape alone: target, full or partial. It prints only keys and hashes, never the probe text.
 
 `ffrd usmap` dumps the game's mappings with the usmap mod and saves them as Mappings.usmap in the vanilla folder.
 """
@@ -12,7 +12,6 @@ hashes, never the probe text.
 import argparse
 import re
 import secrets
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -20,14 +19,14 @@ from pathlib import Path
 from pylocres import LocresFile
 
 from ffrd import deck, gnomon
-from ffrd.build import REPAK, partial_table
-from ffrd.game import LOCRES, Fail, repo_root, vanilla, vanilla_dir, vanilla_hash
+from ffrd.build import PAK_SHAPES, pack, pak_files
+from ffrd.game import Fail, repo_root, vanilla, vanilla_dir, vanilla_hash
 
 PROBE_KEY = ("ST_UI_TitleMenu", "UI_Title_Copyright")
 PROBE_MOD = "FFRS-UnstraightenedProbe_P"
 MOD_DIR = "ue4ss/UnstraightenedProbe"
 LOG = "probe.log"
-SHAPES = ("partial", "full")
+SHAPES = ("target", "full")
 USMAP_MOD = "ue4ss/UnstraightenedUsmap"
 USMAP_LOG = "usmap.log"
 USMAP_NAME = "Mappings.usmap"
@@ -56,16 +55,8 @@ def _check_build() -> None:
         raise Fail(f"gnomon on {gnomon.host()} runs build {remote}, not vanilla build {local}; run `ffrd extract` first")
 
 
-def _pack(table: LocresFile, name: str, out: Path, fetched: dict[str, bytes]) -> list[Path]:
-    stage = out / "stage"
-    locres_path = stage / LOCRES / "en" / name
-    locres_path.parent.mkdir(parents=True)
-    locres_path.write_bytes(table.to_binary())
-    pak = out / f"{PROBE_MOD}.pak"
-    subprocess.run(
-        [REPAK, "pack", "-q", "--version", "V11", "--compression", "Zlib", "-m", "../../../", str(stage), str(pak)],
-        check=True,
-    )
+def _pack(shape: str, en: LocresFile, text: str, out: Path, fetched: dict[str, bytes]) -> list[Path]:
+    pak = pack(pak_files(shape, en, {PROBE_KEY: text}), out, PROBE_MOD)
     files = [pak]
     for ext in ("utoc", "ucas"):
         path = out / f"{PROBE_MOD}.{ext}"
@@ -106,13 +97,8 @@ def _run_shape(shape: str, fetched: dict[str, bytes]) -> bool:
     if entry is None:
         raise Fail(f"the probe key {ns},{key} is not in the vanilla text")
     vanilla_digest = vanilla_hash(entry.translation)
-    if shape == "partial":
-        name, table = "Unstraightened.locres", partial_table(en, {PROBE_KEY: text})
-    else:
-        entry.translation = text
-        name, table = "Game.locres", en
     with tempfile.TemporaryDirectory() as tmp:
-        files = _pack(table, name, Path(tmp), fetched)
+        files = _pack(shape, en, text, Path(tmp), fetched)
         lines = _launch(files)
     return _verdict(shape, lines, vanilla_hash(text), vanilla_digest)
 
@@ -123,11 +109,14 @@ def cmd_probe(args: argparse.Namespace) -> None:
         raise Fail(f"FINAL FANTASY RESONANCE is running on {gnomon.host()}; refusing to probe")
     _check_build()
     fetched = {ext: gnomon.fetch(f"{gnomon.paks()}/global.{ext}") for ext in ("utoc", "ucas")}
-    for shape in SHAPES:
+    shapes = (args.shape,) if args.shape else SHAPES
+    for shape in shapes:
         if _run_shape(shape, fetched):
             print(f"shape honoured: {shape}")
             return
-    raise Fail("neither shape is honoured by the game")
+    if args.shape:
+        raise Fail(f"shape {args.shape} is not honoured by the game")
+    raise Fail("no shape is honoured by the game")
 
 
 def _newest_usmap(host: str) -> str | None:
@@ -158,6 +147,11 @@ def cmd_usmap(args: argparse.Namespace) -> None:
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     probe = subparsers.add_parser("probe", help="run the UE4SS probe on the gnomon host to see which text shape FFR honours")
+    probe.add_argument(
+        "--shape",
+        choices=PAK_SHAPES,
+        help="probe only this shape: target, full or partial (default: target, then full, stopping at the first honoured)",
+    )
     probe.set_defaults(fn=cmd_probe)
     usmap = subparsers.add_parser("usmap", help="dump the game's usmap on the gnomon host and save it as Mappings.usmap in vanilla")
     usmap.set_defaults(fn=cmd_usmap)

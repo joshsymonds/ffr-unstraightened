@@ -17,6 +17,7 @@ import pytest
 from pylocres import LocresFile
 
 from ffrd import cli, deck, gnomon, probe
+from ffrd.build import USER_GAME_TEXT
 from ffrd.game import APP_ID, LOCRES, Fail, vanilla_hash
 
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -520,6 +521,8 @@ DECK = "synthetic-deck"
 MODS = f"{GAME}/FFRS/Content/Paks/~mods"
 PROBE_PAK = "FFRS-UnstraightenedProbe_P.pak"
 PROBE_FILES = [PROBE_PAK, "FFRS-UnstraightenedProbe_P.utoc", "FFRS-UnstraightenedProbe_P.ucas"]
+TARGET_LOCRES = "FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres"
+USER_GAME_INI = "FFRS/Config/UserGame.ini"
 PROBE_KEY_SYNTH = ("ST_C01_001_01", "10")
 OTHER_KEY = ("ST_C01_001_01", "2")
 SYNTH_VANILLA = "Synthetic line ten."
@@ -541,9 +544,9 @@ def vanilla_line(_text: str) -> list[str]:
     return [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"]
 
 
-def run_ffrd_probe() -> int:
+def run_ffrd_probe(*args: str) -> int:
     try:
-        cli.main(["probe"])
+        cli.main(["probe", *args])
     except SystemExit as exit_info:
         assert isinstance(exit_info.code, int)
         return exit_info.code
@@ -554,16 +557,29 @@ def translations(table: LocresFile) -> dict[tuple[str, str], str]:
     return {(ns.name, key): ns[key].translation for ns in table for key in ns.entrys}
 
 
-def packed_locres(pak: bytes, tmp_path: Path, name: str) -> LocresFile:
-    """Read one English locres back out of a probe pak with repak get."""
+def packed_file(pak: bytes, tmp_path: Path, rel: str) -> Path:
+    """Write one file out of a probe pak with repak get, under its own name in tmp_path."""
     pak_path = tmp_path / PROBE_PAK
     pak_path.write_bytes(pak)
-    data = subprocess.run(["repak", "get", str(pak_path), f"{LOCRES}/en/{name}"], check=True, capture_output=True).stdout
-    path = tmp_path / name
+    data = subprocess.run(["repak", "get", str(pak_path), rel], check=True, capture_output=True).stdout
+    path = tmp_path / Path(rel).name
     path.write_bytes(data)
+    return path
+
+
+def packed_locres(pak: bytes, tmp_path: Path, name: str) -> LocresFile:
+    """Read one English locres back out of a probe pak."""
     table = LocresFile()
-    table.read(str(path))
+    table.read(str(packed_file(pak, tmp_path, f"{LOCRES}/en/{name}")))
     return table
+
+
+def packed_paths(pak: bytes, tmp_path: Path) -> list[str]:
+    """Every path inside a probe pak, as repak list prints them."""
+    pak_path = tmp_path / PROBE_PAK
+    pak_path.write_bytes(pak)
+    out = subprocess.run(["repak", "list", str(pak_path)], check=True, capture_output=True, text=True, encoding="utf-8").stdout
+    return out.splitlines()
 
 
 class ProbeRemote:
@@ -643,20 +659,18 @@ def make_probe(fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     return make
 
 
-def test_partial_honoured_exits_0_after_one_launch(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+def test_target_honoured_exits_0_after_one_launch(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
     fake = make_probe([edited_line])
     assert run_ffrd_probe() == 0
     assert len(fake.runs) == 1
     marker = vanilla_hash(fake.texts[0])
     vanilla_digest = vanilla_hash(SYNTH_VANILLA)
     assert capsys.readouterr().out == (
-        f"partial: ST_C01_001_01,10 marker {marker} vanilla {vanilla_digest} seen {marker}: honoured\nshape honoured: partial\n"
+        f"target: ST_C01_001_01,10 marker {marker} vanilla {vanilla_digest} seen {marker}: honoured\nshape honoured: target\n"
     )
 
 
-def test_partial_not_honoured_then_full_honoured_exits_0(
-    make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_target_not_honoured_then_full_honoured_exits_0(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
     fake = make_probe([vanilla_line, edited_line])
     assert run_ffrd_probe() == 0
     assert len(fake.runs) == 2
@@ -664,7 +678,7 @@ def test_partial_not_honoured_then_full_honoured_exits_0(
     vanilla_digest = vanilla_hash(SYNTH_VANILLA)
     out = capsys.readouterr().out
     assert (
-        f"partial: ST_C01_001_01,10 marker {vanilla_hash(fake.texts[0])} vanilla {vanilla_digest} seen {vanilla_digest}: not honoured\n"
+        f"target: ST_C01_001_01,10 marker {vanilla_hash(fake.texts[0])} vanilla {vanilla_digest} seen {vanilla_digest}: not honoured\n"
         in out
     )
     assert out.endswith("shape honoured: full\n")
@@ -674,7 +688,29 @@ def test_neither_shape_honoured_exits_1(make_probe: Callable[..., ProbeRemote], 
     fake = make_probe([vanilla_line, vanilla_line])
     assert run_ffrd_probe() == 1
     assert len(fake.runs) == 2
-    assert capsys.readouterr().err == "ffrd: neither shape is honoured by the game\n"
+    assert capsys.readouterr().err == "ffrd: no shape is honoured by the game\n"
+
+
+def test_partial_shape_launches_once_and_carries_only_the_probe_line(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe("--shape", "partial") == 0
+    assert len(fake.runs) == 1
+    table = packed_locres(fake.puts[0][1][PROBE_PAK], tmp_path, "Unstraightened.locres")
+    assert translations(table) == {PROBE_KEY_SYNTH: fake.texts[0]}
+
+
+def test_full_shape_not_honoured_exits_1(make_probe: Callable[..., ProbeRemote], capsys: pytest.CaptureFixture[str]) -> None:
+    fake = make_probe([vanilla_line])
+    assert run_ffrd_probe("--shape", "full") == 1
+    assert len(fake.runs) == 1
+    assert capsys.readouterr().err == "ffrd: shape full is not honoured by the game\n"
+
+
+def test_unknown_shape_exits_2_before_any_launch(make_probe: Callable[..., ProbeRemote]) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe("--shape", "bogus") == 2
+    assert fake.status_calls == []
+    assert fake.runs == []
 
 
 @pytest.mark.parametrize(
@@ -769,11 +805,20 @@ def test_paks_are_installed_beside_the_global_container_copies(make_probe: Calla
     assert files["FFRS-UnstraightenedProbe_P.ucas"] == f"{GAME}/FFRS/Content/Paks/global.ucas".encode()
 
 
-def test_partial_pak_carries_only_the_probe_line(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+def test_target_pak_lists_exactly_the_two_target_paths(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
     fake = make_probe([edited_line])
     assert run_ffrd_probe() == 0
-    table = packed_locres(fake.puts[0][1][PROBE_PAK], tmp_path, "Unstraightened.locres")
+    assert sorted(packed_paths(fake.puts[0][1][PROBE_PAK], tmp_path)) == sorted([TARGET_LOCRES, USER_GAME_INI])
+
+
+def test_target_pak_carries_only_the_probe_line_and_user_game_text(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    pak = fake.puts[0][1][PROBE_PAK]
+    table = LocresFile()
+    table.read(str(packed_file(pak, tmp_path, TARGET_LOCRES)))
     assert translations(table) == {PROBE_KEY_SYNTH: fake.texts[0]}
+    assert packed_file(pak, tmp_path, USER_GAME_INI).read_bytes() == USER_GAME_TEXT.encode("utf-8")
 
 
 def test_full_pak_replaces_the_probe_line_and_keeps_the_rest(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
@@ -817,7 +862,7 @@ def test_probe_key_absent_from_vanilla_exits_1(
 @pytest.mark.parametrize(
     ("responders", "code"),
     [
-        pytest.param([edited_line], 0, id="partial-honoured"),
+        pytest.param([edited_line], 0, id="target-honoured"),
         pytest.param([vanilla_line, edited_line], 0, id="full-honoured"),
         pytest.param([vanilla_line, vanilla_line], 1, id="neither"),
         pytest.param([Fail("synthetic launch failure")], 1, id="launch-fails"),
