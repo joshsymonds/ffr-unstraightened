@@ -1,6 +1,7 @@
 import pytest
 
-from ffrd.pipeline.scope import in_scope
+from ffrd.pipeline.scope import in_scope, scoped
+from ffrd.pipeline.stages import Scene, SceneLine
 
 # Made-up namespaces only. Not game text.
 IN_SCOPE: tuple[str, ...] = (
@@ -45,3 +46,67 @@ def test_in_scope_namespaces_are_in_scope(namespace: str) -> None:
 @pytest.mark.parametrize("namespace", OUT_OF_SCOPE)
 def test_other_namespaces_are_out_of_scope(namespace: str) -> None:
     assert in_scope(namespace) is False
+
+
+def _line(namespace: str, key: str) -> SceneLine:
+    # Not game text.
+    return SceneLine(
+        namespace=namespace,
+        key=key,
+        speaker=None,
+        english="Not game text.",
+        japanese="Not game text.",
+        chapter=None,
+    )
+
+
+def test_scoped_keeps_in_scope_lines_in_order_under_the_same_key() -> None:
+    scene = Scene(
+        key="scene-a",
+        lines=(
+            _line("ST_C01_001_01", "a1"),
+            _line("ST_Menu_001", "a2"),
+            _line("ST_SubEv_004", "a3"),
+            _line("ST_Item_001", "a4"),
+            _line("ST_DialogChoice_002", "a5"),
+        ),
+    )
+
+    assert scoped([scene]) == [
+        Scene(
+            key="scene-a",
+            lines=(
+                _line("ST_C01_001_01", "a1"),
+                _line("ST_SubEv_004", "a3"),
+                _line("ST_DialogChoice_002", "a5"),
+            ),
+        )
+    ]
+
+
+def test_scoped_drops_a_scene_with_no_in_scope_lines() -> None:
+    scenes = [
+        Scene(key="only-out", lines=(_line("ST_Skill_001", "b1"), _line("ST_Name_001", "b2"))),
+        Scene(key="kept", lines=(_line("ST_C02_001_01", "c1"),)),
+    ]
+
+    assert scoped(scenes) == [Scene(key="kept", lines=(_line("ST_C02_001_01", "c1"),))]
+
+
+def test_scoped_keeps_scene_order() -> None:
+    scenes = [
+        Scene(key="third", lines=(_line("ST_C03_001_01", "d3"),)),
+        Scene(key="first", lines=(_line("ST_C01_001_01", "d1"),)),
+        Scene(key="second", lines=(_line("ST_MainSummary", "d2"),)),
+    ]
+
+    assert [scene.key for scene in scoped(scenes)] == ["third", "first", "second"]
+
+
+def test_scoped_returns_a_fully_in_scope_scene_unchanged() -> None:
+    scene = Scene(
+        key="all-in",
+        lines=(_line("ST_C01_001_01", "e1"), _line("ST_UnitDescription_003", "e2")),
+    )
+
+    assert scoped([scene]) == [scene]
