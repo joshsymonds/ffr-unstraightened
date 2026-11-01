@@ -183,7 +183,7 @@ def _check(
             return Rejected(f"{_label(number)} character speaker {character['speaker']!r} speaks no line of this chapter")
     for arc in output["arcs"]:
         for speaker in arc["characters"]:
-            if speaker not in speakers:
+            if speaker and speaker not in speakers:
                 return Rejected(f"{_label(number)} arc {arc['id']!r} character speaker {speaker!r} speaks no in-scope line")
     for namespace, key in _refs(output):
         if (namespace, key) not in scope:
@@ -210,7 +210,8 @@ def chapter(
         problem = _check(output, number, lines, scope, speakers)
         if problem is not None:
             raise _Refused(problem)
-        return {**output, "chapter": number}
+        arcs = [{**arc, "characters": [speaker for speaker in arc["characters"] if speaker]} for arc in output["arcs"]]
+        return {**output, "arcs": arcs, "chapter": number}
 
     inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "earlier": list(earlier)}
     try:
