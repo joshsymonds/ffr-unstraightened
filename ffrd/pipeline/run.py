@@ -7,7 +7,7 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -19,15 +19,15 @@ from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, gate_line
 from ffrd.pipeline.lens import Lens, load_lens
-from ffrd.pipeline.report import OUTCOME_LABELS, OUTCOMES
+from ffrd.pipeline.report import OUTCOME_LABELS, OUTCOMES, RECALL
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose
 from ffrd.pipeline.stages import Ask, Classifier, Renderer, Scene, SceneLine, Triage
 from ffrd.pipeline.store import Store, work_dir
-from ffrd.pipeline.tune import load_threshold
 
 CHAPTER_FILE = re.compile(r"chapter-\d{2,}\.toml")
 UNATTRIBUTED_FILE = "unattributed.toml"
+RECHECK_AT = 0.5
 
 OutcomeKind = Literal["changed", "kept_for_plot", "gate_failed", "unfinished", "untouched"]
 WriterName = Literal["voice", "opus"]
@@ -160,11 +160,16 @@ class _Context:
     store: Store
     classifier: Classifier
     renderer: Renderer
-    threshold: float | None
     run_id: str
-    jev: Triage
+    jev: Triage | None
     bibles: Sequence[Mapping[str, Any]]
     lines: Mapping[tuple[str, str], SceneLine]
+
+
+@dataclass
+class _Recall:
+    disagreements: Counter[str] = field(default_factory=Counter)
+    confirmed: Counter[str] = field(default_factory=Counter)
 
 
 def _chapters(scenes: Sequence[Scene]) -> list[tuple[int | None, list[bible.Line]]]:
@@ -312,16 +317,37 @@ def _line(
     return _outcome(line, reasons, "changed", writer=writer), change
 
 
-def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change]]:
-    if ctx.threshold is not None:
-        answer = stages.triage(ctx.store, ctx.lens, scene, ctx.jev)
-        if not isinstance(answer, dict):
-            return _every_line(scene, "unfinished"), []
-        if max(answer[question.id] for question in ctx.lens.triage) < ctx.threshold:
-            return _every_line(scene, "untouched"), []
+def _join(
+    lens: Lens,
+    flagged: Mapping[tuple[str, str], tuple[str, ...]],
+    rechecked: Mapping[tuple[str, str], tuple[str, ...]],
+) -> dict[tuple[str, str], tuple[str, ...]]:
+    joined = dict(flagged)
+    for ref, reasons in rechecked.items():
+        ids = {*joined.get(ref, ()), *reasons}
+        joined[ref] = tuple(question.id for question in lens.triage if question.id in ids)
+    return joined
+
+
+def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall]:
     flagged = stages.screen(ctx.store, ctx.lens, scene, ask)
     if not isinstance(flagged, dict):
-        return _every_line(scene, "unfinished"), []
+        return _every_line(scene, "unfinished"), [], _Recall()
+    recall = _Recall()
+    if ctx.jev is not None:
+        probabilities = stages.triage(ctx.store, ctx.lens, scene, ctx.jev)
+        if not isinstance(probabilities, dict):
+            return _every_line(scene, "unfinished"), [], _Recall()
+        for question in ctx.lens.triage:
+            if probabilities[question.id] < RECHECK_AT or any(question.id in reasons for reasons in flagged.values()):
+                continue
+            recall.disagreements[question.id] += 1
+            rechecked = stages.rescreen(ctx.store, ctx.lens, scene, question, ask)
+            if not isinstance(rechecked, dict):
+                return _every_line(scene, "unfinished"), [], _Recall()
+            if rechecked:
+                recall.confirmed[question.id] += 1
+            flagged = _join(ctx.lens, flagged, rechecked)
     outcomes: list[Outcome] = []
     changes: list[Change] = []
     for line in scene.lines:
@@ -333,7 +359,15 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         outcomes.append(outcome)
         if change is not None:
             changes.append(change)
-    return outcomes, changes
+    return outcomes, changes, recall
+
+
+def _write_recall(path: Path, lens: Lens, recall: _Recall) -> None:
+    record = {
+        question.id: {"disagreements": recall.disagreements[question.id], "confirmed": recall.confirmed[question.id]}
+        for question in lens.triage
+    }
+    _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def run(
@@ -344,9 +378,8 @@ def run(
     *,
     classifier: Classifier,
     renderer: Renderer,
-    threshold: float | None,
+    jev: Triage | None,
     run_id: str,
-    jev: Triage,
     batch: Callable[[], Ask],
     scene_table: bool,
     out: Callable[[str], None] = print,
@@ -362,7 +395,6 @@ def run(
         store=store,
         classifier=classifier,
         renderer=renderer,
-        threshold=threshold,
         run_id=run_id,
         jev=jev,
         bibles=built,
@@ -370,13 +402,17 @@ def run(
     )
     outcomes: list[Outcome] = []
     changes: list[Change] = []
+    recall = _Recall()
     for scene in scenes:
-        scene_outcomes, scene_changes = _scene(ctx, scene, batch())
+        scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, batch())
         outcomes += scene_outcomes
         changes += scene_changes
+        recall.disagreements.update(scene_recall.disagreements)
+        recall.confirmed.update(scene_recall.confirmed)
         out(f"scene {scene.key}: {_counts(scene_outcomes)}")
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)
+    _write_recall(store.root / RECALL, lens, recall)
     write_dialog(root / "dialog" / lens.name, changes)
     return outcomes
 
@@ -389,7 +425,6 @@ def cmd_run(args: argparse.Namespace) -> None:
     root = repo_root()
     lens = load_lens(root / "lenses" / f"{args.lens}.toml")
     directory = work_dir(args.lens)
-    threshold = None if args.no_triage else load_threshold(directory)
     bound = stages.bindings()
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run(
@@ -399,9 +434,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         bound.scenes.scenes(),
         classifier=bound.classifier,
         renderer=bound.renderer,
-        threshold=threshold,
+        jev=None if args.no_jev else jev_client.triage,
         run_id=run_id,
-        jev=jev_client.triage,
         batch=_batch,
         scene_table=bound.scenes.scene_table,
     )
@@ -409,8 +443,9 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = subparsers.add_parser(
-        "run", help="run a lens's scenes through triage, screen, drafts, gates and selection, then write its outcomes and dialog"
+        "run",
+        help="run a lens's scenes through the screen, the Jev recall check, drafts, gates and selection, then write its outcomes and dialog",
     )
     p.add_argument("--lens", required=True, help="name of the lens to run, read from lenses/<name>.toml and work/<name>/")
-    p.add_argument("--no-triage", action="store_true", help="screen every scene without the Jev triage threshold")
+    p.add_argument("--no-jev", action="store_true", help="skip the Jev recall check")
     p.set_defaults(fn=cmd_run)

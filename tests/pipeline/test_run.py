@@ -10,6 +10,7 @@ import pytest
 
 from ffrd.game import Fail, vanilla_hash
 from ffrd.pipeline import bible, report, stages
+from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, TriageQuestion
@@ -19,6 +20,7 @@ from ffrd.pipeline.stages import (
     DRAFT_SCHEMA,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
+    RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     Ask,
     Bindings,
@@ -406,6 +408,8 @@ class FakeClaude:
         self.unplaced: list[dict[str, Any]] = []
         self.screen_failure: Unfinished | None = None
         self.flags: dict[tuple[str, str], list[str]] = {}
+        self.rescreen_flags: dict[tuple[str, str], list[str]] = {}
+        self.rescreen_failures: dict[str, Unfinished | Rejected] = {}
         self.intents: dict[tuple[str, str], str | Unfinished] = {}
         self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         self.judgments: dict[str, dict[str, bool]] = {}
@@ -428,6 +432,8 @@ class FakeClaude:
             return {"setups": []}
         if schema is SCREEN_SCHEMA:
             return self._screen(parts)
+        if schema is RESCREEN_SCHEMA:
+            return self._rescreen(parts)
         if schema is INTENT_SCHEMA:
             answer = self.intents.get(_target(parts), "Made-up intent. Not game text.")
             return answer if isinstance(answer, Unfinished) else {"intent": answer}
@@ -454,6 +460,18 @@ class FakeClaude:
             {"namespace": line["namespace"], "key": line["key"], "reasons": self.flags[(line["namespace"], line["key"])]}
             for line in lines
             if (line["namespace"], line["key"]) in self.flags
+        ]
+        return {"flagged": flagged}
+
+    def _rescreen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
+        question = json.loads(_part(parts, "Triage question:\n"))["id"]
+        if question in self.rescreen_failures:
+            return self.rescreen_failures[question]
+        lines = json.loads(_part(parts, "Scene lines:\n"))
+        flagged = [
+            {"namespace": line["namespace"], "key": line["key"]}
+            for line in lines
+            if question in self.rescreen_flags.get((line["namespace"], line["key"]), [])
         ]
         return {"flagged": flagged}
 
@@ -536,8 +554,7 @@ def _run(
     claude: FakeClaude,
     printed: list[str],
     *,
-    jev: FakeJev,
-    threshold: float | None,
+    jev: FakeJev | None,
     renderer: FakeRenderer | None = None,
     scenes: Sequence[Scene] = SCENES,
     classifier: FakeClassifier | None = None,
@@ -550,7 +567,6 @@ def _run(
         scenes,
         classifier=FakeClassifier() if classifier is None else classifier,
         renderer=FakeRenderer({OPUS_A1: VOICE_A1}) if renderer is None else renderer,
-        threshold=threshold,
         run_id=RUN,
         jev=jev,
         batch=claude.start_batch,
@@ -564,14 +580,14 @@ def _all_prompts(claude: FakeClaude, jev: FakeJev) -> list[str]:
 
 
 def test_each_outcome_kind_and_writer_is_recorded(tmp_path: Path) -> None:
-    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
     assert outcomes == EXPECTED_OUTCOMES
 
 
 def test_out_of_scope_line_has_no_record_and_reaches_no_prompt(tmp_path: Path) -> None:
     claude = _claude()
     jev = FakeJev(JEV_HIGH)
-    _run(tmp_path, claude, [], jev=jev, threshold=0.5)
+    _run(tmp_path, claude, [], jev=jev)
     prompts = _all_prompts(claude, jev)
     assert not any(NS_OUT in text or EN_OUT in text for text in prompts)
     assert NS_OUT not in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
@@ -579,62 +595,109 @@ def test_out_of_scope_line_has_no_record_and_reaches_no_prompt(tmp_path: Path) -
 
 def test_one_batch_for_the_bible_and_one_per_scene(tmp_path: Path) -> None:
     claude = _claude()
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert claude.batches == 1 + len(SCENES)
 
 
 def test_one_setup_call_per_bible_chapter(tmp_path: Path) -> None:
     claude = _claude()
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     forward = [parts[-1].split("\n", 1)[0] for _, parts, schema in claude.calls if schema is bible.SCHEMA]
     setup = [parts[-1].split("\n", 1)[0] for _, parts, schema in claude.calls if schema is bible.SETUP_SCHEMA]
     assert forward
     assert sorted(setup) == sorted(forward)
 
 
-def test_no_triage_never_calls_jev_and_screens_every_scene(tmp_path: Path) -> None:
+def _recall(tmp_path: Path) -> dict[str, dict[str, int]]:
+    return json.loads((tmp_path / "work" / LENS / report.RECALL).read_text(encoding="utf-8"))
+
+
+NO_RECALL = {ALPHA: {"disagreements": 0, "confirmed": 0}, BETA: {"disagreements": 0, "confirmed": 0}}
+ALPHA_FLAGGED_ONLY = {(NS_A, "1"): [ALPHA], (NS_A, "3"): [ALPHA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
+
+
+def test_jev_off_never_calls_jev_and_screens_every_scene(tmp_path: Path) -> None:
     claude = _claude()
-    jev = FakeJev(JEV_HIGH)
-    outcomes = _run(tmp_path, claude, [], jev=jev, threshold=None)
-    assert jev.calls == []
+    outcomes = _run(tmp_path, claude, [], jev=None)
     assert sum(1 for _, _, schema in claude.calls if schema is SCREEN_SCHEMA) == len(SCENES)
+    assert not any(schema is RESCREEN_SCHEMA for _, _, schema in claude.calls)
     assert outcomes == EXPECTED_OUTCOMES
+    assert _recall(tmp_path) == NO_RECALL
 
 
-def test_triage_below_threshold_leaves_every_line_untouched(tmp_path: Path) -> None:
+def test_jev_below_half_makes_no_recheck_and_the_screen_flags_stand(tmp_path: Path) -> None:
     claude = _claude()
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev({ALPHA: 0.2, BETA: 0.4}), threshold=0.5)
-    assert [(o.namespace, o.key) for o in outcomes] == [
-        (NS_A, "1"),
-        (NS_A, "2"),
-        (NS_A, "3"),
-        (NS_A, "4"),
-        (NS_B, "1"),
-        (NS_B, "2"),
-        (NS_C, "1"),
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev({ALPHA: 0.2, BETA: 0.4}))
+    assert outcomes == EXPECTED_OUTCOMES
+    assert not any(schema is RESCREEN_SCHEMA for _, _, schema in claude.calls)
+    assert _recall(tmp_path) == NO_RECALL
+
+
+def test_jev_at_half_for_a_flagged_id_makes_no_recheck(tmp_path: Path) -> None:
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev({ALPHA: 0.5, BETA: 0.1}))
+    assert outcomes == EXPECTED_OUTCOMES
+    assert not any(schema is RESCREEN_SCHEMA for _, _, schema in claude.calls)
+    assert _recall(tmp_path) == NO_RECALL
+
+
+def test_jev_at_half_for_an_unflagged_id_rechecks_that_id_alone_and_processes_the_flagged_line(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.flags = dict(ALPHA_FLAGGED_ONLY)
+    claude.drafts[(NS_B, "2")] = [OPUS_B2]
+    claude.rescreen_flags = {(NS_B, "2"): [BETA]}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    rechecks = [(model, parts) for model, parts, schema in claude.calls if schema is RESCREEN_SCHEMA]
+    assert [model for model, _ in rechecks] == [claude_module.OPUS] * len(SCENES)
+    assert [json.loads(_part(parts, "Triage question:\n"))["id"] for _, parts in rechecks] == [BETA] * len(SCENES)
+    assert [o for o in outcomes if (o.namespace, o.key) == (NS_B, "2")] == [Outcome(NS_B, "2", 2, None, (BETA,), "changed", None, "opus")]
+    assert _recall(tmp_path)[BETA] == {"disagreements": len(SCENES), "confirmed": 1}
+    assert _recall(tmp_path)[ALPHA] == {"disagreements": 0, "confirmed": 0}
+
+
+def test_recheck_flags_join_the_screen_reasons_in_lens_order(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.flags = {(NS_B, "2"): [BETA]}
+    claude.drafts[(NS_B, "2")] = [OPUS_B2]
+    claude.rescreen_flags = {(NS_B, "2"): [ALPHA]}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert [o for o in outcomes if (o.namespace, o.key) == (NS_B, "2")] == [
+        Outcome(NS_B, "2", 2, None, (ALPHA, BETA), "changed", None, "opus")
     ]
-    assert [o.outcome for o in outcomes] == ["untouched"] * 7
-    assert all(o.reasons == () for o in outcomes)
-    assert not any(schema is SCREEN_SCHEMA for _, _, schema in claude.calls)
 
 
-def test_triage_takes_the_highest_question_probability(tmp_path: Path) -> None:
-    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev({ALPHA: 0.2, BETA: 0.6}), threshold=0.5)
-    assert outcomes == EXPECTED_OUTCOMES
-
-
-def test_triage_failure_leaves_every_line_unfinished(tmp_path: Path) -> None:
+def test_recall_counts_are_exact_and_parse_through_report(tmp_path: Path) -> None:
     claude = _claude()
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(Unfinished("Made-up triage failure. Not game text.")), threshold=0.5)
+    claude.flags = dict(ALPHA_FLAGGED_ONLY)
+    claude.rescreen_flags = {(NS_B, "2"): [BETA], (NS_A, "2"): [BETA]}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert _recall(tmp_path) == {ALPHA: {"disagreements": 0, "confirmed": 0}, BETA: {"disagreements": 3, "confirmed": 2}}
+    assert report._recall(tmp_path / "work" / LENS / report.RECALL, list(TRIAGE_ORDER)) == {ALPHA: (0, 0), BETA: (3, 2)}
+
+
+def test_recheck_failure_leaves_the_scene_unfinished_and_counts_nothing(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.flags = {}
+    claude.rescreen_failures = {BETA: Unfinished("Made-up re-screen failure. Not game text.")}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert [o.outcome for o in outcomes] == ["unfinished"] * 7
     assert all(o.reasons == () for o in outcomes)
-    assert not any(schema is SCREEN_SCHEMA for _, _, schema in claude.calls)
+    assert _recall(tmp_path) == NO_RECALL
+
+
+def test_jev_failure_leaves_every_line_unfinished_and_makes_no_recheck(tmp_path: Path) -> None:
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(Unfinished("Made-up triage failure. Not game text.")))
+    assert [o.outcome for o in outcomes] == ["unfinished"] * 7
+    assert all(o.reasons == () for o in outcomes)
+    assert not any(schema is RESCREEN_SCHEMA for _, _, schema in claude.calls)
+    assert _recall(tmp_path) == NO_RECALL
 
 
 def test_screen_failure_leaves_every_line_unfinished(tmp_path: Path) -> None:
     claude = _claude()
     claude.screen_failure = Unfinished("Made-up screen failure. Not game text.")
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert [o.outcome for o in outcomes] == ["unfinished"] * 7
     assert all(o.reasons == () for o in outcomes)
 
@@ -642,7 +705,7 @@ def test_screen_failure_leaves_every_line_unfinished(tmp_path: Path) -> None:
 def test_intent_failure_leaves_that_line_unfinished_and_drafts_nothing(tmp_path: Path) -> None:
     claude = _claude()
     claude.intents[(NS_A, "1")] = Unfinished("Made-up intent failure. Not game text.")
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert (NS_A, "1") not in [_target(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA]
@@ -653,7 +716,7 @@ def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path) -> None:
     claude.bible[1] = Unfinished("Made-up bible failure. Not game text.")
     printed: list[str] = []
     with pytest.raises(Fail, match="story bible unfinished; rerun ffrd run"):
-        _run(tmp_path, claude, printed, jev=FakeJev(JEV_HIGH), threshold=0.5)
+        _run(tmp_path, claude, printed, jev=FakeJev(JEV_HIGH))
     assert printed == ["bible: unfinished"]
     assert all(schema is bible.SCHEMA for _, _, schema in claude.calls)
     assert claude.batches == 1
@@ -662,7 +725,7 @@ def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path) -> None:
 
 def test_cross_judge_runs_for_a_callback_line_with_its_related_lines(tmp_path: Path) -> None:
     claude = _claude()
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     cross = [(_target(parts), _related_refs(parts)) for _, parts, schema in claude.calls if schema is CROSS_SCHEMA]
     assert cross
     assert {target for target, _ in cross} == {(NS_A, "1")}
@@ -672,14 +735,14 @@ def test_cross_judge_runs_for_a_callback_line_with_its_related_lines(tmp_path: P
 def test_false_cross_judge_verdict_blocks_the_change(tmp_path: Path) -> None:
     claude = _claude()
     claude.consistent = {OPUS_A1: False, VOICE_A1: False}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "callback", None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
 
 
 def test_writer_retry_is_told_the_failing_gate_once(tmp_path: Path) -> None:
     claude = _claude()
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     drafts_a2 = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == (NS_A, "2")]
     assert len(drafts_a2) == 2
     assert not any(part.startswith("The previous candidates failed") for part in drafts_a2[0])
@@ -707,7 +770,7 @@ def test_scene_judge_unfinished_leaves_the_line_unfinished_with_no_dialog_entry(
     claude = _claude()
     failure = Unfinished("Made-up judge failure. Not game text.")
     claude.judge_failures = {OPUS_A1: failure, VOICE_A1: failure}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert len(_drafts_for(claude, (NS_A, "1"))) == 1
@@ -718,7 +781,7 @@ def test_scene_judge_rejecting_every_candidate_fails_the_judge_gate_after_one_re
     claude = _claude()
     rejection = Rejected("Made-up judge rejection. Not game text.")
     claude.judge_failures = {OPUS_A1: rejection, VOICE_A1: rejection}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "judge", None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert len(_drafts_for(claude, (NS_A, "1"))) == 2
@@ -729,7 +792,7 @@ def test_cross_judge_unfinished_leaves_the_callback_line_unfinished_with_no_dial
     claude = _claude()
     failure = Unfinished("Made-up cross-judge failure. Not game text.")
     claude.cross_failures = {OPUS_A1: failure, VOICE_A1: failure}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert (NS_A, "1") not in _dialog_entries(tmp_path)
@@ -739,7 +802,7 @@ def test_cross_judge_rejecting_every_candidate_fails_the_judge_gate(tmp_path: Pa
     claude = _claude()
     rejection = Rejected("Made-up cross-judge rejection. Not game text.")
     claude.cross_failures = {OPUS_A1: rejection, VOICE_A1: rejection}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "judge", None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert (NS_A, "1") not in _dialog_entries(tmp_path)
@@ -748,7 +811,7 @@ def test_cross_judge_rejecting_every_candidate_fails_the_judge_gate(tmp_path: Pa
 def test_unfixed_candidate_fails_the_fixed_gate(tmp_path: Path) -> None:
     claude = _claude()
     claude.judgments = {**claude.judgments, OPUS_A1: _judgment(fixed=False), VOICE_A1: _judgment(fixed=False)}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "fixed", None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
 
@@ -760,14 +823,14 @@ def test_unfixed_japanese_restoring_candidate_never_ships_beside_a_fixed_one(tmp
         OPUS_A1: _judgment(fixed=False, restores_japanese=True),
         VOICE_A1: _judgment(restores_japanese=False),
     }
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice")
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
 
 
 def test_both_judges_receive_the_line_reasons_and_intent(tmp_path: Path) -> None:
     claude = _claude()
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     for schema in (JUDGE_SCHEMA, CROSS_SCHEMA):
         prompts = [parts for _, parts, called in claude.calls if called is schema and _target(parts) == (NS_A, "1")]
         assert prompts
@@ -779,7 +842,7 @@ def test_both_judges_receive_the_line_reasons_and_intent(tmp_path: Path) -> None
 def test_rejected_draft_fails_the_writer_gate_after_one_retry_and_is_never_judged(tmp_path: Path) -> None:
     claude = _claude()
     claude.drafts[(NS_B, "2")] = Rejected("Made-up draft rejection. Not game text.")
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes == [*EXPECTED_OUTCOMES[:5], Outcome(NS_B, "2", 2, None, (BETA,), "gate_failed", "writer", None), *EXPECTED_OUTCOMES[6:]]
     retried = _drafts_for(claude, (NS_B, "2"))
     assert len(retried) == 2
@@ -792,7 +855,7 @@ def test_rejected_draft_fails_the_writer_gate_after_one_retry_and_is_never_judge
 def test_candidate_equal_to_the_english_is_never_judged_or_written(tmp_path: Path) -> None:
     claude = _claude()
     claude.drafts[(NS_A, "1")] = [EN_A1, OPUS_A1]
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == EXPECTED_OUTCOMES[0]
     assert EN_A1 not in [candidate for _, candidate in _judged(claude, JUDGE_SCHEMA)]
     chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
@@ -804,7 +867,7 @@ def test_repeated_candidate_is_judged_once(tmp_path: Path) -> None:
     claude = _claude()
     claude.drafts[(NS_B, "1")] = [OPUS_B1, OPUS_B1]
     classifier = FakeClassifier()
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=0.5, classifier=classifier)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), classifier=classifier)
     assert [candidate for ref, candidate in _judged(claude, JUDGE_SCHEMA) if ref == (NS_B, "1")] == [OPUS_B1]
     assert classifier.scored.count(OPUS_B1) == 1
     assert outcomes[4] == EXPECTED_OUTCOMES[4]
@@ -827,7 +890,7 @@ def test_bible_runs_chapters_ascending_with_first_occurrence_lines_and_empty_spe
     claude = _claude()
     claude.bible = {}
     claude.flags = {}
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None, scenes=(LATE_SCENE, EARLY_SCENE))
+    _run(tmp_path, claude, [], jev=None, scenes=(LATE_SCENE, EARLY_SCENE))
     bible_calls = [parts for _, parts, schema in claude.calls if schema is bible.SCHEMA]
     assert len(bible_calls) == 2
     assert json.loads(_part(bible_calls[0], "Chapter 1 lines:\n")) == [
@@ -870,7 +933,7 @@ def test_unplaced_lines_are_one_bible_per_namespace_after_numbered_chapters_in_n
     claude.bible = {}
     claude.flags = {}
     claude.unplaced = [UNPLACED_BIBLE]
-    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None, scenes=(LATE_SCENE, EARLY_SCENE, UNPLACED_SCENE))
+    _run(tmp_path, claude, [], jev=None, scenes=(LATE_SCENE, EARLY_SCENE, UNPLACED_SCENE))
     bible_calls = [parts for _, parts, schema in claude.calls if schema is bible.SCHEMA]
     assert len(bible_calls) == 4
     assert any(part.startswith("Chapter 1 lines:\n") for part in bible_calls[0])
@@ -887,14 +950,14 @@ def test_unplaced_lines_are_one_bible_per_namespace_after_numbered_chapters_in_n
 
 def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:
     printed: list[str] = []
-    _run(tmp_path, _claude(), printed, jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, _claude(), printed, jev=FakeJev(JEV_HIGH))
     assert printed == EXPECTED_PRINTED
     assert all(COUNT_LINE.fullmatch(line) for line in printed)
     assert not any(text in line for line in printed for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_B1))
 
 
 def test_outcomes_and_dialog_are_written_and_hold_no_english(tmp_path: Path) -> None:
-    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), threshold=0.5)
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
     outcome_text = (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
     records = [json.loads(line) for line in outcome_text.splitlines()]
     assert [(r["namespace"], r["key"], r["outcome"], r["gate"], r["writer"]) for r in records] == [
@@ -931,11 +994,11 @@ def test_rerun_makes_no_calls_and_writes_identical_files(tmp_path: Path) -> None
     claude.drafts[(NS_B, "2")] = [OPUS_B2]
     jev = FakeJev(JEV_HIGH)
     renderer = FakeRenderer({OPUS_A1: VOICE_A1})
-    _run(tmp_path, claude, [], jev=jev, threshold=0.5, renderer=renderer)
+    _run(tmp_path, claude, [], jev=jev, renderer=renderer)
     before = _snapshot(tmp_path)
     calls, jev_calls, renders = len(claude.calls), len(jev.calls), len(renderer.calls)
 
-    _run(tmp_path, claude, [], jev=jev, threshold=0.5, renderer=renderer)
+    _run(tmp_path, claude, [], jev=jev, renderer=renderer)
 
     assert len(claude.calls) == calls
     assert len(jev.calls) == jev_calls
@@ -953,12 +1016,6 @@ def lens_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / "lenses" / f"{LENS}.toml").write_text(LENS_TOML)
     monkeypatch.chdir(root)
     return root
-
-
-def _write_threshold(root: Path) -> None:
-    directory = root / "work" / LENS
-    directory.mkdir(parents=True)
-    (directory / "threshold.json").write_text(json.dumps({"threshold": 0.5, "scenes": 3, "positives": 2, "passing": 3}) + "\n")
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -988,16 +1045,12 @@ def _bind(
     monkeypatch.setattr(stages, "Batch", Batch)
 
 
-def _unbound() -> Bindings:
-    raise AssertionError("bindings were read before the threshold was loaded")
-
-
-def test_register_declares_the_run_command_with_required_lens_and_no_triage_flag() -> None:
+def test_register_declares_the_run_command_with_required_lens_and_no_jev_flag() -> None:
     args = _parse(["run", "--lens", LENS])
     assert args.fn is cmd_run
     assert args.lens == LENS
-    assert args.no_triage is False
-    assert _parse(["run", "--lens", LENS, "--no-triage"]).no_triage is True
+    assert args.no_jev is False
+    assert _parse(["run", "--lens", LENS, "--no-jev"]).no_jev is True
     with pytest.raises(SystemExit):
         _parse(["run"])
 
@@ -1005,7 +1058,6 @@ def test_register_declares_the_run_command_with_required_lens_and_no_triage_flag
 def test_run_command_writes_outcomes_and_dialog_through_the_bound_stages(
     lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _write_threshold(lens_repo)
     claude = _claude()
     jev = FakeJev(JEV_HIGH)
     _bind(monkeypatch, claude, jev)
@@ -1023,27 +1075,20 @@ def test_run_command_writes_outcomes_and_dialog_through_the_bound_stages(
     assert len(jev.calls) == len(SCENES)
 
 
-def test_run_command_without_a_stored_threshold_fails_before_any_stage(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(stages, "bindings", _unbound)
-    args = _parse(["run", "--lens", LENS])
-    with pytest.raises(Fail, match="no triage threshold"):
-        args.fn(args)
-    assert not (lens_repo / "work" / LENS / report.OUTCOMES).exists()
-
-
-def test_run_command_with_no_triage_needs_no_threshold_and_never_calls_jev(
+def test_run_command_with_no_jev_never_calls_jev_and_writes_zero_recall(
     lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     claude = _claude()
     jev = FakeJev(JEV_HIGH)
     _bind(monkeypatch, claude, jev)
-    args = _parse(["run", "--lens", LENS, "--no-triage"])
+    args = _parse(["run", "--lens", LENS, "--no-jev"])
 
     args.fn(args)
 
     assert jev.calls == []
     assert capsys.readouterr().out.splitlines() == EXPECTED_PRINTED
     assert (lens_repo / "work" / LENS / report.OUTCOMES).is_file()
+    assert json.loads((lens_repo / "work" / LENS / report.RECALL).read_text(encoding="utf-8")) == NO_RECALL
 
 
 # Made-up story line outside the fallback allowlist. Not game text.
@@ -1056,7 +1101,7 @@ STORY_SCENE = Scene("made-up-scene-story", (_line(NS_STORY, "1", None, EN_STORY,
 def test_run_keeps_a_line_outside_the_fallback_allowlist_only_with_a_scene_table(tmp_path: Path, scene_table: bool, present: bool) -> None:
     claude = _claude()
     claude.bible = {}
-    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), threshold=None, scenes=(STORY_SCENE,), scene_table=scene_table)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(STORY_SCENE,), scene_table=scene_table)
     assert [(o.namespace, o.key) for o in outcomes] == ([(NS_STORY, "1")] if present else [])
 
 
@@ -1067,7 +1112,7 @@ def test_run_command_scopes_by_the_bound_source_scene_table(
     claude = _claude()
     claude.bible = {}
     _bind(monkeypatch, claude, FakeJev(JEV_HIGH), scenes=(STORY_SCENE,), scene_table=scene_table)
-    args = _parse(["run", "--lens", LENS, "--no-triage"])
+    args = _parse(["run", "--lens", LENS, "--no-jev"])
 
     args.fn(args)
 
