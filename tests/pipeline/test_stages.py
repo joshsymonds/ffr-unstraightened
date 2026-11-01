@@ -23,6 +23,7 @@ from ffrd.pipeline.stages import (
     Batch,
     Scene,
     SceneLine,
+    Target,
     bindings,
     cross_judge,
     draft,
@@ -309,7 +310,15 @@ CALLBACK = {"line": {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, "dep
 REASONS = ("made-up-alpha",)
 INTENT_TEXT = "Made-up intent. Not game text."
 INTENT_ANSWER = {"intent": "Made-up intent. Not game text."}
-DRAFT_ANSWER = {"drafts": ["Made-up draft one. Not game text.", "Made-up draft two. Not game text."]}
+TARGET_ONE = Target(LINE_ONE, "Made-up intent.", (CALLBACK,), CONTEXT)
+TARGET_TWO = Target(LINE_TWO, "Made-up intent two. Not game text.", (), CHANGED_CONTEXT)
+DRAFT_ONE = ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
+DRAFT_TWO = ("Made-up draft of line two. Not game text.",)
+ENTRY_ONE = {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key, "drafts": list(DRAFT_ONE)}
+ENTRY_TWO = {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key, "drafts": list(DRAFT_TWO)}
+ENTRY_UNKNOWN = {"namespace": "made-up-namespace", "key": "9", "drafts": ["Made-up unknown draft. Not game text."]}
+DRAFT_ANSWER = {"drafts": [ENTRY_ONE]}
+DRAFT_TWO_ANSWER = {"drafts": [ENTRY_ONE, ENTRY_TWO]}
 JUDGE_ANSWER = {
     "meaning": True,
     "plot": True,
@@ -399,36 +408,109 @@ def test_editing_intent_rule_reruns_intent(tmp_path: Path) -> None:
     assert len(ask.calls) == 2
 
 
-def test_draft_schema_requires_nonempty_drafts_and_forbids_extra_properties() -> None:
+def test_draft_schema_requires_drafts_per_target_and_forbids_extra_properties() -> None:
+    entry = DRAFT_SCHEMA["properties"]["drafts"]["items"]
     assert DRAFT_SCHEMA["type"] == "object"
     assert DRAFT_SCHEMA["required"] == ["drafts"]
     assert DRAFT_SCHEMA["properties"]["drafts"]["type"] == "array"
-    assert DRAFT_SCHEMA["properties"]["drafts"]["items"] == {"type": "string"}
-    assert DRAFT_SCHEMA["properties"]["drafts"]["minItems"] == 1
+    assert entry["type"] == "object"
+    assert entry["required"] == ["namespace", "key", "drafts"]
+    assert entry["properties"]["namespace"] == {"type": "string"}
+    assert entry["properties"]["key"] == {"type": "string"}
+    assert entry["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}, "minItems": 1}
+    assert entry["additionalProperties"] is False
     assert DRAFT_SCHEMA["additionalProperties"] is False
 
 
-def test_draft_asks_opus_with_schema_and_returns_drafts_in_answer_order(tmp_path: Path) -> None:
-    ask = Fake(DRAFT_ANSWER)
+def test_draft_sends_every_target_in_one_call_and_returns_drafts_per_line(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_TWO_ANSWER)
 
-    result = draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask)
+    result = draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, ask)
 
-    assert result == ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
-    model, parts, schema = ask.calls[0]
+    assert result == {(LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE, (LINE_TWO.namespace, LINE_TWO.key): DRAFT_TWO}
+    assert len(ask.calls) == 1
+    model, _parts, schema = ask.calls[0]
     assert model == claude.OPUS
     assert schema == DRAFT_SCHEMA
+
+
+def test_draft_prompt_carries_the_rule_scene_lines_and_each_targets_intent_callbacks_and_context(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_TWO_ANSWER)
+
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, ask)
+
+    parts = ask.calls[0][1]
     prompt = "\n".join(parts)
     assert "Made-up intent rule. Not game text." in prompt
-    assert "Made-up intent." in prompt
     assert "{...}" in prompt
     assert "<text ...>" in prompt
+    assert '"japanese": "Made-up Japanese one. Not game text."' in prompt
+    assert [line["key"] for line in json.loads(_part(parts, "Scene lines:\n"))] == ["1", "2"]
+    assert json.loads(_part(parts, "Targets:\n")) == [
+        {
+            "namespace": LINE_ONE.namespace,
+            "key": LINE_ONE.key,
+            "intent": "Made-up intent.",
+            "callbacks": [CALLBACK],
+            "context": CONTEXT,
+        },
+        {
+            "namespace": LINE_TWO.namespace,
+            "key": LINE_TWO.key,
+            "intent": "Made-up intent two. Not game text.",
+            "callbacks": [],
+            "context": CHANGED_CONTEXT,
+        },
+    ]
+
+
+def test_draft_target_carries_its_arc_context(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_TWO_ANSWER)
+
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, ask)
+
+    assert [target["context"] for target in json.loads(_part(ask.calls[0][1], "Targets:\n"))] == [CONTEXT, CHANGED_CONTEXT]
+
+
+def test_changed_draft_context_asks_again(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(DRAFT_ANSWER, DRAFT_ANSWER)
+    draft(store, LENS, SCENE, [TARGET_ONE], None, ask)
+
+    draft(store, LENS, SCENE, [replace(TARGET_ONE, context=CHANGED_CONTEXT)], None, ask)
+
+    assert len(ask.calls) == 2
+    assert json.loads(_part(ask.calls[1][1], "Targets:\n"))[0]["context"] == CHANGED_CONTEXT
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"drafts": [ENTRY_ONE]}, id="missing"),
+        pytest.param({"drafts": [ENTRY_ONE, ENTRY_TWO, ENTRY_UNKNOWN]}, id="unknown"),
+        pytest.param({"drafts": [ENTRY_ONE, ENTRY_ONE, ENTRY_TWO]}, id="duplicate"),
+    ],
+)
+def test_draft_entries_that_do_not_name_each_target_once_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(answer, DRAFT_TWO_ANSWER)
+
+    assert isinstance(draft(store, LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, ask), Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert draft(store, LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, ask) == {
+        (LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE,
+        (LINE_TWO.namespace, LINE_TWO.key): DRAFT_TWO,
+    }
+    assert len(ask.calls) == 2
 
 
 def test_draft_names_the_retry_gate_only_on_retry(tmp_path: Path) -> None:
     first = Fake(DRAFT_ANSWER)
-    draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, first)
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, first)
     retry = Fake(DRAFT_ANSWER)
-    draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], "classifier", CONTEXT, retry)
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], "classifier", retry)
 
     assert "classifier" not in "\n".join(first.calls[0][1])
     assert "classifier" in "\n".join(retry.calls[0][1])
@@ -437,19 +519,19 @@ def test_draft_names_the_retry_gate_only_on_retry(tmp_path: Path) -> None:
 def test_draft_retry_is_part_of_its_key(tmp_path: Path) -> None:
     store = Store(tmp_path)
     ask = Fake(DRAFT_ANSWER, DRAFT_ANSWER)
-    draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask)
+    draft(store, LENS, SCENE, [TARGET_ONE], None, ask)
 
-    draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], "classifier", CONTEXT, ask)
+    draft(store, LENS, SCENE, [TARGET_ONE], "classifier", ask)
 
     assert len(ask.calls) == 2
 
 
 def test_fresh_store_on_same_root_returns_stored_drafts_without_asking(tmp_path: Path) -> None:
-    expected = ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
-    draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, Fake(DRAFT_ANSWER))
+    expected = {(LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE, (LINE_TWO.namespace, LINE_TWO.key): DRAFT_TWO}
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, Fake(DRAFT_TWO_ANSWER))
     ask = Fake()
 
-    assert draft(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask) == expected
+    assert draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, ask) == expected
     assert ask.calls == []
 
 
@@ -462,21 +544,21 @@ def test_failed_draft_is_returned_unstored_and_asked_again(tmp_path: Path, failu
     store = Store(tmp_path)
     ask = Fake(failure, DRAFT_ANSWER)
 
-    assert draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask) == failure
+    assert draft(store, LENS, SCENE, [TARGET_ONE], None, ask) == failure
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask) == tuple(DRAFT_ANSWER["drafts"])
+    assert draft(store, LENS, SCENE, [TARGET_ONE], None, ask) == {(LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE}
     assert len(ask.calls) == 2
 
 
 def test_editing_intent_rule_reruns_draft(tmp_path: Path) -> None:
     store = Store(tmp_path)
     ask = Fake(DRAFT_ANSWER, DRAFT_ANSWER)
-    draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask)
+    draft(store, LENS, SCENE, [TARGET_ONE], None, ask)
     edited = replace(LENS, intent_rule="Edited intent rule. Not game text.")
 
-    draft(store, edited, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, CONTEXT, ask)
+    draft(store, edited, SCENE, [TARGET_ONE], None, ask)
 
     assert len(ask.calls) == 2
 
@@ -920,14 +1002,6 @@ CONTEXT_STAGES = [
         CONTEXT,
         CHANGED_CONTEXT,
         id="intent",
-    ),
-    pytest.param(
-        lambda store, extra, ask: draft(store, LENS, SCENE, LINE_ONE, "Made-up intent.", [CALLBACK], None, extra, ask),
-        DRAFT_ANSWER,
-        "Arc context",
-        CONTEXT,
-        CHANGED_CONTEXT,
-        id="draft",
     ),
     pytest.param(
         lambda store, extra, ask: judge(

@@ -333,62 +333,90 @@ def intent(
         return unanswered.failure
 
 
+@dataclass(frozen=True)
+class Target:
+    line: SceneLine
+    intent: str
+    callbacks: tuple[Mapping[str, Any], ...]
+    context: Mapping[str, Any]
+
+
 DRAFT_INSTRUCTIONS = (
-    "Write candidate rewrites of the target line that carry out its intent. Return JSON with drafts, an array of "
-    "candidate English lines. Keep every {...} placeholder and every <text ...>...</> tag from the English line, "
-    "unchanged. Keep the English line's line breaks. Stay within 120% of the English line's length. Keep the "
-    "speaker's character traits. Refer to lines only by namespace and key."
+    "Write candidate rewrites of each target line that carry out its intent. Write all target lines together so they "
+    "read as one scene. Return JSON with drafts, an array with one entry per target, each with namespace, key and "
+    "drafts, an array of candidate English lines for that target. Keep every {...} placeholder and every <text ...>...</> "
+    "tag from the target's English line, unchanged. Keep each English line's line breaks. Stay within 120% of each "
+    "English line's length. Keep the speaker's character traits. Refer to lines only by namespace and key."
 )
 
 DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"drafts": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
+    "properties": {
+        "drafts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string"},
+                    "key": {"type": "string"},
+                    "drafts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                },
+                "required": ["namespace", "key", "drafts"],
+                "additionalProperties": False,
+            },
+        },
+    },
     "required": ["drafts"],
     "additionalProperties": False,
 }
+
+
+def _target_dict(target: Target) -> dict[str, Any]:
+    return {
+        **_line_ref(target.line),
+        "intent": target.intent,
+        "callbacks": list(target.callbacks),
+        "context": target.context,
+    }
 
 
 def draft(
     store: Store,
     lens: Lens,
     scene: Scene,
-    line: SceneLine,
-    intent: str,
-    callbacks: Sequence[Mapping[str, Any]],
+    targets: Sequence[Target],
     retry: str | None,
-    context: Mapping[str, Any],
     ask: Ask,
-) -> tuple[str, ...] | Unfinished | Rejected:
+) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+    expected = sorted((target.line.namespace, target.line.key) for target in targets)
     parts = [
         DRAFT_INSTRUCTIONS,
         f"Intent rule:\n{lens.stage_text('intent')}",
-        f"Intent:\n{intent}",
-        f"Callbacks:\n{_json(list(callbacks))}",
-        f"Arc context:\n{_json(context)}",
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
-        f"Target line:\n{_json(_line_ref(line))}",
+        f"Targets:\n{_json([_target_dict(target) for target in targets])}",
     ]
     if retry is not None:
         parts.append(f"The previous candidates failed the {retry} gate. Write candidates that pass it.")
 
-    def call() -> list[str]:
+    def call() -> list[dict[str, Any]]:
         answer = ask(claude.OPUS, parts, DRAFT_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
-        return list(answer["drafts"])
+        entries = answer["drafts"]
+        if sorted((entry["namespace"], entry["key"]) for entry in entries) != expected:
+            raise _Unanswered(Rejected(f"draft entries do not name each target of scene {scene.key} once"))
+        return entries
 
     inputs = {
         **_inputs(scene),
-        "line": _line_ref(line),
-        "intent": intent,
-        "callbacks": list(callbacks),
+        "targets": [_target_dict(target) for target in targets],
         "retry": retry,
-        "context": context,
     }
     try:
-        return tuple(store.run("draft", inputs, lens.stage_text("intent"), call).value)
+        entries = store.run("draft", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
+    return {(entry["namespace"], entry["key"]): tuple(entry["drafts"]) for entry in entries}
 
 
 def render(store: Store, renderer: Renderer, speaker: str | None, text: str) -> str:

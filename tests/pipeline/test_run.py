@@ -394,6 +394,17 @@ def _target(parts: Sequence[str]) -> tuple[str, str]:
     return ref["namespace"], ref["key"]
 
 
+def _draft_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
+    return [(target["namespace"], target["key"]) for target in json.loads(_part(parts, "Targets:\n"))]
+
+
+def _line_targets(parts: Sequence[str]) -> list[tuple[tuple[str, str], dict[str, Any]]]:
+    """Each line a line-stage prompt is about, with the arc context that prompt gives it."""
+    if any(part.startswith("Targets:\n") for part in parts):
+        return [((target["namespace"], target["key"]), target["context"]) for target in json.loads(_part(parts, "Targets:\n"))]
+    return [(_target(parts), _context_of(parts))]
+
+
 def _related_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
     return [(ref["namespace"], ref["key"]) for ref in json.loads(_part(parts, "Related lines:\n"))]
 
@@ -438,8 +449,12 @@ class FakeClaude:
             answer = self.intents.get(_target(parts), "Made-up intent. Not game text.")
             return answer if isinstance(answer, Unfinished) else {"intent": answer}
         if schema is DRAFT_SCHEMA:
-            answer = self.drafts[_target(parts)]
-            return answer if isinstance(answer, Unfinished | Rejected) else {"drafts": answer}
+            refs = _draft_refs(parts)
+            for ref in refs:
+                answer = self.drafts[ref]
+                if isinstance(answer, Unfinished | Rejected):
+                    return answer
+            return {"drafts": [{"namespace": namespace, "key": key, "drafts": self.drafts[(namespace, key)]} for namespace, key in refs]}
         if schema is JUDGE_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.judge_failures:
@@ -537,9 +552,10 @@ def _claude() -> FakeClaude:
         (NS_A, "2"): [OPUS_A2],
         (NS_A, "3"): [OPUS_A3],
         (NS_B, "1"): [OPUS_B1],
-        (NS_B, "2"): Unfinished("Made-up draft failure. Not game text."),
         (NS_C, "1"): [OPUS_C1],
     }
+    # Scene B's second line fails its intent, so it stays out of the scene's shared draft call.
+    claude.intents = {(NS_B, "2"): Unfinished("Made-up intent failure. Not game text.")}
     # OPUS_A1 loses on ranking (restores_japanese False), so the voiced text ships.
     claude.judgments = {
         OPUS_A1: _judgment(restores_japanese=False),
@@ -644,6 +660,7 @@ def test_jev_at_half_for_a_flagged_id_makes_no_recheck(tmp_path: Path) -> None:
 def test_jev_at_half_for_an_unflagged_id_rechecks_that_id_alone_and_processes_the_flagged_line(tmp_path: Path) -> None:
     claude = _claude()
     claude.flags = dict(ALPHA_FLAGGED_ONLY)
+    claude.intents = {}
     claude.drafts[(NS_B, "2")] = [OPUS_B2]
     claude.rescreen_flags = {(NS_B, "2"): [BETA]}
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
@@ -658,6 +675,7 @@ def test_jev_at_half_for_an_unflagged_id_rechecks_that_id_alone_and_processes_th
 def test_recheck_flags_join_the_screen_reasons_in_lens_order(tmp_path: Path) -> None:
     claude = _claude()
     claude.flags = {(NS_B, "2"): [BETA]}
+    claude.intents = {}
     claude.drafts[(NS_B, "2")] = [OPUS_B2]
     claude.rescreen_flags = {(NS_B, "2"): [ALPHA]}
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
@@ -708,7 +726,7 @@ def test_intent_failure_leaves_that_line_unfinished_and_drafts_nothing(tmp_path:
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None)
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
-    assert (NS_A, "1") not in [_target(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA]
+    assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
 
 
 def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path) -> None:
@@ -743,15 +761,54 @@ def test_false_cross_judge_verdict_blocks_the_change(tmp_path: Path) -> None:
 def test_writer_retry_is_told_the_failing_gate_once(tmp_path: Path) -> None:
     claude = _claude()
     _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
-    drafts_a2 = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == (NS_A, "2")]
+    drafts_a2 = _drafts_for(claude, (NS_A, "2"))
     assert len(drafts_a2) == 2
     assert not any(part.startswith("The previous candidates failed") for part in drafts_a2[0])
     assert any(part.startswith("The previous candidates failed the minimal_change gate") for part in drafts_a2[1])
-    assert sum(1 for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == (NS_A, "1")) == 1
+    assert len(_drafts_for(claude, (NS_A, "1"))) == 1
+
+
+def test_draft_failure_leaves_every_flagged_line_of_the_scene_unfinished(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.intents = {}
+    claude.drafts[(NS_B, "2")] = Unfinished("Made-up draft failure. Not game text.")
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(SCENE_B,))
+    assert [o.outcome for o in outcomes] == ["unfinished", "unfinished"]
+    assert len([parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA]) == 1
+    assert not any(schema in (JUDGE_SCHEMA, CROSS_SCHEMA) for _, _, schema in claude.calls)
+
+
+def test_scene_with_two_flagged_lines_drafts_both_in_one_call(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.intents = {}
+    claude.drafts[(NS_B, "2")] = [OPUS_B2]
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(SCENE_B,))
+    draft_calls = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA]
+    assert [_draft_refs(parts) for parts in draft_calls] == [[(NS_B, "1"), (NS_B, "2")]]
+    assert outcomes == [
+        Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus"),
+        Outcome(NS_B, "2", 2, None, (BETA,), "changed", None, "opus"),
+    ]
+
+
+def test_writer_retry_names_only_its_line_and_the_gate_it_failed(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    retries = [
+        parts
+        for _, parts, schema in claude.calls
+        if schema is DRAFT_SCHEMA and any(part.startswith("The previous candidates failed") for part in parts)
+    ]
+    assert [_draft_refs(parts) for parts in retries] == [[(NS_A, "2")], [(NS_A, "3")]]
+    assert any(part == "The previous candidates failed the minimal_change gate. Write candidates that pass it." for part in retries[0])
+    assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in retries[1])
+    for parts in retries:
+        scene_refs = {(line["namespace"], line["key"]) for line in json.loads(_part(parts, "Scene lines:\n"))}
+        assert {(NS_A, "1"), (NS_A, "2"), (NS_A, "3"), (NS_A, "4")} <= scene_refs
 
 
 def _drafts_for(claude: FakeClaude, ref: tuple[str, str]) -> list[list[str]]:
-    return [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and _target(parts) == ref]
+    return [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and ref in _draft_refs(parts)]
 
 
 def _judged(claude: FakeClaude, schema: Mapping[str, Any]) -> list[tuple[tuple[str, str], str]]:
@@ -841,6 +898,7 @@ def test_both_judges_receive_the_line_reasons_and_intent(tmp_path: Path) -> None
 
 def test_rejected_draft_fails_the_writer_gate_after_one_retry_and_is_never_judged(tmp_path: Path) -> None:
     claude = _claude()
+    claude.intents = {}
     claude.drafts[(NS_B, "2")] = Rejected("Made-up draft rejection. Not game text.")
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
     assert outcomes == [*EXPECTED_OUTCOMES[:5], Outcome(NS_B, "2", 2, None, (BETA,), "gate_failed", "writer", None), *EXPECTED_OUTCOMES[6:]]
@@ -991,6 +1049,7 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 def test_rerun_makes_no_calls_and_writes_identical_files(tmp_path: Path) -> None:
     claude = _claude()
     # Every stage must finish on the first run, or the rerun would ask again for the unfinished line.
+    claude.intents = {}
     claude.drafts[(NS_B, "2")] = [OPUS_B2]
     jev = FakeJev(JEV_HIGH)
     renderer = FakeRenderer({OPUS_A1: VOICE_A1})
@@ -1150,10 +1209,6 @@ def _context_of(parts: Sequence[str]) -> dict[str, Any]:
     return json.loads(_part(parts, "Arc context:\n"))
 
 
-def _arc_ids(parts: Sequence[str]) -> list[str]:
-    return [arc["id"] for arc in _context_of(parts)["arcs"]]
-
-
 def test_line_stages_receive_the_arcs_of_the_scene_speakers_and_the_target_speakers_notes(tmp_path: Path) -> None:
     claude = _claude()
     claude.bible = {1: BIBLE_ONE, 2: BIBLE_TWO}
@@ -1162,13 +1217,13 @@ def test_line_stages_receive_the_arcs_of_the_scene_speakers_and_the_target_speak
     expected_notes = {(NS_A, "1"): [CAST_A_NOTES], (NS_A, "3"): [CAST_A_NOTES], (NS_B, "1"): [CAST_B_NOTES]}
     line_calls = [(schema, parts) for _, parts, schema in claude.calls if schema in LINE_SCHEMAS]
 
-    covered = {(LINE_SCHEMAS.index(schema), _target(parts)) for schema, parts in line_calls}
+    covered = {(LINE_SCHEMAS.index(schema), target) for schema, parts in line_calls for target, _ in _line_targets(parts)}
     # Cross-judge runs only on the callback line, so the second scene's line reaches intent, draft and judge alone.
     assert {(index, (NS_A, "1")) for index in range(len(LINE_SCHEMAS))} | {(index, (NS_B, "1")) for index in range(3)} <= covered
     for _, parts in line_calls:
-        target = _target(parts)
-        assert _arc_ids(parts) == expected_arcs[target[0]]
-        assert _context_of(parts)["characters"] == expected_notes.get(target, [])
+        for target, context in _line_targets(parts):
+            assert [arc["id"] for arc in context["arcs"]] == expected_arcs[target[0]]
+            assert context["characters"] == expected_notes.get(target, [])
 
 
 def test_screen_receives_the_scene_cast_entries_of_its_speakers(tmp_path: Path) -> None:

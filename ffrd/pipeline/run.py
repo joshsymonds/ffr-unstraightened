@@ -228,16 +228,10 @@ def _related(ctx: _Context, line: SceneLine, callbacks: Sequence[Mapping[str, An
 
 def _candidates(
     ctx: _Context,
-    scene: Scene,
     line: SceneLine,
-    intended: str,
-    callbacks: Sequence[Mapping[str, Any]],
-    context: Mapping[str, Any],
-    retry: str | None,
-    ask: Ask,
+    drafted: tuple[str, ...] | Unfinished | Rejected,
     origin: dict[str, WriterName],
 ) -> Sequence[Candidate] | Unfinished:
-    drafted = stages.draft(ctx.store, ctx.lens, scene, line, intended, callbacks, retry, context, ask)
     if isinstance(drafted, Unfinished):
         return drafted
     texts = () if isinstance(drafted, Rejected) else drafted
@@ -279,25 +273,56 @@ def _judge(
     return verdict if consistent else replace(verdict, callback=False)
 
 
-def _line(
+def _drafted_for(
+    answer: dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected, line: SceneLine
+) -> tuple[str, ...] | Unfinished | Rejected:
+    if isinstance(answer, dict):
+        return answer[(line.namespace, line.key)]
+    return answer
+
+
+def _first_drafts(
+    ctx: _Context, scene: Scene, targets: Sequence[stages.Target], ask: Ask
+) -> dict[tuple[str, str], tuple[str, ...] | Unfinished | Rejected]:
+    if not targets:
+        return {}
+    answer = stages.draft(ctx.store, ctx.lens, scene, targets, None, ask)
+    return {(target.line.namespace, target.line.key): _drafted_for(answer, target.line) for target in targets}
+
+
+def _intend(
     ctx: _Context,
     scene: Scene,
     line: SceneLine,
     reasons: tuple[str, ...],
     ask: Ask,
-) -> tuple[Outcome, Change | None]:
-    callbacks = bible.touching(ctx.bibles, line.namespace, line.key)
+) -> stages.Target | Outcome:
+    callbacks = tuple(bible.touching(ctx.bibles, line.namespace, line.key))
     context = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
     intended = stages.intent(ctx.store, ctx.lens, scene, line, reasons, callbacks, context, ask)
     if not isinstance(intended, str):
-        return _outcome(line, reasons, "unfinished"), None
+        return _outcome(line, reasons, "unfinished")
+    return stages.Target(line, intended, callbacks, context)
+
+
+def _line(
+    ctx: _Context,
+    scene: Scene,
+    target: stages.Target,
+    reasons: tuple[str, ...],
+    first: tuple[str, ...] | Unfinished | Rejected,
+    ask: Ask,
+) -> tuple[Outcome, Change | None]:
+    line = target.line
     origin: dict[str, WriterName] = {}
 
     def write(retry: str | None) -> Sequence[Candidate] | Unfinished:
-        return _candidates(ctx, scene, line, intended, callbacks, context, retry, ask, origin)
+        if retry is None:
+            return _candidates(ctx, line, first, origin)
+        return _candidates(ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line), origin)
 
     def judge_candidate(candidate: Candidate) -> Judgment | Unfinished | Rejected:
-        return _judge(ctx, scene, line, callbacks, candidate, reasons, intended, context, ask)
+        return _judge(ctx, scene, line, target.callbacks, candidate, reasons, target.intent, target.context, ask)
 
     verdict = gate_line(write, classify=ctx.classifier.score, threshold=ctx.classifier.threshold, judge=judge_candidate)
     if isinstance(verdict, Kept):
@@ -357,14 +382,26 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
             if rechecked:
                 recall.confirmed[question.id] += 1
             flagged = _join(ctx.lens, flagged, rechecked)
+    planned: dict[tuple[str, str], stages.Target | Outcome] = {}
+    for line in scene.lines:
+        reasons = flagged.get((line.namespace, line.key))
+        if reasons is not None:
+            planned[(line.namespace, line.key)] = _intend(ctx, scene, line, reasons, ask)
+    targets = [plan for plan in planned.values() if isinstance(plan, stages.Target)]
+    first = _first_drafts(ctx, scene, targets, ask)
     outcomes: list[Outcome] = []
     changes: list[Change] = []
     for line in scene.lines:
-        reasons = flagged.get((line.namespace, line.key))
+        ref = (line.namespace, line.key)
+        reasons = flagged.get(ref)
         if reasons is None:
             outcomes.append(_outcome(line, (), "untouched"))
             continue
-        outcome, change = _line(ctx, scene, line, reasons, ask)
+        plan = planned[ref]
+        if isinstance(plan, Outcome):
+            outcomes.append(plan)
+            continue
+        outcome, change = _line(ctx, scene, plan, reasons, first[ref], ask)
         outcomes.append(outcome)
         if change is not None:
             changes.append(change)
