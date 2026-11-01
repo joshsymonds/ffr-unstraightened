@@ -91,6 +91,8 @@ Set the game's Text Language to English before you play.
 | `ffrd probe` | Checks which text shape the game honours, by running the game on the probe host. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
 | `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
+| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. Never prints line text. |
+| `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
 
 Edits go in any `dialog/**/*.toml` file. Each edit is one table, keyed by namespace
 and key, with `vanilla` (the hash of the current English line) and `text` (your

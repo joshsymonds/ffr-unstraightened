@@ -381,6 +381,8 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.build",
         "ffrd.install",
         "ffrd.leakcheck",
+        "ffrd.pipeline.report",
+        "ffrd.pipeline.diff",
         "ffrd.scenes",
         "ffrd.probe",
     ]
@@ -407,3 +409,35 @@ def test_probe_is_registered_last_with_its_help(repo: Path, monkeypatch: pytest.
         cli.main(["--help"])
     assert exit_info.value.code == 0
     assert "run the UE4SS probe on the gnomon host to see which text shape FFR honours" in capsys.readouterr().out
+
+
+def test_report_and_diff_are_registered_with_their_help(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "count a lens run's outcomes per chapter, reason, character and gate" in out
+    assert "show dialog/<lens> rewrites beside their vanilla English, up to recorded progress" in out
+
+
+def test_diff_without_recorded_progress_exits_1_through_the_cli(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FFR_PROGRESS", str(tmp_path / "missing"))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["diff", "--lens", "made-up-lens"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: no progress recorded; run `ffrd progress <chapter>`\n"
+
+
+def test_report_without_a_lens_file_exits_1_through_the_cli(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["report", "--lens", "made-up-lens"])
+    assert exit_info.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("ffrd: ")
+    assert "made-up-lens.toml" in err
+    assert err.endswith("\n")

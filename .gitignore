@@ -1,5 +1,7 @@
 /vendor/
 /vanilla/
+work/
+.env.local
 /build/
 /tools/scenes/bin/
 /tools/scenes/obj/
