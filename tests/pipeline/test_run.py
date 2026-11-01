@@ -339,8 +339,9 @@ CHAPTER_ONE_BIBLE: dict[str, Any] = {
             "meaning": "Made-up callback meaning. Not game text.",
         }
     ],
+    "arcs": [],
 }
-EMPTY_BIBLE: dict[str, Any] = {"characters": [], "facts": [], "callbacks": []}
+EMPTY_BIBLE: dict[str, Any] = {"characters": [], "facts": [], "callbacks": [], "arcs": []}
 
 
 def _line(namespace: str, key: str, speaker: str | None, english: str, chapter: int | None) -> SceneLine:
@@ -849,6 +850,7 @@ UNPLACED_BIBLE: dict[str, Any] = {
             "meaning": "Made-up callback meaning unplaced. Not game text.",
         }
     ],
+    "arcs": [],
 }
 
 

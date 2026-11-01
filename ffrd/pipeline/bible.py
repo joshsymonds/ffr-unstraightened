@@ -11,11 +11,15 @@ from ffrd.pipeline.store import Store
 STAGE = "bible"
 
 INSTRUCTIONS = (
-    "Read this chapter's lines and the earlier chapter bibles. Return JSON with three lists. "
-    "characters: one entry per speaker in this chapter, with speaker and notes. "
+    "Read this chapter's lines and the earlier chapter bibles. Return JSON with four lists. "
+    "characters: one entry per speaker in this chapter, with speaker, notes and gender. "
     "facts: story facts this chapter establishes, each with the lines that show it. "
     "callbacks: lines later scenes rely on, each with its meaning, the lines of this chapter that "
     "depend on it (may be empty), and it may pay off a line from an earlier bible. "
+    "arcs: the story arcs this chapter moves forward. Reuse an earlier bible's arc id when the arc continues, "
+    "otherwise give a new id. Each arc names its characters by speaker id, a state of one sentence for this "
+    "chapter, and beats, each with the line it sits on, its kind (setup, escalation, declaration, payoff or other) "
+    "and whether it is earned. "
     "Refer to lines only by namespace and key."
 )
 
@@ -33,8 +37,12 @@ SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"speaker": {"type": "string"}, "notes": {"type": "string"}},
-                "required": ["speaker", "notes"],
+                "properties": {
+                    "speaker": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "gender": {"type": "string"},
+                },
+                "required": ["speaker", "notes", "gender"],
                 "additionalProperties": False,
             },
         },
@@ -63,8 +71,34 @@ SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        "arcs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "characters": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "state": {"type": "string"},
+                    "beats": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "line": REF,
+                                "kind": {"type": "string", "enum": ["setup", "escalation", "declaration", "payoff", "other"]},
+                                "earned": {"type": "boolean"},
+                            },
+                            "required": ["line", "kind", "earned"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["id", "characters", "state", "beats"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["characters", "facts", "callbacks"],
+    "required": ["characters", "facts", "callbacks", "arcs"],
     "additionalProperties": False,
 }
 
@@ -93,6 +127,7 @@ def _refs(bible: Mapping[str, Any]) -> list[tuple[str, str]]:
     for callback in bible["callbacks"]:
         refs.append((callback["line"]["namespace"], callback["line"]["key"]))
         refs.extend((ref["namespace"], ref["key"]) for ref in callback["depends"])
+    refs.extend((beat["line"]["namespace"], beat["line"]["key"]) for arc in bible["arcs"] for beat in arc["beats"])
     return refs
 
 
@@ -100,11 +135,17 @@ def _label(number: int | None) -> str:
     return "unplaced" if number is None else f"chapter {number}"
 
 
-def _check(output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]]) -> Rejected | None:
-    speakers = {line.speaker for line in lines}
+def _check(
+    output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]], speakers: Set[str]
+) -> Rejected | None:
+    chapter_speakers = {line.speaker for line in lines}
     for character in output["characters"]:
-        if character["speaker"] not in speakers:
+        if character["speaker"] not in chapter_speakers:
             return Rejected(f"{_label(number)} character speaker {character['speaker']!r} speaks no line of this chapter")
+    for arc in output["arcs"]:
+        for speaker in arc["characters"]:
+            if speaker not in speakers:
+                return Rejected(f"{_label(number)} arc {arc['id']!r} character speaker {speaker!r} speaks no in-scope line")
     for namespace, key in _refs(output):
         if (namespace, key) not in scope:
             return Rejected(f"{_label(number)} ref {namespace}/{key} names no line passed to the story bible")
@@ -117,6 +158,7 @@ def chapter(
     lines: Sequence[Line],
     earlier: Sequence[Mapping[str, Any]],
     scope: Set[tuple[str, str]],
+    speakers: Set[str],
     ask: Ask,
 ) -> dict[str, Any] | Unfinished | Rejected:
     line_json = json.dumps([asdict(line) for line in lines], sort_keys=True, ensure_ascii=False)
@@ -128,7 +170,7 @@ def chapter(
         output = ask(parts, SCHEMA)
         if isinstance(output, Unfinished | Rejected):
             raise _Refused(output)
-        problem = _check(output, number, lines, scope)
+        problem = _check(output, number, lines, scope, speakers)
         if problem is not None:
             raise _Refused(problem)
         return {**output, "chapter": number}
@@ -142,9 +184,10 @@ def chapter(
 
 def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], ask: Ask) -> list[dict[str, Any]] | Unfinished | Rejected:
     scope = {(line.namespace, line.key) for _, lines in chapters for line in lines}
+    speakers = {line.speaker for _, lines in chapters for line in lines if line.speaker}
     bibles: list[dict[str, Any]] = []
     for number, lines in chapters:
-        result = chapter(store, number, lines, bibles, scope, ask)
+        result = chapter(store, number, lines, bibles, scope, speakers, ask)
         if not isinstance(result, dict):
             return result
         bibles.append(result)
