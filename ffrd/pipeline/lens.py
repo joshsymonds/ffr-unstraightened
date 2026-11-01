@@ -10,7 +10,6 @@ from typing import Literal
 from ffrd.game import Fail
 
 Stage = Literal["triage", "screen", "intent", "judge"]
-STAGES: tuple[Stage, ...] = ("triage", "screen", "intent", "judge")
 
 ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge"})
