@@ -469,12 +469,12 @@ def test_main_passes_the_records_adapter_dir_and_epochs_to_train(monkeypatch, tm
         (
             tmp_path / "r.jsonl",
             tmp_path / "a",
-            {"epochs": 2},
+            {"base_model": finetune.BASE_MODEL, "epochs": 2},
         )
     ]
 
 
-def test_main_defaults_to_the_frozen_epochs(monkeypatch, tmp_path):
+def test_main_defaults_to_the_frozen_epochs_and_base_model(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
         finetune,
@@ -482,4 +482,15 @@ def test_main_defaults_to_the_frozen_epochs(monkeypatch, tmp_path):
         lambda records, out_dir, **kwargs: calls.append(kwargs),
     )
     finetune.main(["train", str(tmp_path / "r.jsonl"), str(tmp_path / "a")])
-    assert calls == [{"epochs": finetune.EPOCHS}]
+    assert calls == [{"base_model": finetune.BASE_MODEL, "epochs": finetune.EPOCHS}]
+
+
+def test_main_passes_base_model_to_train(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        finetune,
+        "train",
+        lambda records, out_dir, **kwargs: calls.append(kwargs),
+    )
+    finetune.main(["train", str(tmp_path / "r.jsonl"), str(tmp_path / "a"), "--base-model", "synthetic/other-base"])
+    assert calls == [{"base_model": "synthetic/other-base", "epochs": finetune.EPOCHS}]

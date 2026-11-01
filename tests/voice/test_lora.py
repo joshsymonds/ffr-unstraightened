@@ -9,6 +9,8 @@ from ffrd.voice.render import prompt
 # Made-up strings for the LoRA records. Not game text.
 TRAIN_ARGV = ["python3", "-m", "tools.voice.finetune", "train", lora.DATA, lora.ADAPTER, "--epochs"]
 EXPORT_ARGV = ["python3", "-m", "tools.voice.export", lora.ADAPTER, lora.GGUF]
+SYNTH_BASE = "synthetic/base-model-alt"
+SYNTH_QUANT = "Q4_K_M"
 
 
 def pair(split: str, n: int, *, null_speaker: bool = False) -> Pair:
@@ -89,9 +91,19 @@ def test_train_passes_epochs_to_the_finetune_job(calls: list[tuple[object, ...]]
     assert calls[-1] == ("run", [*TRAIN_ARGV, "3"])
 
 
+def test_train_passes_base_model_to_the_finetune_job(calls: list[tuple[object, ...]], train_pairs: None) -> None:
+    lora.train(base_model=SYNTH_BASE)
+    assert calls[-1] == ("run", [*TRAIN_ARGV, "1", "--base-model", SYNTH_BASE])
+
+
 def test_export_syncs_then_exports_adapter_to_gguf(calls: list[tuple[object, ...]]) -> None:
     lora.export()
     assert calls == [("sync",), ("run", EXPORT_ARGV)]
+
+
+def test_export_passes_quant_to_the_export_job(calls: list[tuple[object, ...]]) -> None:
+    lora.export(quant=SYNTH_QUANT)
+    assert calls == [("sync",), ("run", [*EXPORT_ARGV, "--quant", SYNTH_QUANT])]
 
 
 def parse(argv: list[str]) -> argparse.Namespace:
@@ -110,10 +122,30 @@ def test_register_lora_train_defaults_epochs_to_one() -> None:
     assert parse(["lora", "train"]).epochs == 1
 
 
+def test_register_lora_train_parses_base_model_and_runs_train(calls: list[tuple[object, ...]], train_pairs: None) -> None:
+    args = parse(["lora", "train", "--base-model", SYNTH_BASE])
+    args.fn(args)
+    assert calls[-1] == ("run", [*TRAIN_ARGV, "1", "--base-model", SYNTH_BASE])
+
+
+def test_register_lora_train_defaults_base_model_to_none() -> None:
+    assert parse(["lora", "train"]).base_model is None
+
+
 def test_register_lora_export_runs_export(calls: list[tuple[object, ...]]) -> None:
     args = parse(["lora", "export"])
     args.fn(args)
     assert calls == [("sync",), ("run", EXPORT_ARGV)]
+
+
+def test_register_lora_export_parses_quant_and_runs_export(calls: list[tuple[object, ...]]) -> None:
+    args = parse(["lora", "export", "--quant", SYNTH_QUANT])
+    args.fn(args)
+    assert calls == [("sync",), ("run", [*EXPORT_ARGV, "--quant", SYNTH_QUANT])]
+
+
+def test_register_lora_export_defaults_quant_to_none() -> None:
+    assert parse(["lora", "export"]).quant is None
 
 
 def test_register_lora_requires_an_action() -> None:

@@ -18,25 +18,31 @@ def records(pairs: Sequence[Pair]) -> list[dict[str, str]]:
     ]
 
 
-def train(epochs: int = 1) -> None:
+def train(epochs: int = 1, base_model: str | None = None) -> None:
     rows = records(load_pairs("train"))
     remote.sync()
     count = remote.stage(rows, DATA)
-    remote.run(["python3", "-m", "tools.voice.finetune", "train", DATA, ADAPTER, "--epochs", str(epochs)])
+    argv = ["python3", "-m", "tools.voice.finetune", "train", DATA, ADAPTER, "--epochs", str(epochs)]
+    if base_model is not None:
+        argv += ["--base-model", base_model]
+    remote.run(argv)
     print(f"staged {count} lora records")
 
 
-def export() -> None:
+def export(quant: str | None = None) -> None:
     remote.sync()
-    remote.run(["python3", "-m", "tools.voice.export", ADAPTER, GGUF])
+    argv = ["python3", "-m", "tools.voice.export", ADAPTER, GGUF]
+    if quant is not None:
+        argv += ["--quant", quant]
+    remote.run(argv)
 
 
 def cmd_train(args: argparse.Namespace) -> None:
-    train(args.epochs)
+    train(args.epochs, args.base_model)
 
 
 def cmd_export(args: argparse.Namespace) -> None:
-    export()
+    export(args.quant)
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -44,6 +50,8 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     actions = lora.add_subparsers(dest="action", required=True)
     train_p = actions.add_parser("train", help="stage the train pairs and finetune the adapter on the GPU host")
     train_p.add_argument("--epochs", type=int, default=1, help="passes over the training records")
+    train_p.add_argument("--base-model", default=None, help="base model to finetune (default: the finetune job's default)")
     train_p.set_defaults(fn=cmd_train)
     export_p = actions.add_parser("export", help="export the finetuned adapter to GGUF on the GPU host")
+    export_p.add_argument("--quant", default=None, help="GGUF quantization type (default: the export job's default)")
     export_p.set_defaults(fn=cmd_export)

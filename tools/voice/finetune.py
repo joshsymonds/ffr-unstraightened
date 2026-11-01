@@ -1,7 +1,7 @@
 """LoRA training job for the GPU host. It trains an adapter on 4-bit Gemma 4 E4B from JSON Lines records of
 {"prompt": str, "target": str}, computes the loss on target tokens only, and saves the adapter.
 
-Run from the scratch directory as `python3 -m tools.voice.finetune train <records> <adapter_dir> [--epochs N]`.
+Run from the scratch directory as `python3 -m tools.voice.finetune train <records> <adapter_dir> [--epochs N] [--base-model NAME]`.
 Stdout carries one `epoch<TAB>step<TAB>loss` line per optimizer step and nothing else. Errors never carry record text.
 """
 
@@ -252,8 +252,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     fit.add_argument("records", type=pathlib.Path, help="JSON Lines file of prompt and target")
     fit.add_argument("adapter_dir", type=pathlib.Path, help="directory the adapter is saved to")
     fit.add_argument("--epochs", type=int, default=EPOCHS)
+    fit.add_argument("--base-model", default=BASE_MODEL, help="Hugging Face name of the base model to finetune")
     args = parser.parse_args(argv)
-    train(args.records, args.adapter_dir, epochs=args.epochs)
+    train(args.records, args.adapter_dir, base_model=args.base_model, epochs=args.epochs)
 
 
 if __name__ == "__main__":

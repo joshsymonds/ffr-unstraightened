@@ -78,11 +78,12 @@ def export(adapter_dir: pathlib.Path, out: pathlib.Path, quant: str = QUANT) -> 
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Merge a LoRA adapter and export one Q8_0 GGUF.")
+    parser = argparse.ArgumentParser(description="Merge a LoRA adapter and export one quantized GGUF.")
     parser.add_argument("adapter_dir", type=pathlib.Path)
     parser.add_argument("out", type=pathlib.Path)
+    parser.add_argument("--quant", default=QUANT, help="llama-quantize type of the GGUF")
     args = parser.parse_args(argv)
-    export(args.adapter_dir, args.out)
+    export(args.adapter_dir, args.out, quant=args.quant)
 
 
 if __name__ == "__main__":
