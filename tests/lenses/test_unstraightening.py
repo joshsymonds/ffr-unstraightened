@@ -146,3 +146,14 @@ def test_mutual_support_wins_over_every_rule(lens: Lens, stage: Stage) -> None:
     (text,) = labelled(lens, stage, "protect-mutual-support")
     assert "every rule" in text
     assert U4 in text
+
+
+U7_LABELS: tuple[tuple[Stage, str], ...] = tuple(
+    (stage, label) for stage in BOUND_STAGES for label in ("u7-gender-rule", "gender-rule-narrow") if label in BINDING[stage]
+)
+
+
+@pytest.mark.parametrize(("stage", "label"), U7_LABELS)
+def test_u7_covers_a_plainly_implied_gender_rule(lens: Lens, stage: Stage, label: str) -> None:
+    (text,) = labelled(lens, stage, label)
+    assert "plainly implies" in text

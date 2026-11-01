@@ -38,10 +38,10 @@ criteria = [
     "[u4-stake-through-other] Flag u4-stake-through-other when a line about a woman explains her own goal, fear or worth in terms of what a specific man thinks of her or needs from her. The cast notes give each character's gender. This criterion covers only a woman whose stake runs through a man.",
     "[u5-rivalry-over-one-person] Flag u5-rivalry-over-one-person when two women in the scene compete or quarrel over the affection or attention of one man. The cast notes give each character's gender. This criterion covers only two women rivaling over a man.",
     "[u6-overwrought-declaration] Flag u6-overwrought-declaration when a character declares romantic love or longing in extreme, breathless or life-or-death terms. Flag it broadly: do not decide whether the declaration is earned. The intent and judge stages decide that from the arc beats.",
-    "[u7-gender-rule] Flag u7-gender-rule when a line states what men or women may do, must do, or are like.",
+    "[u7-gender-rule] Flag u7-gender-rule when a line states or plainly implies what men or women may do, must do, or are like, including a gendered expectation such as who may fight, being a man, or acting like a girl.",
     "[first-person-desire] A character's own wish for an opposite-sex partner is protected. When a character voices their own desire, do not flag it under u1-presumed-opposite-sex. Only another character presuming that partner is flagged.",
     "[romantic-partner-only] u3-devotion-as-vow covers devotion to a romantic partner or love interest only. Oaths to lords, causes and comrades are untouched and must not be flagged under u3-devotion-as-vow.",
-    "[gender-rule-narrow] u7-gender-rule is narrow. Do not flag a line in which a character is vulnerable or protective, even when the line mentions a gender. Flag only a line that states what men or women may do, must do, or are like.",
+    "[gender-rule-narrow] u7-gender-rule is narrow. Do not flag a line in which a character is vulnerable or protective, even when the line mentions a gender. Flag only a line that states or plainly implies what men or women may do, must do, or are like, including a gendered expectation such as who may fight, being a man, or acting like a girl.",
     "[romance-as-default] Flag under u2-romance-outranks a line that treats romance as the default frame, such as being unpartnered as incomplete or marriage as what a life is for. Flag it broadly: the intent and judge stages apply the same earned and established-trait exemptions as for u2-romance-outranks.",
     "[all-characters] The romance rules u1-presumed-opposite-sex, u2-romance-outranks, u3-devotion-as-vow and u6-overwrought-declaration, and the romance-as-default framing, apply to every character's romance framing, men's as well as women's, not only women's. The woman and man clauses of u4-stake-through-other and u5-rivalry-over-one-person are stated in their own criteria.",
     "[act-on-clear-hits] Flag every line that clearly hits a rule above, including a brief or mild hit and a hit inside an otherwise ordinary line. Do not leave a hit unflagged because it seems minor or because the intent stage may keep it: the intent and judge stages apply the exemptions. When a line plausibly hits a rule and you are unsure whether an exemption or protection covers it, flag it: the intent and judge stages decide, and every protection still holds there. A line with no hit stays unflagged, whatever its tone.",
@@ -80,7 +80,7 @@ You fix only the lines the screen flagged under the triage ids. Change every fla
 
 [u6-overwrought-declaration] For an unearned romantic declaration in extreme, breathless or life-or-death terms: write it in an adult register and keep its sentiment.
 
-[u7-gender-rule] For a line that states what men or women may do, must do, or are like: make it neutral. Never change a line in which a character is vulnerable or protective, even when it mentions a gender.
+[u7-gender-rule] For a line that states or plainly implies what men or women may do, must do, or are like, including a gendered expectation such as who may fight, being a man, or acting like a girl: make it neutral. Never change a line in which a character is vulnerable or protective, even when it mentions a gender.
 
 [leave-for-plot] A flagged line that can be fixed only by changing a plot fact stays vanilla. Do not change the plot to make a fix work.
 
@@ -131,9 +131,9 @@ You judge one rewrite of a flagged line against its vanilla line. A change that 
 
 [u6-overwrought-declaration] A passing rewrite of an unearned declaration is in adult register and keeps its sentiment. Reject a rewrite that drops the sentiment, or that keeps extreme, breathless or life-or-death terms.
 
-[u7-gender-rule] A passing rewrite states the line neutrally, without what men or women may do, must do, or are like. Reject a rewrite that keeps a gender rule in the line.
+[u7-gender-rule] A passing rewrite states the line neutrally, without what men or women may do, must do, or are like. Reject a rewrite that keeps a gender rule in the line, whether it states or plainly implies it.
 
-[gender-rule-narrow] U7 touches only a line that states a gender rule. Reject any change to a line in which a character is vulnerable or protective, even when the line mentions a gender.
+[gender-rule-narrow] U7 touches only a line that states or plainly implies a gender rule. Reject any change to a line in which a character is vulnerable or protective, even when the line mentions a gender.
 
 [protect-love-and-couples] Reject a rewrite that changes heterosexual attraction, a couple, a marriage, a promise, or who loves whom. Those are the story's relationships.
 

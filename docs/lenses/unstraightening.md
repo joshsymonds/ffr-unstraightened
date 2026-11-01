@@ -80,7 +80,9 @@ allowed.
 - Trigger: A line in this scene states what men or women may do, must do, or are like.
 - Fix: Make it neutral.
 - Refinement: `gender-rule-narrow`. This rule is narrow. It is about the rule a
-  line states, such as who may fight, be a man, or like a girl.
+  line states or plainly implies, such as who may fight, be a man, or like a girl.
+  The screen, intent and judge treat a plainly implied gendered expectation like a
+  stated one.
 
 ## Refinements
 
