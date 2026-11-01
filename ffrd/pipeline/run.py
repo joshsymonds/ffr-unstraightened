@@ -332,9 +332,11 @@ def _intend(
     callbacks = tuple(bible.touching(ctx.bibles, line.namespace, line.key))
     context = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
     intended = stages.intent(ctx.store, ctx.lens, scene, line, reasons, callbacks, context, ask)
-    if not isinstance(intended, str):
+    if not isinstance(intended, stages.Intent):
         return _outcome(line, reasons, "unfinished")
-    return stages.Target(line, intended, callbacks, context)
+    if intended.keep:
+        return _outcome(line, reasons, "untouched")
+    return stages.Target(line, intended.text, callbacks, context)
 
 
 def _line(

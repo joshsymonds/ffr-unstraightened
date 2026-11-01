@@ -7,6 +7,7 @@ from ffrd.pipeline.lens import Lens, Stage, TriageQuestion, load_lens
 
 LENS = Path(__file__).resolve().parents[2] / "lenses" / "unstraightening.toml"
 LABEL = re.compile(r"\[([a-z0-9]+(?:-[a-z0-9]+)*)\]")
+U4 = "u4-stake-through-other"
 
 # DL23's seven triage questions, verbatim, in id order u1..u7.
 TRIAGE: tuple[TriageQuestion, ...] = (
@@ -43,6 +44,7 @@ TRIAGE: tuple[TriageQuestion, ...] = (
 RULES: tuple[str, ...] = tuple(q.id for q in TRIAGE)
 PROTECTIONS: tuple[str, ...] = (
     "protect-love-and-couples",
+    "protect-mutual-support",
     "protect-plot",
     "protect-traits",
     "protect-operatic-stakes",
@@ -62,6 +64,7 @@ BINDING: dict[Stage, frozenset[str]] = {
             "gender-rule-narrow",
             "romance-as-default",
             "all-characters",
+            "act-on-clear-hits",
             *PROTECTIONS,
             *EXCLUSIONS,
         }
@@ -71,7 +74,8 @@ BINDING: dict[Stage, frozenset[str]] = {
             *RULES,
             "earned",
             "no-invented-motive",
-            "fewest-lines",
+            "act-on-clear-hits",
+            "minimal-fix",
             "leave-for-plot",
             *PROTECTIONS,
             *EXCLUSIONS,
@@ -85,7 +89,7 @@ BINDING: dict[Stage, frozenset[str]] = {
             "romantic-partner-only",
             "no-invented-motive",
             "gender-rule-narrow",
-            "fewest-lines",
+            "minimal-fix",
             "leave-for-plot",
             *PROTECTIONS,
             *EXCLUSIONS,
@@ -116,3 +120,40 @@ def test_stage_carries_exactly_its_bound_labels(lens: Lens, stage: Stage) -> Non
 def test_rule_is_carried_by_each_stage_it_is_bound_to(lens: Lens, rule: str) -> None:
     carrying = {stage for stage in BOUND_STAGES if rule in labels(lens.stage_text(stage))}
     assert carrying == {stage for stage in BOUND_STAGES if rule in BINDING[stage]}
+
+
+def labelled(lens: Lens, stage: Stage, label: str) -> list[str]:
+    """The paragraphs of a stage's text that start with the given label."""
+    match stage:
+        case "screen":
+            paragraphs = list(lens.screen_criteria)
+        case "intent":
+            paragraphs = lens.intent_rule.split("\n\n")
+        case _:
+            paragraphs = lens.judge_rubric.split("\n\n")
+    return [p.strip() for p in paragraphs if p.strip().startswith(f"[{label}]")]
+
+
+@pytest.mark.parametrize("stage", BOUND_STAGES)
+def test_u4_is_a_womans_stake_routed_through_a_man(lens: Lens, stage: Stage) -> None:
+    (text,) = labelled(lens, stage, U4)
+    assert re.search(r"\bwoman\b", text)
+    assert re.search(r"\bman\b", text)
+
+
+@pytest.mark.parametrize("stage", BOUND_STAGES)
+def test_mutual_support_wins_over_every_rule(lens: Lens, stage: Stage) -> None:
+    (text,) = labelled(lens, stage, "protect-mutual-support")
+    assert "every rule" in text
+    assert U4 in text
+
+
+U7_LABELS: tuple[tuple[Stage, str], ...] = tuple(
+    (stage, label) for stage in BOUND_STAGES for label in ("u7-gender-rule", "gender-rule-narrow") if label in BINDING[stage]
+)
+
+
+@pytest.mark.parametrize(("stage", "label"), U7_LABELS)
+def test_u7_covers_a_plainly_implied_gender_rule(lens: Lens, stage: Stage, label: str) -> None:
+    (text,) = labelled(lens, stage, label)
+    assert "plainly implies" in text

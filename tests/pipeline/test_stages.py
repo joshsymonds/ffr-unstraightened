@@ -18,12 +18,14 @@ from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
+    INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
     RESCREEN_INSTRUCTIONS,
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     Batch,
+    Intent,
     Scene,
     SceneLine,
     Target,
@@ -341,7 +343,8 @@ def test_racing_first_asks_choose_one_account_and_every_ask_is_answered() -> Non
 CALLBACK = {"line": {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, "depends": [], "chapter": 1}
 REASONS = ("made-up-alpha",)
 INTENT_TEXT = "Made-up intent. Not game text."
-INTENT_ANSWER = {"intent": "Made-up intent. Not game text."}
+INTENT_ANSWER = {"intent": "Made-up intent. Not game text.", "keep": False}
+INTENT = Intent(text="Made-up intent. Not game text.", keep=False)
 TARGET_ONE = Target(LINE_ONE, "Made-up intent.", (CALLBACK,), CONTEXT)
 TARGET_TWO = Target(LINE_TWO, "Made-up intent two. Not game text.", (), CHANGED_CONTEXT)
 DRAFT_ONE = ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
@@ -373,11 +376,17 @@ class FakeRenderer:
         return self.fake(speaker, text)
 
 
-def test_intent_schema_requires_intent_and_forbids_extra_properties() -> None:
+def test_intent_schema_requires_intent_and_keep_and_forbids_extra_properties() -> None:
     assert INTENT_SCHEMA["type"] == "object"
-    assert INTENT_SCHEMA["required"] == ["intent"]
+    assert INTENT_SCHEMA["required"] == ["intent", "keep"]
     assert INTENT_SCHEMA["properties"]["intent"]["type"] == "string"
+    assert INTENT_SCHEMA["properties"]["keep"]["type"] == "boolean"
     assert INTENT_SCHEMA["additionalProperties"] is False
+
+
+def test_intent_instructions_tell_the_model_to_set_keep_when_the_line_stays_unchanged() -> None:
+    assert "keep" in INTENT_INSTRUCTIONS
+    assert "unchanged" in INTENT_INSTRUCTIONS
 
 
 def test_intent_asks_opus_with_schema_and_returns_intent(tmp_path: Path) -> None:
@@ -385,10 +394,18 @@ def test_intent_asks_opus_with_schema_and_returns_intent(tmp_path: Path) -> None
 
     result = intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
 
-    assert result == "Made-up intent. Not game text."
+    assert result == INTENT
     model, _parts, schema = ask.calls[0]
     assert model == claude.OPUS
     assert schema == INTENT_SCHEMA
+
+
+def test_intent_returns_keep_true_when_the_rule_leaves_the_line_unchanged(tmp_path: Path) -> None:
+    ask = Fake({"intent": "Made-up kept intent. Not game text.", "keep": True})
+
+    result = intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
+
+    assert result == Intent(text="Made-up kept intent. Not game text.", keep=True)
 
 
 def test_intent_prompt_carries_rule_callbacks_japanese_lines_and_target_reasons(tmp_path: Path) -> None:
@@ -407,7 +424,7 @@ def test_fresh_store_on_same_root_returns_stored_intent_without_asking(tmp_path:
     intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, Fake(INTENT_ANSWER))
     ask = Fake()
 
-    assert intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask) == "Made-up intent. Not game text."
+    assert intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask) == INTENT
     assert ask.calls == []
 
 
@@ -424,7 +441,7 @@ def test_failed_intent_is_returned_unstored_and_asked_again(tmp_path: Path, fail
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert intent(store, LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask) == "Made-up intent. Not game text."
+    assert intent(store, LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask) == INTENT
     assert len(ask.calls) == 2
     assert store.unfinished() == []
 
