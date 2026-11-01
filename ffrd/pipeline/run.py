@@ -1,6 +1,7 @@
-"""run: take a lens's scenes through the pipeline, then write its outcome records to work/<lens>/ and its changed lines to dialog/<lens>/. Progress prints scene keys and counts, and writes keys, counts and edits, never vanilla text."""
+"""run: take a lens's scenes through the pipeline, then write its outcome records to work/<lens>/ and its changed lines to dialog/<lens>/. Progress prints opaque scene labels and counts, and writes keys, counts and edits, never vanilla text."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -126,13 +127,19 @@ def _order(c: Change) -> tuple[list[int | str], str, list[int | str], str]:
     return (natural(c.namespace), c.namespace, natural(c.key), c.key)
 
 
+def opaque_label(text: str) -> str:
+    """The first 8 hex of the sha256 of text, which names a scene key or a namespace/key line in progress and Fail output."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
 def _check_changes(changes: Sequence[Change]) -> None:
     seen: set[tuple[str, str]] = set()
     for c in changes:
+        line = opaque_label(f"{c.namespace}/{c.key}")
         if vanilla_hash(c.text) == c.vanilla:
-            raise Fail(f"{c.namespace} {c.key}: text is unchanged from vanilla, nothing to write")
+            raise Fail(f"line {line}: text is unchanged from vanilla, nothing to write")
         if (c.namespace, c.key) in seen:
-            raise Fail(f"{c.namespace} {c.key}: more than one change for this line")
+            raise Fail(f"line {line}: more than one change for this line")
         seen.add((c.namespace, c.key))
 
 
@@ -578,12 +585,12 @@ def run(
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
     chapter_one: list[Outcome] = []
 
-    def scene_pass(item: tuple[Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall]:
+    def scene_pass(item: tuple[int, Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall]:
         nonlocal waiting
-        scene, ask = item
+        position, scene, ask = item
         scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, ask)
         with progress:
-            out(f"scene {scene.key}: {_counts(scene_outcomes)}")
+            out(f"scene {position}/{len(scenes)} {opaque_label(scene.key)}: {_counts(scene_outcomes)}")
             if _holds_chapter_one(scene):
                 chapter_one.extend(scene_outcomes)
                 waiting -= 1
@@ -591,7 +598,7 @@ def run(
                     _write_provisional(root, lens, chapter_one)
         return scene_outcomes, scene_changes, scene_recall
 
-    scene_results = claude.fan_out(scene_pass, [(scene, batch()) for scene in scenes])
+    scene_results = claude.fan_out(scene_pass, [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)])
     outcomes: list[Outcome] = []
     changes: list[Change] = []
     recall = _Recall()

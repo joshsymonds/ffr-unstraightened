@@ -251,7 +251,7 @@ def test_unedited_change_is_refused_and_nothing_is_written(tmp_path: Path) -> No
     with pytest.raises(Fail) as raised:
         write_dialog(directory, changes)
     message = str(raised.value)
-    assert "made-up-scene-z 9" in message
+    assert message == "line ec54f750: text is unchanged from vanilla, nothing to write"
     assert EN_TWO not in message
     assert _dialog_files(directory) == ["chapter-01.toml"]
     assert (directory / "chapter-01.toml").read_text() == "# Made-up old chapter one. Not game text.\n"
@@ -268,7 +268,7 @@ def test_duplicate_namespace_and_key_is_refused_and_nothing_is_written(tmp_path:
     directory = tmp_path / "dialog" / LENS
     with pytest.raises(Fail) as raised:
         write_dialog(directory, [_change(key="7"), _change(key="7", text=TEXT_TWO)])
-    assert "made-up-scene-a 7" in str(raised.value)
+    assert str(raised.value) == "line 4ba5f09c: more than one change for this line"
     assert not directory.exists()
 
 
@@ -306,7 +306,9 @@ OPUS_B1 = "Made-up opus rewrite of b one. Not game text."
 OPUS_B2 = "Made-up opus rewrite of b two. Not game text."
 OPUS_C1 = "Made-up opus unattributed. Not game text."
 JEV_HIGH = {ALPHA: 0.9, BETA: 0.9}
-COUNT_LINE = re.compile(r"(?:scene [a-z0-9-]+|total): \d+ changed, \d+ kept for plot, \d+ gate failed, \d+ unfinished, \d+ untouched")
+COUNT_LINE = re.compile(
+    r"(?:scene \d+/\d+ [0-9a-f]{8}|total): \d+ changed, \d+ kept for plot, \d+ gate failed, \d+ unfinished, \d+ untouched"
+)
 LENS_TOML = """\
 [[triage]]
 id = "made-up-first-id"
@@ -376,9 +378,9 @@ EXPECTED_OUTCOMES = [
     Outcome(NS_C, "1", None, None, (ALPHA,), "changed", None, "opus"),
 ]
 EXPECTED_PRINTED = [
-    "scene made-up-scene-a: 1 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched",
-    "scene made-up-scene-b: 1 changed, 0 kept for plot, 0 gate failed, 1 unfinished, 0 untouched",
-    "scene made-up-scene-c: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+    "scene 1/3 54193dbc: 1 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched",
+    "scene 2/3 e4beb400: 1 changed, 0 kept for plot, 0 gate failed, 1 unfinished, 0 untouched",
+    "scene 3/3 0f594d36: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
     "total: 3 changed, 1 kept for plot, 1 gate failed, 1 unfinished, 1 untouched",
 ]
 
@@ -1069,6 +1071,35 @@ def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:
     assert not any(text in line for line in printed for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_B1))
 
 
+# Made-up scene key holding a sentinel name. Not game text.
+SENTINEL = "made-up-scene-Zorbleth"
+SENTINEL_SCENE = Scene(SENTINEL, (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1), _line(NS_A, "3", "made-up-speaker-a", EN_A3, 1)))
+
+
+def test_scene_lines_name_each_scene_by_position_and_label_and_never_its_key(tmp_path: Path) -> None:
+    printed: list[str] = []
+    _run(tmp_path, _claude(), printed, jev=FakeJev(JEV_HIGH), scenes=(SENTINEL_SCENE, SCENE_B))
+    assert not any("Zorbleth" in line for line in printed)
+    scene_lines = sorted(line.split(":")[0] for line in printed if line.startswith("scene "))
+    assert scene_lines == ["scene 1/2 2a41d117", "scene 2/2 e4beb400"]
+    assert all(COUNT_LINE.fullmatch(line) for line in printed)
+
+
+def test_run_command_stdout_and_stderr_never_name_the_sentinel_scene_key(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, _claude(), FakeJev(JEV_HIGH), scenes=(SENTINEL_SCENE, SCENE_B))
+    args = _parse(["run", "--lens", LENS])
+
+    args.fn(args)
+
+    captured = capsys.readouterr()
+    assert "Zorbleth" not in captured.out
+    assert "Zorbleth" not in captured.err
+    scene_lines = sorted(line.split(":")[0] for line in captured.out.splitlines() if line.startswith("scene "))
+    assert scene_lines == ["scene 1/2 2a41d117", "scene 2/2 e4beb400"]
+
+
 def test_outcomes_and_dialog_are_written_and_hold_no_english(tmp_path: Path) -> None:
     _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
     outcome_text = (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8")
@@ -1357,7 +1388,7 @@ def test_line_named_on_both_passes_reverts_to_gate_failed_scene_and_its_sibling_
     ]
     assert _dialog_entries(tmp_path) == {D2}
     assert printed == [
-        "scene made-up-scene-d: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched",
+        "scene 1/1 d19f5402: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched",
         "total: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched",
     ]
 
@@ -1459,8 +1490,8 @@ def test_line_named_on_both_arc_passes_ends_gate_failed_arc_with_no_dialog_entry
     assert _dialog_entries(tmp_path) == {(NS_B, "1")}
     # The two scenes finish in either order, so only the total line has a fixed place.
     assert sorted(printed[:-1]) == [
-        "scene made-up-scene-x: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
-        "scene made-up-scene-y: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+        "scene 1/2 d68762f0: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
+        "scene 2/2 c6863ef3: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
     ]
     assert printed[-1] == "total: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1 untouched"
 
@@ -1507,11 +1538,13 @@ def test_arcs_json_and_the_report_line_show_the_arcs_left_with_changes_after_rev
 
 def test_line_changed_in_two_scenes_is_refused_by_run_and_nothing_is_written(tmp_path: Path) -> None:
     # Made-up second scene that carries scene a's first line. Not game text.
-    shared = Scene("made-up-scene-d", (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),))
+    shared = Scene(SENTINEL, (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),))
     with pytest.raises(Fail) as raised:
         _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), scenes=(SCENE_A, shared))
     message = str(raised.value)
-    assert f"{NS_A} 1" in message
+    assert message == "line eadc9f7a: more than one change for this line"
+    assert "Zorbleth" not in message
+    assert NS_A not in message
     assert not any(text in message for text in (EN_A1, VOICE_A1, OPUS_A1))
     work = tmp_path / "work" / LENS
     assert not (work / report.OUTCOMES).exists()
@@ -1650,7 +1683,7 @@ def _three_arc_claude() -> FakeClaude:
 
 
 def _scene_order(printed: Sequence[str]) -> list[str]:
-    return [line.split()[1].removesuffix(":") for line in printed if line.startswith("scene ")]
+    return [line.split()[2].removesuffix(":") for line in printed if line.startswith("scene ")]
 
 
 def test_in_flight_calls_reach_and_never_exceed_the_limit_in_every_stage_and_beat_the_sequential_sum(
@@ -1688,9 +1721,9 @@ def test_outputs_are_byte_identical_whatever_order_the_scenes_finish_in_and_at_o
         snapshots[name] = _snapshot(tmp_path / name)
         orders[name] = _scene_order(printed)
 
-    assert orders["one-at-a-time"] == ["made-up-scene-a", "made-up-scene-b", "made-up-scene-c"]
-    assert orders["scene-a-finishes-last"][-1] == "made-up-scene-a"
-    assert orders["scene-a-finishes-first"][0] == "made-up-scene-a"
+    assert orders["one-at-a-time"] == ["54193dbc", "e4beb400", "0f594d36"]
+    assert orders["scene-a-finishes-last"][-1] == "54193dbc"
+    assert orders["scene-a-finishes-first"][0] == "54193dbc"
     assert f"work/{LENS}/{report.OUTCOMES}" in snapshots["one-at-a-time"]
     assert f"repo/dialog/{LENS}/chapter-01.toml" in snapshots["one-at-a-time"]
     assert snapshots["scene-a-finishes-last"] == snapshots["one-at-a-time"]
@@ -1910,7 +1943,7 @@ def test_scenes_run_chapter_one_first_then_ascending_chapters_and_chapterless_la
     claude_module.set_concurrency(1)
     printed: list[str] = []
     _run(tmp_path, _add_mixed(_claude()), printed, jev=FakeJev(JEV_HIGH), scenes=(SCENE_C, SCENE_B, MIXED, SCENE_A), scene_table=True)
-    assert _scene_order(printed) == ["made-up-scene-mixed", "made-up-scene-a", "made-up-scene-b", "made-up-scene-c"]
+    assert _scene_order(printed) == ["7a5aa354", "54193dbc", "e4beb400", "0f594d36"]
 
 
 def test_provisional_file_holds_chapter_one_counts_in_report_format(tmp_path: Path) -> None:
@@ -1984,7 +2017,7 @@ def test_through_one_runs_only_chapter_one_and_writes_its_outputs(tmp_path: Path
     assert outcomes == EXPECTED_OUTCOMES[:4]
     assert not any(text in prompt for prompt in _all_prompts(claude, jev) for text in (NS_B, NS_C, NS_OUT, EN_B1, EN_B2, EN_C1, EN_OUT))
     assert len(jev.calls) == 1
-    assert _scene_order(printed) == [SCENE_A.key]
+    assert _scene_order(printed) == ["54193dbc"]
     assert _dialog_files(tmp_path / "repo" / "dialog" / LENS) == ["chapter-01.toml"]
     assert len((tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()) == 4
     assert _c01_path(tmp_path).read_text(encoding="utf-8") == EXPECTED_PROVISIONAL

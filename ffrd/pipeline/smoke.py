@@ -1,4 +1,4 @@
-"""smoke: run one in-scope scene through every pipeline stage under work/smoke/, call each data-conditional stage the run left without a result once, print the DL38 prefix report and each required stage's result count, and fail when a required stage produced no result. Prints keys, labels and counts, never scene text."""
+"""smoke: run one in-scope scene through every pipeline stage under work/smoke/, call each data-conditional stage the run left without a result once, print the DL38 prefix report and each required stage's result count, and fail when a required stage produced no result. Prints opaque scene labels, prefix and stage labels and counts, never scene keys or text."""
 
 import argparse
 import re
@@ -13,7 +13,7 @@ from ffrd.game import Fail
 from ffrd.pipeline import arcs, bible, claude, coherence, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.run import Outcome, _chapters, run
+from ffrd.pipeline.run import Outcome, _chapters, opaque_label, run
 from ffrd.pipeline.scope import in_scope, scoped
 from ffrd.pipeline.stages import Ask, Classifier, Scene
 from ffrd.pipeline.store import Result, Store, work_dir
@@ -130,7 +130,7 @@ def _pick(scenes: Sequence[Scene], key: str | None) -> Scene:
         for scene in scenes:
             if scene.key == key:
                 return scene
-        raise Fail(f"no in-scope scene has the key {key!r}")
+        raise Fail(f"no in-scope scene has the key {opaque_label(key)}")
     for scene in scenes:
         if sum(1 for line in scene.lines if line.speaker) >= 2:
             return scene
