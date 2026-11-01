@@ -9,7 +9,7 @@ from pathlib import Path
 import polib
 from pylocres import LocresFile
 
-MOD_NAME = "FFRS-Dialog_P"
+MOD_NAME = "FFRS-Unstraightened_P"
 APP_ID = "3259780"
 LOCRES = Path("FFRS/Content/Localization/Game")
 DEFAULT_GAME = Path.home() / ".local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE"

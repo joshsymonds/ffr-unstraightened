@@ -1,9 +1,16 @@
 """build: apply dialog/**/*.toml edits to the vanilla text and pack the mod into build/.
 
 The game's text lives in FFRS/Content/Localization/Game/<lang>/Game.locres
-inside the legacy .pak. A mod overrides it by shipping a pak with a whole
-replacement Game.locres, plus a .utoc/.ucas pair the loader requires (copies
-of the game's empty global container).
+inside the legacy .pak. The mod ships its own English locres in the same
+folder, plus a .utoc/.ucas pair the loader requires (copies of the game's
+empty global container). Two shapes:
+
+- default: en/Unstraightened.locres, holding only the edited entries, each
+  under its namespace, key and vanilla source-string hash. It relies on the
+  game honouring a second en/*.locres over Game.locres, which is unproven.
+- --full: en/Game.locres, holding the whole English table with the edits
+  applied. It replaces the game's table and is the fallback if the default
+  is not honoured.
 """
 
 import argparse
@@ -14,7 +21,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from pylocres import LocresFile
+from pylocres import Entry, LocresFile, Namespace
 
 from ffrd.game import LOCRES, MOD_NAME, Fail, build_id, paks_dir, read_locres, repo_root, vanilla, vanilla_dir, vanilla_hash
 
@@ -80,7 +87,18 @@ def load_overrides(root: Path, en: LocresFile) -> tuple[dict[tuple[str, str], st
     return overrides, errors, warnings
 
 
-def cmd_build(_args: argparse.Namespace) -> None:
+def partial_table(en: LocresFile, overrides: dict[tuple[str, str], str]) -> LocresFile:
+    """A table holding only the edited entries, each keeping its vanilla namespace, key and source-string hash."""
+    table = LocresFile()
+    table.version = en.version
+    for (ns, key), text in overrides.items():
+        if ns not in table:
+            table.add(Namespace(ns))
+        table[ns].add(Entry(key, text, en[ns][key].hash))
+    return table
+
+
+def cmd_build(args: argparse.Namespace) -> None:
     root = repo_root()
     stamp = vanilla_dir() / "BUILDID"
     if not stamp.exists():
@@ -94,16 +112,20 @@ def cmd_build(_args: argparse.Namespace) -> None:
     if errors:
         raise Fail("\n".join(errors))
 
-    for (ns, key), text in overrides.items():
-        en[ns][key].translation = text
+    if args.full:
+        for (ns, key), text in overrides.items():
+            en[ns][key].translation = text
+        table, name = en, "Game.locres"
+    else:
+        table, name = partial_table(en, overrides), "Unstraightened.locres"
 
     out = root / "build"
     if out.exists():
         shutil.rmtree(out)
     stage = out / "stage"
-    locres_path = stage / LOCRES / "en/Game.locres"
+    locres_path = stage / LOCRES / "en" / name
     locres_path.parent.mkdir(parents=True)
-    locres_path.write_bytes(en.to_binary())
+    locres_path.write_bytes(table.to_binary())
 
     check = read_locres(locres_path)
     bad = [f"{ns},{key}" for (ns, key), text in overrides.items() if check[ns][key].translation != text]
@@ -121,6 +143,6 @@ def cmd_build(_args: argparse.Namespace) -> None:
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    subparsers.add_parser("build", help="apply dialog/**/*.toml edits to vanilla text and pack the mod into build/").set_defaults(
-        fn=cmd_build
-    )
+    build = subparsers.add_parser("build", help="apply dialog/**/*.toml edits to vanilla text and pack the mod into build/")
+    build.add_argument("--full", action="store_true", help="pack the whole English table (Game.locres), not only the edited entries")
+    build.set_defaults(fn=cmd_build)
