@@ -6,7 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # ffr-unstraightened
 
 A text-only dialogue mod for FINAL FANTASY RESONANCE (Steam app 3259780, Unreal Engine).
-It changes the game's English string table and nothing else. The `ffrd` command
+It changes the game's English text. The default pak also carries an
+`FFRS/Config/UserGame.ini` that adds its own localization folder. The `ffrd` command
 line tool pulls the game's text, checks your edits against it, and packs them into
 mod files the game loads.
 
@@ -84,11 +85,11 @@ Set the game's Text Language to English before you play.
 | `ffrd extract` | Unpacks the English and Japanese `Game.locres` from the installed game's paks into `vanilla/`, later patch paks winning. Writes `vanilla/BUILDID` and a reference `vanilla/en.po`. Run it after install and after every game update. |
 | `ffrd progress <chapter>` | Records the chapter you are on. `ffrd progress` with no argument prints the recorded chapter. |
 | `ffrd find [pattern] [-n NS]` | Prints vanilla entries as TOML stubs for `dialog/`. `pattern` is a case-insensitive regex matched against text or key. `-n` is a regex the namespace must match. Requires recorded progress. Prints `# N shown, M withheld` to stderr. |
-| `ffrd build [--partial]` | Checks every `dialog/**/*.toml` edit against the game's text, then writes the mod files to `build/`. By default it packs the whole English table with the edits applied. `--partial` packs only the edited entries, which the game was seen to ignore. |
-| `ffrd install [--deck]` | Copies the three mod files into `<game>/FFRS/Content/Paks/~mods`. `--deck` copies them to a Steam Deck over `ssh`. |
+| `ffrd build [--full \| --partial \| --ue4ss]` | Checks every `dialog/**/*.toml` edit against the game's text, then writes the mod to `build/`. The default shape packs the edited entries and a `UserGame.ini` that puts them ahead of the game's table. See [Build shapes](#build-shapes). |
+| `ffrd install [--deck]` | Copies `build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas` into `<game>/FFRS/Content/Paks/~mods`, whichever pak shape the last build wrote. It does not copy the `--ue4ss` folder. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
-| `ffrd probe` | Checks which text shape the game honours, by running the game on the probe host. Prints only keys and hashes. See [Probe host](#probe-host). |
+| `ffrd probe [--shape {target,full,partial,ue4ss}]` | Checks which text shape the game honours, by running the game on the probe host. Without `--shape`, it tries `target`, then `full`. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
 | `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
 
@@ -98,13 +99,23 @@ replacement). The format and the rules `ffrd build` enforces are in
 [dialog/README.md](dialog/README.md). A stub from `ffrd find` starts with `text` set
 to the game's line; `ffrd build` rejects it until you change `text`.
 
-Each `ffrd build` writes `build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas`.
-The `.utoc` and `.ucas` files are copies of the game's empty `global` container,
-which the loader requires.
+### Build shapes
 
-The default build writes `en/Game.locres`, which holds the whole English table with the
-edits applied. `ffrd build --partial` writes `en/Unstraightened.locres` instead, which
-holds only the edited entries. See [Limits](#limits).
+`ffrd build` has four shapes. The default is `target`. Each pak shape writes
+`build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas`. The `.utoc` and `.ucas` files
+are copies of the game's empty `global` container, which the loader requires.
+
+- `target` (default): the pak holds `FFRS/Content/Localization/Unstraightened/en/Unstraightened.locres`,
+  which has only the edited entries, and `FFRS/Config/UserGame.ini`. That ini lists the
+  Unstraightened folder ahead of `Game`, so the game reads the edits first.
+- `--full`: the pak holds `FFRS/Content/Localization/Game/en/Game.locres`, the whole
+  English table with the edits applied. It replaces the game's own table.
+- `--partial`: the pak holds `FFRS/Content/Localization/Game/en/Unstraightened.locres`,
+  which has only the edited entries. The game was seen to ignore it. It is kept for
+  comparison. See [Limits](#limits).
+- `--ue4ss`: no pak. `build/UnstraightenedText/` holds `Scripts/main.lua`, an empty
+  `enabled.txt` and `edits.txt`. It needs UE4SS on the player's install, and
+  `ffrd install` does not copy it. The edits register only in English culture (`en`, `en-*`).
 
 `ffrd find` only shows lines from chapters at or below the chapter you recorded.
 Namespaces that name no chapter are never shown. A namespace names a chapter when it
@@ -164,40 +175,51 @@ probe host. They use UE4SS, a Lua mod loader for Unreal Engine games. The probe 
 Both commands refuse while FFR runs on the Steam Deck named by `FFR_DECK_HOST`. If the
 Deck cannot be reached, they print a note and go on.
 
-`ffrd probe` checks which shape the game honours. It tries the partial shape first, and
-the full shape only when the partial one is not honoured. For each shape, it packs one
-edited line of `ST_UI_TitleMenu,UI_Title_Copyright`, installs the pak in the probe host's
+`ffrd probe` checks which shape the game honours. Without `--shape`, it tries `target`
+first, and `full` only when `target` is not honoured. `--shape` probes one of
+`target`, `full`, `partial` or `ue4ss` alone. For each pak shape, it packs one edited
+line of `ST_UI_TitleMenu,UI_Title_Copyright`, installs the pak in the probe host's
 `Paks/~mods` with `.utoc` and `.ucas` copied from its `global` container, and launches
-the game. The UE4SS mod `ue4ss/UnstraightenedProbe` reads that key's hash from the
-running game. Then the
-command quits the game and removes the paks and the mod. It exits 0 and names the honoured
-shape, for example `shape honoured: full`. It refuses while FFR runs on the probe host, and
-when the probe host's game build differs from `vanilla/BUILDID`.
+the game. The `ue4ss` shape installs no pak. It runs the same probe mod beside the
+repo's text mod `ue4ss/UnstraightenedText`, whose `edits.txt` holds the one probe edit.
+The UE4SS mod `ue4ss/UnstraightenedProbe` reads that key's hash from the running game.
+Then the command quits the game and removes the paks and the mods. It exits 0 and names
+the honoured shape, for example `shape honoured: full`. It exits 1 when no shape it
+tried is honoured. When a launch's log holds no observation for the probe key, the run
+is inconclusive: it exits 1 saying the game produced no observation, and tries no
+further shape. It refuses while FFR runs on the probe host, and when the probe
+host's game build differs from `vanilla/BUILDID`.
 
 `ffrd usmap` runs `ue4ss/UnstraightenedUsmap` on the probe host to dump the game's
 mappings. It saves them to `vanilla/Mappings.usmap`, which git ignores. Re-run it after
 each game update.
 
-A launch that stalls at start is killed and relaunched, up to 4 launches in all.
+Each launch runs `steam -applaunch 3259780 -RenderOffscreen` on the probe host.
+`-RenderOffscreen` keeps the game ticking while its window is unfocused. A launch that
+stalls at start is killed and relaunched, up to 4 launches in all.
 
-The last `ffrd probe` run found the partial shape not honoured and the full shape
-honoured. Run `ffrd probe` again after a game update to re-check.
+The latest probe runs found the target, full and ue4ss shapes honoured, and the partial
+shape not honoured. A plugin localization target, which is not a build shape, was not
+honoured. The ue4ss shape honours edits in English culture only. Run `ffrd probe` again
+after a game update to re-check.
 
 ## Limits
 
 - **`--partial` does not work for edited entries.** `ffrd build --partial` writes
   `en/Unstraightened.locres`, which holds only the edited entries. The game was seen to
   ignore a second `en/*.locres` for an entry `Game.locres` already holds, so the edits
-  have no effect. The default build replaces `Game.locres` with the whole English table
-  and the edits applied, which the game was seen to honour. Run `ffrd probe` to re-check
-  this.
+  have no effect. The default `target` shape uses its own folder, listed ahead of
+  `Game`, and the latest probe run honoured it. `--full` replaces `Game.locres` with the
+  whole English table and the edits applied, which the game was seen to honour. Run
+  `ffrd probe` to re-check this.
 - **Game updates block builds.** `ffrd build` refuses to run when the game has
   updated since `ffrd extract`. The error says to run `ffrd extract` and rebuild.
 - **Edits fail on changed lines.** An edit whose `vanilla` hash no longer matches the
   game's current line fails the build with "changed in the game".
 - **`ffrd leak-check` skips short strings.** It ignores vanilla strings shorter than
   20 characters, so a short match is not reported.
-- **Text only.** The mod changes the English string table. It does not change
+- **Text only.** The mod changes the game's English text. The default pak also carries
+  an `FFRS/Config/UserGame.ini` that adds its localization folder. It does not change
   assets, and it does not change Japanese text.
 
 ## Development
