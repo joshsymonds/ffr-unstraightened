@@ -327,8 +327,25 @@ def test_build_is_registered_between_find_and_install_with_its_help(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("COLUMNS", "200")
-    assert [module.__name__ for module in cli.COMMANDS] == ["ffrd.extract", "ffrd.find", "ffrd.build", "ffrd.install", "ffrd.leakcheck"]
+    assert [module.__name__ for module in cli.COMMANDS] == [
+        "ffrd.extract",
+        "ffrd.progress",
+        "ffrd.find",
+        "ffrd.build",
+        "ffrd.install",
+        "ffrd.leakcheck",
+    ]
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--help"])
     assert exit_info.value.code == 0
     assert "apply dialog/**/*.toml edits to vanilla text and pack the mod into build/" in capsys.readouterr().out
+
+
+def test_progress_is_registered_after_extract_with_its_help(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "record the chapter you are on, or print the recorded one" in capsys.readouterr().out
