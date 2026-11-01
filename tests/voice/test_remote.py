@@ -1,8 +1,13 @@
+import contextlib
 import io
+import os
+import shlex
+import signal
 import socket
 import subprocess
 import tarfile
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +39,10 @@ class Ssh:
             self.sent = stdin.read()
         if "input" in kwargs:
             self.sent = kwargs["input"]
-        if kwargs.get("stdout") is not None:
-            kwargs["stdout"].write(self.payload)
-        return subprocess.CompletedProcess(args, self.returncode)
+        stdout = kwargs.get("stdout")
+        if isinstance(stdout, io.IOBase):
+            stdout.write(self.payload)
+        return subprocess.CompletedProcess(args, self.returncode, stdout=b"")
 
 
 class FakePipe:
@@ -154,90 +160,197 @@ def test_shell_nonzero_exit_raises_fail_with_host_and_code_only(ssh: Ssh) -> Non
     assert str(err.value) == "gnomon command exited 7"
 
 
-def test_run_command_is_unbuffered_and_appends_remote_stderr_to_remote_log(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
-    popen = FakePopen(FakeProcess())
-    monkeypatch.setattr(remote.subprocess, "Popen", popen)
-    remote.run(["python3", "x.py"])
-    assert ssh.calls == []
-    args, kwargs = popen.calls[0]
-    assert args == ["ssh", "gnomon", f"{PREFIX} && {DEVENV} env PYTHONUNBUFFERED=1 python3 x.py 2>> logs/remote.log"]
-    assert kwargs == {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE}
+RUN_ARGV = ["python3", "x.py"]
 
 
-class LiveJob(FakePipe):
-    """Stands in for the job's stdout. Each readline is the job producing its next line, so it records what sys.stdout holds by then."""
+@pytest.fixture
+def remote_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    # A fake ssh on PATH runs each remote command with sh under a fake HOME, so run's real subprocesses (the
+    # start, each poll, and the exit check) execute here and no gnomon is reached.
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake_ssh = bindir / "ssh"
+    fake_ssh.write_text('#!/bin/sh\nexec sh -c "$2"\n', encoding="utf-8")
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(remote, "POLL_SECONDS", 0.02)
+    scratch = home / ".local" / "share" / "ffr-unstraightened" / "voice"
+    scratch.mkdir(parents=True)
+    yield scratch
+    # Every job a test starts is killed here, so none outlives its test.
+    for pid_file in scratch.glob("jobs/*/pid"):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(int(pid_file.read_text(encoding="ascii")), signal.SIGKILL)
 
-    def __init__(self, out: io.StringIO, lines: list[bytes]) -> None:
+
+def stand_in_job(monkeypatch: pytest.MonkeyPatch, body: str) -> None:
+    # Replaces the devenv-wrapped trainer with a synthetic sh script; argv does not matter to the stand-in.
+    monkeypatch.setattr(remote, "env", lambda argv: f"sh -c {shlex.quote(body)}")
+
+
+def gated_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int = 0) -> tuple[Path, Path]:
+    # Logs each start, prints one step, waits (bounded) for the release file, prints a second step, exits with code.
+    starts = tmp_path / "starts"
+    release = tmp_path / "release"
+    body = (
+        f"echo start >> {starts}; echo SYNTH-STEP 1; i=0; "
+        f"while [ ! -f {release} ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done; "
+        f"echo SYNTH-STEP 2; exit {code}"
+    )
+    stand_in_job(monkeypatch, body)
+    return starts, release
+
+
+def only_job(scratch: Path) -> Path:
+    jobs = sorted((scratch / "jobs").iterdir())
+    assert len(jobs) == 1, f"expected one job directory, found {len(jobs)}"
+    return jobs[0]
+
+
+def exit_written(scratch: Path) -> bool:
+    return any((scratch / "jobs").glob("*/exit"))
+
+
+def wait_for_exit(scratch: Path) -> Path:
+    deadline = time.monotonic() + 10
+    while not exit_written(scratch):
+        assert time.monotonic() < deadline, "the job never wrote its exit file"
+        time.sleep(0.05)
+    return only_job(scratch) / "exit"
+
+
+class Terminal(io.StringIO):
+    """Stands in for sys.stdout. Runs on_write before each write, so a test can act while the job is still going."""
+
+    def __init__(self, on_write: Callable[[str], None] = lambda text: None) -> None:
         super().__init__()
-        self.out = out
-        self.lines = lines
-        self.seen: list[str] = []
+        self.on_write = on_write
 
-    def readline(self) -> bytes:
-        self.seen.append(self.out.getvalue())
-        return self.lines.pop(0) if self.lines else b""
-
-
-def test_run_relays_each_stdout_line_before_the_job_produces_the_next(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
-    out = io.StringIO()
-    monkeypatch.setattr("sys.stdout", out)
-    process = FakeProcess()
-    job = LiveJob(out, [b"synthetic step 1 loss 0.5\n", b"synthetic step 2 loss 0.4\n"])
-    process.stdout = job
-    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
-
-    remote.run(["python3", "x.py"])
-
-    assert job.seen == ["", "synthetic step 1 loss 0.5\n", "synthetic step 1 loss 0.5\nsynthetic step 2 loss 0.4\n"]
-    assert out.getvalue() == "synthetic step 1 loss 0.5\nsynthetic step 2 loss 0.4\n"
-    assert ssh.calls == []
-
-
-def test_run_decodes_stdout_without_raising_on_undecodable_bytes(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
-    out = io.StringIO()
-    monkeypatch.setattr("sys.stdout", out)
-    process = FakeProcess()
-    process.stdout = FakePipe(b"synthetic caf\xe9 line\n")
-    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
-
-    remote.run(["x"])
-
-    assert out.getvalue() == "synthetic caf� line\n"
-
-
-class BrokenOut(io.StringIO):
     def write(self, text: str) -> int:
-        raise BrokenPipeError("synthetic closed terminal")
+        self.on_write(text)
+        return super().write(text)
 
 
-def test_run_kills_and_reaps_the_job_when_relaying_a_line_fails(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("sys.stdout", BrokenOut())
-    process = FakeProcess(reply=b"SYNTH-STEP line\n")
-    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(process))
-    with pytest.raises(BrokenPipeError):
-        remote.run(["x"])
-    assert process.killed
-    assert process.waits == [None]
-    assert process.stdout.closed
+def interrupt(text: str) -> None:
+    raise KeyboardInterrupt
 
 
-def test_run_nonzero_exit_raises_fail_with_host_and_code_only(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_starts_the_job_detached_with_unbuffered_python_and_per_job_logs(ssh: Ssh) -> None:
+    remote.run(RUN_ARGV)
+    args, _ = ssh.calls[0]
+    assert args[:2] == ["ssh", "gnomon"]
+    command = args[2]
+    assert command.startswith(f"{PREFIX} && mkdir -p jobs/")
+    assert "setsid nohup sh -c " in command
+    assert f"{DEVENV} env PYTHONUNBUFFERED=1 python3 x.py" in command
+    assert "2>> logs/remote.log" in command
+
+
+def test_run_relays_each_step_line_before_the_job_ends(remote_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, release = gated_job(tmp_path, monkeypatch)
+    seen: list[tuple[str, bool]] = []
+
+    def on_write(text: str) -> None:
+        seen.append((text, exit_written(remote_host)))
+        release.touch()
+
+    out = Terminal(on_write)
+    monkeypatch.setattr("sys.stdout", out)
+    remote.run(RUN_ARGV)
+
+    assert seen[0] == ("SYNTH-STEP 1\n", False)
+    assert out.getvalue() == "SYNTH-STEP 1\nSYNTH-STEP 2\n"
+
+
+def test_interrupted_wait_leaves_the_job_running_to_finish(remote_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    starts, release = gated_job(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdout", Terminal(interrupt))
+    with pytest.raises(KeyboardInterrupt):
+        remote.run(RUN_ARGV)
+
+    assert not exit_written(remote_host)
+    release.touch()
+    exit_file = wait_for_exit(remote_host)
+    assert exit_file.read_text(encoding="ascii") == "0\n"
+    assert (exit_file.parent / "out.log").read_text(encoding="utf-8") == "SYNTH-STEP 1\nSYNTH-STEP 2\n"
+    assert starts.read_text(encoding="ascii") == "start\n"
+
+
+def test_rerun_while_the_job_runs_reattaches_without_a_second_copy(
+    remote_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starts, release = gated_job(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdout", Terminal(interrupt))
+    with pytest.raises(KeyboardInterrupt):
+        remote.run(RUN_ARGV)
+
+    out = Terminal(lambda text: release.touch())
+    monkeypatch.setattr("sys.stdout", out)
+    remote.run(RUN_ARGV)
+
+    assert starts.read_text(encoding="ascii") == "start\n"
+    assert out.getvalue() == "SYNTH-STEP 1\nSYNTH-STEP 2\n"
+
+
+def test_rerun_after_the_job_finished_starts_a_new_copy(remote_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    starts, release = gated_job(tmp_path, monkeypatch)
+    release.touch()
+    first = Terminal()
+    monkeypatch.setattr("sys.stdout", first)
+    remote.run(RUN_ARGV)
+    second = Terminal()
+    monkeypatch.setattr("sys.stdout", second)
+    remote.run(RUN_ARGV)
+
+    assert starts.read_text(encoding="ascii") == "start\nstart\n"
+    assert first.getvalue() == second.getvalue() == "SYNTH-STEP 1\nSYNTH-STEP 2\n"
+
+
+def test_run_fails_when_the_job_group_dies_without_an_exit_status(remote_host: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stand-in kills its whole process group, wrapper included, so no exit file is ever written.
+    stand_in_job(monkeypatch, "echo SYNTH-STEP 1; kill -KILL 0")
     monkeypatch.setattr("sys.stdout", io.StringIO())
-    monkeypatch.setattr(remote.subprocess, "Popen", FakePopen(FakeProcess(reply=b"SYNTH-STEP line\n", returncode=7)))
     with pytest.raises(Fail) as err:
-        remote.run(["x"])
+        remote.run(RUN_ARGV)
+    assert str(err.value) == "gnomon job ended without an exit status"
+    assert not exit_written(remote_host)
+
+
+def test_run_nonzero_exit_raises_fail_with_host_and_code_only(remote_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, release = gated_job(tmp_path, monkeypatch, code=7)
+    release.touch()
+    monkeypatch.setattr("sys.stdout", Terminal())
+    with pytest.raises(Fail) as err:
+        remote.run(RUN_ARGV)
     assert str(err.value) == "gnomon command exited 7"
 
 
-def test_run_without_ssh_raises_fail(ssh: Ssh, monkeypatch: pytest.MonkeyPatch) -> None:
-    def missing(*args: Any, **kwargs: Any) -> None:
-        raise FileNotFoundError("ssh")
+def test_run_decodes_stdout_without_raising_on_undecodable_bytes(remote_host: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stand_in_job(monkeypatch, "printf 'synthetic caf\\351 line\\n'")
+    out = Terminal()
+    monkeypatch.setattr("sys.stdout", out)
+    remote.run(RUN_ARGV)
+    assert out.getvalue() == "synthetic caf� line\n"
 
-    monkeypatch.setattr(remote.subprocess, "Popen", missing)
+
+def test_run_sends_job_stderr_to_remote_log_and_keeps_it_out_of_stdout(remote_host: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stand_in_job(monkeypatch, "echo SYNTH-ERR-LINE >&2; echo SYNTH-OUT-LINE")
+    out = Terminal()
+    monkeypatch.setattr("sys.stdout", out)
+    remote.run(RUN_ARGV)
+    assert out.getvalue() == "SYNTH-OUT-LINE\n"
+    assert "SYNTH-ERR-LINE" in (remote_host / "logs" / "remote.log").read_text(encoding="utf-8")
+
+
+def test_run_without_ssh_raises_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
     with pytest.raises(Fail) as err:
-        remote.run(["x"])
+        remote.run(RUN_ARGV)
     assert str(err.value) == "ssh not found on PATH; cannot reach gnomon"
-    assert ssh.calls == []
 
 
 SYNC = "mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {} + && tar -x -f -"

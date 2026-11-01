@@ -290,28 +290,18 @@ class RecordingSsh:
         stdin = kwargs.get("stdin")
         if isinstance(stdin, io.IOBase):
             self.pushed = stdin.read()
-        return subprocess.CompletedProcess(args, 0)
-
-    def popen(self, args: list[str], **kwargs: Any) -> "SilentJob":
-        self.commands.append(args[2])
-        return SilentJob()
-
-
-class SilentJob:
-    """Stands in for a remote job that prints nothing and exits 0."""
-
-    def __init__(self) -> None:
-        self.stdout = io.BytesIO(b"")
-
-    def wait(self) -> int:
-        return 0
+        return subprocess.CompletedProcess(args, 0, stdout=b"")
 
 
 @pytest.fixture
 def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[RecordingSsh, Path]:
     ssh = RecordingSsh()
     monkeypatch.setattr(remote.subprocess, "run", ssh)
-    monkeypatch.setattr(remote.subprocess, "Popen", ssh.popen)
+
+    def forbidden(args: list[str], **kwargs: Any) -> None:
+        pytest.fail("remote commands must go through the intercepted ssh run, not Popen")
+
+    monkeypatch.setattr(remote.subprocess, "Popen", forbidden)
     monkeypatch.setattr(remote, "repo_root", lambda: tmp_path / "repo")
     voice = tmp_path / "repo" / "tools" / "voice"
     voice.mkdir(parents=True)
@@ -330,19 +320,27 @@ def train_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Recordin
     return ssh, work
 
 
-def test_train_syncs_then_stages_examples_then_runs_remote_trainer(train_env: tuple[RecordingSsh, Path]) -> None:
+def test_train_syncs_then_stages_examples_then_starts_the_remote_trainer_and_polls_it(
+    train_env: tuple[RecordingSsh, Path],
+) -> None:
     ssh, _ = train_env
     classifier.train(epochs=3)
 
-    assert len(ssh.commands) == 3
+    assert len(ssh.commands) == 5
     assert (
         ssh.commands[0]
         == f"{REMOTE_PREFIX} && mkdir -p tools/voice && find tools/voice -mindepth 1 -maxdepth 1 ! -name .devenv -exec rm -rf -- {{}} + && tar -x -f -"
     )
     assert ssh.commands[1] == f"{REMOTE_PREFIX} && mkdir -p -- data && cat > data/classifier.jsonl"
-    assert ssh.commands[2] == (
-        f"{REMOTE_PREFIX} && {REMOTE_DEVENV} env PYTHONUNBUFFERED=1 python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3 2>> logs/remote.log"
+    assert ssh.commands[2].startswith(f"{REMOTE_PREFIX} && mkdir -p jobs/")
+    assert "setsid nohup sh -c " in ssh.commands[2]
+    assert (
+        f"{REMOTE_DEVENV} env PYTHONUNBUFFERED=1 python3 -m tools.voice.classify train data/classifier.jsonl models/classifier --epochs 3"
+        in ssh.commands[2]
     )
+    assert "2>> logs/remote.log" in ssh.commands[2]
+    assert ssh.commands[3].startswith(f"{REMOTE_PREFIX} && {{ if [ -f jobs/")
+    assert ssh.commands[4].startswith(f"{REMOTE_PREFIX} && exit $(cat jobs/")
 
 
 def test_train_stages_text_and_label_rows_for_each_example(train_env: tuple[RecordingSsh, Path]) -> None:
