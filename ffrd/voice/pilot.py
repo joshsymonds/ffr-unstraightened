@@ -1,6 +1,7 @@
 """pilot: the measured pilot. It runs the first N scenes through pairs.run with Claude Code telemetry on, then the classifier and
 LoRA trainings, and prints counts and timings only: call time and tokens from the telemetry, weekly usage per account before
-and after the pairs run, and training steps with seconds per step.
+and after the pairs run, and training steps with seconds per step. It then projects the totals of the full pairs run and both
+full trainings from those measurements, including the wait for weekly account resets.
 
 The telemetry receiver binds 127.0.0.1 and keeps only the api_request numbers and model names. The output holds no speaker,
 key, line, paraphrase or account email. A training's own output is read for its step lines and staged count, and is not
@@ -9,6 +10,7 @@ printed.
 
 import argparse
 import contextlib
+import heapq
 import json
 import os
 import re
@@ -17,6 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Self
 
@@ -27,6 +30,7 @@ from ffrd.pipeline.store import work_dir
 from ffrd.voice import classifier, lora, pairs
 
 DEFAULT_SCENES = 50
+RESET_PERIOD = timedelta(hours=168)
 TELEMETRY = {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "OTEL_LOGS_EXPORTER": "otlp",
@@ -40,6 +44,11 @@ CLASSIFIER_STAGED = re.compile(r"staged (\d+) classifier examples")
 LORA_STAGED = re.compile(r"staged (\d+) lora records")
 
 Clock = Callable[[], float]
+Now = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,13 @@ class Call:
     cache_creation_tokens: int
     duration_ms: float
 
+
+TOKEN_LINES: tuple[tuple[str, Callable[[Call], int]], ...] = (
+    ("tokens_input", lambda call: call.input_tokens),
+    ("tokens_output", lambda call: call.output_tokens),
+    ("tokens_cache_read", lambda call: call.cache_read_tokens),
+    ("tokens_cache_creation", lambda call: call.cache_creation_tokens),
+)
 
 API_REQUEST = {"stringValue": "api_request"}
 
@@ -207,7 +223,31 @@ def _num(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}"
 
 
-def _training(name: str, noun: str, staged: re.Pattern[str], train: Callable[[], None], clock: Clock) -> list[str]:
+def _count(value: float | None) -> str:
+    return "n/a" if value is None else str(round(value))
+
+
+@dataclass(frozen=True)
+class Training:
+    name: str
+    noun: str
+    count: int
+    steps: int
+    startup: float | None
+    per_step: float | None
+    wall: float
+
+    def lines(self) -> list[str]:
+        return [
+            f"{self.name} {self.noun} {self.count}",
+            f"{self.name} steps {self.steps}",
+            f"{self.name} startup_s {_num(self.startup)}",
+            f"{self.name} s_per_step {_num(self.per_step)}",
+            f"{self.name} wall_s {_num(self.wall)}",
+        ]
+
+
+def _training(name: str, noun: str, staged: re.Pattern[str], train: Callable[[], None], clock: Clock) -> Training:
     watch = _Watch(clock, staged)
     started = clock()
     with contextlib.redirect_stdout(watch):
@@ -219,13 +259,7 @@ def _training(name: str, noun: str, staged: re.Pattern[str], train: Callable[[],
     steps = watch.steps
     startup = steps[0] - started if steps else None
     per_step = (steps[-1] - steps[0]) / (len(steps) - 1) if len(steps) > 1 else None
-    return [
-        f"{name} {noun} {watch.count}",
-        f"{name} steps {len(steps)}",
-        f"{name} startup_s {_num(startup)}",
-        f"{name} s_per_step {_num(per_step)}",
-        f"{name} wall_s {_num(ended - started)}",
-    ]
+    return Training(name, noun, watch.count, len(steps), startup, per_step, ended - started)
 
 
 def _weekly(rows: Iterable[accounts.Account]) -> dict[int, float]:
@@ -263,19 +297,121 @@ def _account_lines(before: Mapping[int, float], after: Mapping[int, float]) -> l
     ]
 
 
-def measure(count: int, clock: Clock = time.monotonic) -> None:
+@dataclass(frozen=True)
+class Measured:
+    all_scenes: int
+    pilot_scenes: int
+    all_lines: int
+    pilot_lines: int
+    all_train: int
+    pilot_train: int
+    calls: Sequence[Call]
+    pairs_wall: float
+    before: Mapping[int, float]
+    after: Sequence[accounts.Account]
+    classifier: Training
+    lora: Training
+
+
+def _growth(all_lines: int, pilot_lines: int) -> float | None:
+    """Lines outside the pilot per pilot line, or None when the pilot has no lines."""
+    return (all_lines - pilot_lines) / pilot_lines if pilot_lines else None
+
+
+def _train_growth(all_train: int, pilot_train: int) -> float | None:
+    """Training lines in all scenes per training line in the pilot scenes, or None when the pilot has none."""
+    return all_train / pilot_train if pilot_train else None
+
+
+def _weekly_pct(before: Mapping[int, float], after: Sequence[accounts.Account], growth: float | None) -> float | None:
+    """The weekly usage the full pairs run adds, from each account's change over the pilot. None unless every account
+    was read before and after."""
+    after_pct = {row.number: row.weekly_pct for row in after}
+    if growth is None or before.keys() != after_pct.keys():
+        return None
+    return sum(max(0.0, after_pct[number] - before[number]) for number in after_pct) * growth
+
+
+def _reset_events(rows: Sequence[accounts.Account]) -> Iterator[tuple[datetime, float]]:
+    """Each account's weekly reset in time order, from its latest reset time and every RESET_PERIOD after it. The first
+    reset frees the account's weekly usage up to the limit, and each later reset frees the limit."""
+    heap = [(max(row.resets), row.number, min(row.weekly_pct, accounts.WEEKLY_LIMIT)) for row in rows if row.resets]
+    heapq.heapify(heap)
+    while heap:
+        when, number, freed = heapq.heappop(heap)
+        yield when, freed
+        heapq.heappush(heap, (when + RESET_PERIOD, number, accounts.WEEKLY_LIMIT))
+
+
+def _reset_wait(
+    needed: float | None, headroom: float, rows: Sequence[accounts.Account], now: datetime, pairs_hours: float | None
+) -> float | None:
+    """Hours after the pairs run until the weekly resets free enough headroom for the projected weekly usage. Zero when the
+    headroom already covers it, and None when the inputs are missing or no reset ever frees enough."""
+    if needed is None or pairs_hours is None:
+        return None
+    if needed <= headroom:
+        return 0.0
+    covered = headroom
+    for when, freed in _reset_events(rows):
+        covered += freed
+        if covered >= needed:
+            return max(0.0, (when - now).total_seconds() / 3600 - pairs_hours)
+    return None
+
+
+def _train_hours(run: Training, growth: float | None) -> float | None:
+    if growth is None or run.startup is None or run.per_step is None:
+        return None
+    return (run.startup + run.per_step * run.steps * growth) / 3600
+
+
+def _projected_tokens(calls: Sequence[Call], field: Callable[[Call], int], growth: float | None) -> float | None:
+    if growth is None or not calls:
+        return None
+    return sum(field(call) for call in calls) * growth
+
+
+def _project(measured: Measured, now: datetime) -> list[str]:
+    growth = _growth(measured.all_lines, measured.pilot_lines)
+    pairs_hours = None if growth is None else measured.pairs_wall * growth / 3600
+    weekly_pct = _weekly_pct(measured.before, measured.after, growth) if measured.calls else None
+    headroom = sum(max(0.0, accounts.WEEKLY_LIMIT - row.weekly_pct) for row in measured.after)
+    reset_wait = _reset_wait(weekly_pct, headroom, measured.after, now, pairs_hours)
+    train_growth = _train_growth(measured.all_train, measured.pilot_train)
+    classifier_hours = _train_hours(measured.classifier, train_growth)
+    lora_hours = _train_hours(measured.lora, train_growth)
+    total = None
+    if pairs_hours is not None and reset_wait is not None and classifier_hours is not None and lora_hours is not None:
+        total = pairs_hours + reset_wait + classifier_hours + lora_hours
+    return [
+        f"projected calls {(measured.all_scenes - measured.pilot_scenes) * len(pairs.SLOTS)}",
+        *(f"projected {label} {_count(_projected_tokens(measured.calls, field, growth))}" for label, field in TOKEN_LINES),
+        f"projected pairs_hours {_num(pairs_hours)}",
+        f"projected weekly_pct {_num(weekly_pct)}",
+        f"projected headroom_pct {_num(headroom)}",
+        f"projected reset_wait_hours {_num(reset_wait)}",
+        f"projected classifier_hours {_num(classifier_hours)}",
+        f"projected lora_hours {_num(lora_hours)}",
+        f"projected total_hours {_num(total)}",
+    ]
+
+
+def measure(count: int, clock: Clock = time.monotonic, now: Now = _utc_now) -> None:
     lines = scenes.load()
     texts = pairs.english()
     root = work_dir("voice")
     first = list(dict.fromkeys(line.scene for line in lines))[:count]
     chosen = set(first)
     in_scenes = [line for line in lines if line.scene in chosen]
+    train = pairs.split(lines).train
     before = _weekly(accounts.read())
     with Receiver() as receiver, _telemetry(receiver.endpoint):
         started = clock()
         report = pairs.run(lines, texts, root, limit=count)
         wall = clock() - started
-    after = _weekly(accounts.read())
+    after_rows = accounts.read()
+    after = _weekly(after_rows)
     for row in [
         f"pairs scenes {len(first)}",
         f"pairs lines {len(in_scenes)}",
@@ -290,9 +426,27 @@ def measure(count: int, clock: Clock = time.monotonic) -> None:
         *_account_lines(before, after),
     ]:
         print(row)
-    for row in _training("classifier", "examples", CLASSIFIER_STAGED, classifier.train, clock):
+    classifier_run = _training("classifier", "examples", CLASSIFIER_STAGED, classifier.train, clock)
+    for row in classifier_run.lines():
         print(row)
-    for row in _training("lora", "records", LORA_STAGED, lora.train, clock):
+    lora_run = _training("lora", "records", LORA_STAGED, lora.train, clock)
+    for row in lora_run.lines():
+        print(row)
+    measured = Measured(
+        all_scenes=len({line.scene for line in lines}),
+        pilot_scenes=len(first),
+        all_lines=len(lines),
+        pilot_lines=len(in_scenes),
+        all_train=sum(1 for line in lines if line.scene in train),
+        pilot_train=sum(1 for line in in_scenes if line.scene in train),
+        calls=receiver.calls,
+        pairs_wall=wall,
+        before=before,
+        after=after_rows,
+        classifier=classifier_run,
+        lora=lora_run,
+    )
+    for row in _project(measured, now()):
         print(row)
 
 
@@ -302,7 +456,8 @@ def cmd_pilot(args: argparse.Namespace) -> None:
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = subparsers.add_parser(
-        "pilot", help="run the first N scenes through pairs and both trainings, and print the measured calls, tokens, steps and timings"
+        "pilot",
+        help="run the first N scenes through pairs and both trainings, print the measured calls, tokens, steps and timings, and project the full run's totals",
     )
     p.add_argument("--scenes", type=pairs._positive, default=DEFAULT_SCENES, metavar="N", help="scenes to run through pairs (default 50)")
     p.set_defaults(fn=cmd_pilot)

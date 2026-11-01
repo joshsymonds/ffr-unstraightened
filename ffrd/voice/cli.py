@@ -3,9 +3,9 @@
 import argparse
 from types import ModuleType
 
-from ffrd.voice import classifier, evals, lora, pairs, render, serve
+from ffrd.voice import classifier, evals, lora, pairs, pilot, render, serve
 
-SUBCOMMANDS: tuple[ModuleType, ...] = (pairs, classifier, lora, serve, render, evals)
+SUBCOMMANDS: tuple[ModuleType, ...] = (pairs, classifier, lora, serve, render, evals, pilot)
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

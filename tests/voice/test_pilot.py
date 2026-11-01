@@ -11,12 +11,13 @@ import json
 import os
 import urllib.parse
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ffrd import scenes
+from ffrd import cli, scenes
 from ffrd.game import Fail
 from ffrd.pipeline import accounts
 from ffrd.scenes import SceneLine
@@ -104,8 +105,15 @@ def _post_to_telemetry_endpoint(body: bytes) -> None:
     assert _post(endpoint.port, "/v1/logs", body, host=endpoint.hostname) == 200
 
 
-def _account(number: int, weekly_pct: float) -> accounts.Account:
-    return accounts.Account(number=number, weekly_pct=weekly_pct, resets=())
+NOW = datetime(2026, 11, 1, tzinfo=UTC)
+
+
+def _at(hours: float) -> datetime:
+    return NOW + timedelta(hours=hours)
+
+
+def _account(number: int, weekly_pct: float, resets: tuple[datetime, ...] = ()) -> accounts.Account:
+    return accounts.Account(number=number, weekly_pct=weekly_pct, resets=resets)
 
 
 class Fakes:
@@ -127,6 +135,7 @@ class Fakes:
         self.reads = iter([[_account(3, 10.0)], [_account(3, 12.5), _account(7, 40.0)]])
         self.classifier_staged: str | None = "staged 6 classifier examples"
         self.lora_staged: str | None = "staged 4 lora records"
+        self.gaps: dict[str, list[float]] = {"classifier": [600.0, 300.0, 300.0], "lora": [3.0]}
         self.trained: list[str] = []
         self.pairs_limit: int | None = None
         self.env_during: dict[str, str | None] = {}
@@ -138,8 +147,8 @@ class Fakes:
         monkeypatch.setattr(pilot, "work_dir", lambda lens: root / lens)
         monkeypatch.setattr(accounts, "read", lambda: next(self.reads))
         monkeypatch.setattr(pairs, "run", self._pairs_run)
-        monkeypatch.setattr(classifier, "train", self._training("classifier", [5.0, 2.0, 2.0], 1.0, lambda: self.classifier_staged))
-        monkeypatch.setattr(lora, "train", self._training("lora", [3.0], 1.0, lambda: self.lora_staged))
+        monkeypatch.setattr(classifier, "train", self._training("classifier", 1.0, lambda: self.classifier_staged))
+        monkeypatch.setattr(lora, "train", self._training("lora", 1.0, lambda: self.lora_staged))
 
     def _pairs_run(
         self,
@@ -157,12 +166,12 @@ class Fakes:
         self.clock.now += 40.0
         return list(self.report)
 
-    def _training(self, name: str, gaps: list[float], tail: float, staged: Callable[[], str | None]) -> Callable[[], None]:
+    def _training(self, name: str, tail: float, staged: Callable[[], str | None]) -> Callable[[], None]:
         def train() -> None:
             if self.observe is not None:
                 self.seen_at_training_start.append(self.observe.readouterr().out.splitlines())
             self.trained.append(name)
-            for step, gap in enumerate(gaps, start=1):
+            for step, gap in enumerate(self.gaps[name], start=1):
                 self.clock.now += gap
                 print(f"0\t{step}\t0.693147")
             line = staged()
@@ -291,14 +300,26 @@ def test_measure_prints_the_exact_lines_in_order(fakes: Fakes, capsys: pytest.Ca
         "pairs account 7 weekly_pct n/a 40.00",
         "classifier examples 6",
         "classifier steps 3",
-        "classifier startup_s 5.00",
-        "classifier s_per_step 2.00",
-        "classifier wall_s 10.00",
+        "classifier startup_s 600.00",
+        "classifier s_per_step 300.00",
+        "classifier wall_s 1201.00",
         "lora records 4",
         "lora steps 1",
         "lora startup_s 3.00",
         "lora s_per_step n/a",
         "lora wall_s 4.00",
+        "projected calls 8",
+        "projected tokens_input 107",
+        "projected tokens_output 23",
+        "projected tokens_cache_read 300",
+        "projected tokens_cache_creation 40",
+        "projected pairs_hours 0.01",
+        "projected weekly_pct n/a",
+        "projected headroom_pct 127.50",
+        "projected reset_wait_hours n/a",
+        "projected classifier_hours 0.67",
+        "projected lora_hours n/a",
+        "projected total_hours n/a",
     ]
 
 
@@ -314,7 +335,7 @@ def test_each_phase_prints_its_lines_when_it_ends(fakes: Fakes, capsys: pytest.C
     pilot.measure(2, clock=fakes.clock)
     classifier_start, lora_start = fakes.seen_at_training_start
     assert classifier_start[-1] == "pairs account 7 weekly_pct n/a 40.00"
-    assert lora_start[-1] == "classifier wall_s 10.00"
+    assert lora_start[-1] == "classifier wall_s 1201.00"
 
 
 def test_a_training_with_one_step_has_no_seconds_per_step(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
@@ -365,3 +386,122 @@ def test_scenes_must_be_a_positive_integer(value: str) -> None:
 def test_scenes_defaults_to_fifty_and_accepts_a_positive_integer() -> None:
     assert _parser().parse_args(["pilot"]).scenes == 50
     assert _parser().parse_args(["pilot", "--scenes", "7"]).scenes == 7
+
+
+# Projection: the full run's calls, tokens, hours, weekly usage and reset waits, from the pilot's measurements.
+
+
+def _two_accounts(fakes: Fakes, before: Sequence[accounts.Account], after: Sequence[accounts.Account]) -> None:
+    fakes.reads = iter([list(before), list(after)])
+
+
+def test_projection_scales_calls_and_tokens_by_the_lines_outside_the_pilot(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    pilot.measure(1, clock=fakes.clock, now=lambda: NOW)
+    out = capsys.readouterr().out.splitlines()
+    assert [row for row in out if row.startswith("projected")][:5] == [
+        "projected calls 12",
+        "projected tokens_input 321",
+        "projected tokens_output 69",
+        "projected tokens_cache_read 900",
+        "projected tokens_cache_creation 120",
+    ]
+    assert "projected pairs_hours 0.03" in out
+
+
+def test_reset_wait_runs_to_the_second_reset_when_the_first_does_not_cover_the_projection(
+    fakes: Fakes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _two_accounts(
+        fakes,
+        [_account(3, 0.0), _account(7, 0.0)],
+        [_account(3, 60.0, (_at(2), _at(10))), _account(7, 70.0, (_at(30),))],
+    )
+    pilot.measure(2, clock=fakes.clock, now=lambda: NOW)
+    out = capsys.readouterr().out.splitlines()
+    assert "projected weekly_pct 130.00" in out
+    assert "projected headroom_pct 50.00" in out
+    assert "projected reset_wait_hours 29.99" in out
+
+
+def test_reset_wait_repeats_each_account_every_168_hours_after_its_first_reset(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    _two_accounts(fakes, [_account(3, 0.0)], [_account(3, 80.0, (_at(2), _at(10)))])
+    pilot.measure(1, clock=fakes.clock, now=lambda: NOW)
+    out = capsys.readouterr().out.splitlines()
+    assert "projected weekly_pct 240.00" in out
+    assert "projected headroom_pct 10.00" in out
+    assert "projected reset_wait_hours 345.97" in out
+
+
+def test_reset_wait_is_zero_when_the_headroom_already_covers_the_weekly_projection(
+    fakes: Fakes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _two_accounts(
+        fakes,
+        [_account(3, 50.0), _account(7, 60.0)],
+        [_account(3, 60.0, (_at(10),)), _account(7, 70.0, (_at(30),))],
+    )
+    pilot.measure(2, clock=fakes.clock, now=lambda: NOW)
+    out = capsys.readouterr().out.splitlines()
+    assert "projected weekly_pct 20.00" in out
+    assert "projected reset_wait_hours 0.00" in out
+
+
+def test_projection_is_n_a_for_the_calls_it_needs_when_the_pilot_made_no_calls(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    fakes.bodies = []
+    fakes.report = ["calls 0", "resumed 0", "failed 0"]
+    _two_accounts(
+        fakes,
+        [_account(3, 0.0), _account(7, 0.0)],
+        [_account(3, 60.0, (_at(2), _at(10))), _account(7, 70.0, (_at(30),))],
+    )
+    pilot.measure(2, clock=fakes.clock, now=lambda: NOW)
+    out = capsys.readouterr().out.splitlines()
+    assert [row for row in out if row.startswith("projected")] == [
+        "projected calls 8",
+        "projected tokens_input n/a",
+        "projected tokens_output n/a",
+        "projected tokens_cache_read n/a",
+        "projected tokens_cache_creation n/a",
+        "projected pairs_hours 0.01",
+        "projected weekly_pct n/a",
+        "projected headroom_pct 50.00",
+        "projected reset_wait_hours n/a",
+        "projected classifier_hours 0.67",
+        "projected lora_hours n/a",
+        "projected total_hours n/a",
+    ]
+
+
+def test_projected_total_is_the_sum_of_pairs_wait_classifier_and_lora_hours(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    fakes.gaps["lora"] = [3.0, 4.0]
+    _two_accounts(
+        fakes,
+        [_account(3, 0.0), _account(7, 0.0)],
+        [_account(3, 60.0, (_at(2), _at(10))), _account(7, 70.0, (_at(30),))],
+    )
+    pilot.measure(2, clock=fakes.clock, now=lambda: NOW)
+    out = capsys.readouterr().out.splitlines()
+    assert "projected lora_hours 0.01" in out
+    assert "projected classifier_hours 0.67" in out
+    assert "projected total_hours 30.67" in out
+
+
+# Registration: `ffrd voice pilot` is a subcommand of `ffrd voice`.
+
+
+def test_voice_lists_pilot_with_its_help(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["voice", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "pilot" in out
+    assert "run the first N scenes through pairs and both trainings" in out
+
+
+def test_voice_pilot_help_exits_0_through_the_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["voice", "pilot", "--help"])
+    assert exit_info.value.code == 0
+    assert "usage:" in capsys.readouterr().out
