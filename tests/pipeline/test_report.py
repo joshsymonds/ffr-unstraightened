@@ -41,7 +41,11 @@ SUMMARY = (
     r"(chapter [0-9]+|unattributed|total): [0-9]+ changed, [0-9]+ kept for plot, [0-9]+ gate failed, [0-9]+ unfinished, [0-9]+ untouched"
 )
 DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
-LINE = re.compile(f"{SUMMARY}|{DETAIL}")
+ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
+LINE = re.compile(f"{SUMMARY}|{DETAIL}|{ARCS_LINE}")
+
+# Made-up arcs totals. Not game text.
+ARCS_VALID = b'{"arcs": 3, "with_changes": 2}\n'
 
 
 def _record(**fields: object) -> dict[str, object]:
@@ -101,6 +105,7 @@ total: 4 changed, 1 kept for plot, 1 gate failed, 1 unfinished, 1 untouched
   character 2: 2
   no speaker: 1
   gate made-up-gate: 1
+arcs: 3, 2 with changes
 """
 
 
@@ -122,6 +127,13 @@ def _write(repo: Path, content: bytes) -> Path:
     return path.resolve()
 
 
+def _write_arcs(repo: Path, content: bytes = ARCS_VALID) -> Path:
+    path = repo / "work" / LENS / "arcs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path.resolve()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ffrd")
     report.register(parser.add_subparsers(required=True))
@@ -135,12 +147,14 @@ def _invoke() -> None:
 
 def test_prints_exact_counts_per_chapter(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
     _invoke()
     assert capsys.readouterr().out == EXPECTED_MULTI
 
 
 def test_every_line_matches_grammar_and_shows_no_text_keys_or_speakers(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
     _invoke()
     out = capsys.readouterr().out
     for line in out.splitlines():
@@ -151,6 +165,7 @@ def test_every_line_matches_grammar_and_shows_no_text_keys_or_speakers(repo: Pat
 
 def test_character_numbers_do_not_move_when_an_outcome_changes(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # SPEAKER_TWO appears only as untouched, so it is numbered 1 but not printed; SPEAKER_TEN is numbered 2.
+    _write_arcs(repo)
     _write(
         repo,
         _lines(
@@ -182,6 +197,79 @@ def test_missing_outcomes_file_fails_naming_the_file(repo: Path) -> None:
         _invoke()
     message = str(raised.value)
     assert "outcomes.jsonl" in message
+    assert "SENTINEL" not in message
+
+
+def test_gate_lines_name_scene_and_arc_in_chapter_and_total_blocks(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Made-up records. Not game text.
+    _write(
+        repo,
+        _lines(
+            _record(chapter=1, speaker=None, outcome="gate_failed", gate="scene"),
+            _record(chapter=1, speaker=None, outcome="gate_failed", gate="arc"),
+            _record(chapter=2, speaker=None, outcome="gate_failed", gate="arc"),
+        ),
+    )
+    _write_arcs(repo)
+    _invoke()
+    assert (
+        capsys.readouterr().out
+        == """\
+chapter 1: 0 changed, 0 kept for plot, 2 gate failed, 0 unfinished, 0 untouched
+  gate arc: 1
+  gate scene: 1
+chapter 2: 0 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched
+  gate arc: 1
+total: 0 changed, 0 kept for plot, 3 gate failed, 0 unfinished, 0 untouched
+  gate arc: 2
+  gate scene: 1
+arcs: 3, 2 with changes
+"""
+    )
+
+
+def test_arcs_line_accepts_zero_totals(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo, b'{"arcs": 0, "with_changes": 0}\n')
+    _invoke()
+    assert capsys.readouterr().out.splitlines()[-1] == "arcs: 0, 0 with changes"
+
+
+def test_missing_arcs_file_fails_naming_the_file(repo: Path) -> None:
+    _write(repo, _lines(*MULTI))
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert "arcs.json" in message
+    assert "SENTINEL" not in message
+
+
+BAD_ARCS = [
+    pytest.param(b"SENTINEL-NOT-JSON {\n", "is not valid JSON", id="not-json"),
+    pytest.param(b'["SENTINEL-ARRAY"]\n', "is not a JSON object", id="not-object"),
+    pytest.param(b'{"with_changes": 0}\n', "field arcs is missing", id="arcs-missing"),
+    pytest.param(b'{"arcs": 3}\n', "field with_changes is missing", id="with-changes-missing"),
+    pytest.param(b'{"arcs": "SENTINEL-ARCS", "with_changes": 0}\n', "field arcs must be a non-negative integer", id="arcs-type"),
+    pytest.param(b'{"arcs": 2.5, "with_changes": 0}\n', "field arcs must be a non-negative integer", id="arcs-float"),
+    pytest.param(b'{"arcs": true, "with_changes": 0}\n', "field arcs must be a non-negative integer", id="arcs-bool"),
+    pytest.param(b'{"arcs": -1, "with_changes": 0}\n', "field arcs must be a non-negative integer", id="arcs-negative"),
+    pytest.param(
+        b'{"arcs": 3, "with_changes": "SENTINEL-CHANGES"}\n', "field with_changes must be a non-negative integer", id="with-changes-type"
+    ),
+    pytest.param(b'{"arcs": 3, "with_changes": -1}\n', "field with_changes must be a non-negative integer", id="with-changes-negative"),
+    pytest.param(b'{"arcs": 3, "with_changes": 4}\n', "field with_changes must not exceed arcs", id="with-changes-above-arcs"),
+]
+
+
+@pytest.mark.parametrize(("bad", "fragment"), BAD_ARCS)
+def test_invalid_arcs_fails_naming_file_and_field_but_not_the_value(repo: Path, bad: bytes, fragment: str) -> None:
+    _write(repo, _lines(*MULTI))
+    path = _write_arcs(repo, bad)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert str(path) in message
+    assert fragment in message
     assert "SENTINEL" not in message
 
 

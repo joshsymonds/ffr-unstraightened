@@ -12,6 +12,7 @@ from ffrd.pipeline.lens import load_lens
 from ffrd.pipeline.store import work_dir
 
 OUTCOMES = "outcomes.jsonl"
+ARCS = "arcs.json"
 OUTCOME_LABELS = {
     "changed": "changed",
     "kept_for_plot": "kept for plot",
@@ -127,6 +128,33 @@ def _records(path: Path, triage: frozenset[str]) -> list[Record]:
     return records
 
 
+def _count(obj: dict[str, object], name: str, where: str) -> int:
+    value = _require(obj, name, where)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Fail(f"{where}: field {name} must be a non-negative integer")
+    return value
+
+
+def _arcs(path: Path) -> tuple[int, int]:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as e:
+        raise Fail(f"no arcs at {path}; run the lens first") from e
+    except OSError as e:
+        raise Fail(f"cannot read arcs {path}: {e.strerror}") from e
+    try:
+        obj = json.loads(raw)
+    except ValueError as e:
+        raise Fail(f"{path}: is not valid JSON") from e
+    if not isinstance(obj, dict):
+        raise Fail(f"{path}: is not a JSON object")
+    arcs = _count(obj, "arcs", str(path))
+    with_changes = _count(obj, "with_changes", str(path))
+    if with_changes > arcs:
+        raise Fail(f"{path}: field with_changes must not exceed arcs")
+    return arcs, with_changes
+
+
 def _block(label: str, records: list[Record], numbers: dict[str, int], triage_ids: list[str]) -> list[str]:
     counts = Counter(r.outcome for r in records)
     summary = ", ".join(f"{counts[outcome]} {text}" for outcome, text in OUTCOME_LABELS.items())
@@ -167,8 +195,10 @@ def cmd_report(args: argparse.Namespace) -> None:
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
     triage_ids = [q.id for q in lens.triage]
     records = _records(lens_dir / OUTCOMES, frozenset(triage_ids))
+    arcs, with_changes = _arcs(lens_dir / ARCS)
     for line in render(records, triage_ids):
         print(line)
+    print(f"arcs: {arcs}, {with_changes} with changes")
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
