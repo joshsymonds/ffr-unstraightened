@@ -1,14 +1,18 @@
-"""Paraphrase pair loader shared by the voice-model modules, and the labelled examples the game-vs-LLM classifier trains on."""
+"""Paraphrase pair loader shared by the voice-model modules, the labelled examples the game-vs-LLM classifier trains on, and the game-likeness Scorer the classifier gate calls."""
 
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 from ffrd.game import Fail
 from ffrd.pipeline.store import work_dir
+from ffrd.voice import remote
 
 SPLITS = ("train", "heldout")
+MODEL_DIR = "models/classifier"
+MALFORMED_REPLY = "classifier worker sent a malformed reply"
 
 
 @dataclass(frozen=True)
@@ -68,3 +72,38 @@ def examples(pairs: Sequence[Pair]) -> list[tuple[str, int]]:
     labelled = [(original, 1) for original in originals]
     labelled += [(pair.paraphrase, 0) for pair in pairs if pair.paraphrase != pair.original]
     return labelled
+
+
+class Scorer:
+    def __init__(self, model_dir: str = MODEL_DIR) -> None:
+        self._worker = remote.Worker(["python3", "-m", "tools.voice.classify", "serve", model_dir])
+
+    def __enter__(self) -> Self:
+        self._worker.__enter__()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self._worker.__exit__(exc_type, exc, tb)
+
+    def score_many(self, texts: Sequence[str]) -> list[float]:
+        if not texts:
+            return []
+        reply = self._worker.ask({"texts": list(texts)})
+        scores = reply.get("scores")
+        if not isinstance(scores, list) or len(scores) != len(texts):
+            raise Fail(MALFORMED_REPLY)
+        if not all(_is_score(score) for score in scores):
+            raise Fail(MALFORMED_REPLY)
+        return [float(score) for score in scores]
+
+    def score(self, text: str) -> float:
+        return self.score_many([text])[0]
+
+
+def _is_score(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= 1

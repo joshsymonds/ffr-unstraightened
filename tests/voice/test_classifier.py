@@ -1,11 +1,14 @@
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ffrd.game import Fail
+from ffrd.pipeline.gates import Classifier
 from ffrd.voice import classifier
-from ffrd.voice.classifier import Pair, examples, load_pairs
+from ffrd.voice.classifier import MODEL_DIR, Pair, Scorer, examples, load_pairs
 
 # Made-up strings for the pairs loader. Not game text.
 SYNTH_TEXTS = (
@@ -16,6 +19,9 @@ SYNTH_TEXTS = (
     "SYNTH-ORIGINAL-TWO wording",
     "SYNTH-RAW-NOT-JSON fragment",
 )
+
+# Made-up strings for the scorer. Not game text.
+SCORE_TEXTS = ("SYNTH-SCORE-ONE wording", "SYNTH-SCORE-TWO wording")
 
 
 def record(**overrides: object) -> dict[str, object]:
@@ -167,3 +173,99 @@ def test_examples_dedupes_originals_and_keeps_pair_order() -> None:
 def test_examples_drops_paraphrase_identical_to_its_original() -> None:
     pairs = [make_pair(SYNTH_TEXTS[2], SYNTH_TEXTS[2]), make_pair(SYNTH_TEXTS[4], SYNTH_TEXTS[3])]
     assert examples(pairs) == [(SYNTH_TEXTS[2], 1), (SYNTH_TEXTS[4], 1), (SYNTH_TEXTS[3], 0)]
+
+
+class FakeWorker:
+    def __init__(self, argv: Sequence[str], reply: object) -> None:
+        self.argv = list(argv)
+        self.reply = reply
+        self.asks: list[dict[str, Any]] = []
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> "FakeWorker":
+        self.entered = True
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.exited = True
+
+    def ask(self, request: dict[str, Any]) -> Any:
+        self.asks.append(request)
+        return self.reply
+
+
+@pytest.fixture
+def fake_worker(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], list[FakeWorker]]:
+    def install(reply: object) -> list[FakeWorker]:
+        made: list[FakeWorker] = []
+
+        def make(argv: Sequence[str]) -> FakeWorker:
+            worker = FakeWorker(argv, reply)
+            made.append(worker)
+            return worker
+
+        monkeypatch.setattr(classifier.remote, "Worker", make)
+        return made
+
+    return install
+
+
+def test_scorer_serves_model_dir_through_classify_module(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"scores": []})
+    Scorer()
+    Scorer("models/synthetic")
+    assert MODEL_DIR == "models/classifier"
+    assert [worker.argv for worker in made] == [
+        ["python3", "-m", "tools.voice.classify", "serve", "models/classifier"],
+        ["python3", "-m", "tools.voice.classify", "serve", "models/synthetic"],
+    ]
+
+
+def test_score_many_sends_one_request_and_keeps_order(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"scores": [0.75, 0.25]})
+    with Scorer() as scorer:
+        assert scorer.score_many(list(SCORE_TEXTS)) == [0.75, 0.25]
+    assert made[0].asks == [{"texts": list(SCORE_TEXTS)}]
+
+
+def test_score_many_empty_input_sends_nothing(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"scores": []})
+    with Scorer() as scorer:
+        assert scorer.score_many([]) == []
+    assert made[0].asks == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"scores": [0.5]},
+        {"scores": [0.5, 0.5, 0.5]},
+        {"scores": "0.5"},
+        {"scores": 0.5},
+        {"scores": [0.5, 1.5]},
+        {"scores": [-0.1, 0.5]},
+        {"scores": [True, 0.5]},
+        {"scores": [0.5, False]},
+        {"scores": ["0.5", 0.5]},
+        {"other": [0.5, 0.5]},
+    ],
+    ids=["short", "long", "string", "scalar", "above-one", "below-zero", "true", "false", "string-item", "missing-key"],
+)
+def test_score_many_malformed_reply_raises_content_free_fail(fake_worker: Callable[[object], list[FakeWorker]], reply: object) -> None:
+    fake_worker(reply)
+    with Scorer() as scorer, pytest.raises(Fail) as err:
+        scorer.score_many(list(SCORE_TEXTS))
+    assert str(err.value) == "classifier worker sent a malformed reply"
+    for text in SCORE_TEXTS:
+        assert text not in str(err.value)
+
+
+def test_score_returns_single_score_and_closes_worker(fake_worker: Callable[[object], list[FakeWorker]]) -> None:
+    made = fake_worker({"scores": [0.5]})
+    with Scorer() as scorer:
+        classify: Classifier = scorer.score
+        assert classify(SCORE_TEXTS[0]) == 0.5
+    assert made[0].asks == [{"texts": [SCORE_TEXTS[0]]}]
+    assert made[0].entered is True
+    assert made[0].exited is True
