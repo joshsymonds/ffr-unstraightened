@@ -204,6 +204,17 @@ def test_build_accepts_arc_character_who_speaks_in_a_later_passed_chapter(tmp_pa
     assert built == [{**answer, "chapter": 1}, {**late, "chapter": 2}]
 
 
+def test_build_drops_empty_speaker_from_arc_characters_and_stores_the_drop(tmp_path: Path) -> None:
+    answer = {**BIBLE_ONE, "arcs": [{**MADE_UP_ARC, "characters": ["", "Ash"]}]}
+    dropped = {**BIBLE_ONE, "arcs": [{**MADE_UP_ARC, "characters": ["Ash"]}]}
+
+    built = build(Store(tmp_path), [(1, C1_LINES)], FakeAsk(answer, NO_SETUPS))
+
+    assert built == [{**dropped, "chapter": 1}]
+    reread = chapter(Store(tmp_path), 1, C1_LINES, [], C1_SCOPE, C1_SPEAKERS, FakeAsk())
+    assert reread == {**dropped, "chapter": 1}
+
+
 @pytest.mark.parametrize(
     ("answer", "failure"),
     [
