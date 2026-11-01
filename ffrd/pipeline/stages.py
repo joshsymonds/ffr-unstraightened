@@ -370,7 +370,13 @@ def draft(
 
 
 def render(store: Store, renderer: Renderer, speaker: str | None, text: str) -> str:
-    return store.run("render", {"speaker": speaker, "text": text}, None, lambda: renderer.render(speaker, text)).value
+    def call() -> str:
+        try:
+            return renderer.render(speaker, text)
+        except Exception as error:
+            raise Fail(f"voice render failed ({type(error).__name__})") from error
+
+    return store.run("render", {"speaker": speaker, "text": text}, None, call).value
 
 
 JUDGE_INSTRUCTIONS = (

@@ -471,13 +471,29 @@ def test_render_stores_the_renderer_text_and_does_not_call_it_twice(tmp_path: Pa
     assert len(renderer.fake.calls) == 1
 
 
-def test_render_exception_propagates_and_stores_nothing(tmp_path: Path) -> None:
+def test_render_runtime_error_raises_fail_without_text_and_stores_nothing(tmp_path: Path) -> None:
     store = Store(tmp_path)
     renderer = FakeRenderer(RuntimeError("Made-up renderer failure. Not game text."))
 
-    with pytest.raises(RuntimeError, match="Made-up renderer failure"):
+    with pytest.raises(Fail) as excinfo:
+        render(store, renderer, "Made-up speaker. Not game text.", "Made-up narration. Not game text.")
+
+    message = str(excinfo.value)
+    assert message == "voice render failed (RuntimeError)"
+    for leaked in ("Made-up renderer failure", "Made-up speaker", "Made-up narration"):
+        assert leaked not in message
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+def test_render_fail_raised_by_renderer_is_reported_by_class_name_only(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    renderer = FakeRenderer(Fail("Made-up renderer refusal. Not game text."))
+
+    with pytest.raises(Fail) as excinfo:
         render(store, renderer, None, "Made-up narration. Not game text.")
 
+    assert str(excinfo.value) == "voice render failed (Fail)"
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
