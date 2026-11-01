@@ -3,10 +3,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import polib
 import pytest
+from pylocres import Entry, LocresFile, Namespace
 
-from ffrd import cli, install
-from ffrd.game import MOD_NAME
+from ffrd import cli, extract, install
+from ffrd.game import LOCRES, MOD_NAME
 
 EXTS = ("pak", "utoc", "ucas")
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -186,3 +188,136 @@ def test_find_is_registered_with_its_help(repo: Path, monkeypatch: pytest.Monkey
     out = capsys.readouterr().out
     assert "regex matched against text or key (case-insensitive)" in out
     assert "regex the namespace must match, e.g. '^ST_C01_023_'" in out
+
+
+BASE_EN = (
+    ("ST_T01_001", "1", "Synthetic base one."),
+    ("ST_T01_001", "2", "Synthetic base two."),
+    ("ST_T02_001", "1", ""),
+    ("ST_T03_001", "1", "Same in both."),
+)
+BASE_JA = (
+    ("ST_T01_001", "1", "合成基礎一"),
+    ("ST_T01_001", "2", "合成基礎二"),
+    ("ST_T02_001", "1", "空欄"),
+    ("ST_T03_001", "1", "Same in both."),
+)
+# A patch pak ships a whole replacement Game.locres, so each patch repeats the base lines.
+PATCH_TWO_EN = (BASE_EN[0], ("ST_T01_001", "2", "Synthetic patch two from pak two."), BASE_EN[2], BASE_EN[3])
+PATCH_TEN_EN = (BASE_EN[0], ("ST_T01_001", "2", "Synthetic patch two from pak ten."), BASE_EN[2], BASE_EN[3])
+
+
+def locres_file(lines: tuple[tuple[str, str, str], ...]) -> LocresFile:
+    namespaces: dict[str, Namespace] = {}
+    for ns_name, key, text in lines:
+        namespaces.setdefault(ns_name, Namespace(ns_name)).add(Entry(key, text, text, is_hash=False))
+    locres = LocresFile()
+    for ns in namespaces.values():
+        locres.add(ns)
+    return locres
+
+
+def stage_locres(stage: Path, lang: str, lines: tuple[tuple[str, str, str], ...]) -> None:
+    path = stage / LOCRES / lang / "Game.locres"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    locres_file(lines).write(str(path))
+
+
+def pack(stage: Path, pak: Path) -> None:
+    subprocess.run(
+        ["repak", "pack", "-q", "--version", "V11", "--compression", "Zlib", "-m", "../../../", str(stage), str(pak)],
+        check=True,
+    )
+
+
+@pytest.fixture
+def game_paks(fake_game: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("FFR_VANILLA", str(tmp_path / "vanilla"))
+    paks = fake_game / "FFRS/Content/Paks"
+    stages = tmp_path / "stages"
+
+    base = stages / "base"
+    stage_locres(base, "en", BASE_EN)
+    stage_locres(base, "ja", BASE_JA)
+    pack(base, paks / "FFRS-Windows.pak")
+
+    patch_two = stages / "patch-two"
+    stage_locres(patch_two, "en", PATCH_TWO_EN)
+    pack(patch_two, paks / "FFRS-Windows_2.pak")
+
+    patch_ten = stages / "patch-ten"
+    stage_locres(patch_ten, "en", PATCH_TEN_EN)
+    pack(patch_ten, paks / "FFRS-Windows_10.pak")
+
+    no_text = stages / "no-text"
+    (no_text / "FFRS/Content/Textures").mkdir(parents=True)
+    (no_text / "FFRS/Content/Textures/synthetic.txt").write_text("synthetic texture")
+    pack(no_text, paks / "FFRS-Windows_5.pak")
+    return paks
+
+
+def test_extract_removes_stale_vanilla_contents(game_paks: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    vanilla = tmp_path / "vanilla"
+    (vanilla / "pak/stale").mkdir(parents=True)
+    (vanilla / "pak/stale/Old.locres").write_bytes(b"stale")
+    (vanilla / "stale.po").write_text("stale")
+    cli.main(["extract"])
+    assert not (vanilla / "pak/stale").exists()
+    assert not (vanilla / "stale.po").exists()
+    assert (vanilla / "en.po").is_file()
+
+
+def test_extract_unpacks_english_and_japanese_text_with_later_patch_paks_winning(
+    game_paks: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["extract"])
+    lang_dir = tmp_path / "vanilla/pak" / LOCRES
+    en = LocresFile()
+    en.read(str(lang_dir / "en/Game.locres"))
+    ja = LocresFile()
+    ja.read(str(lang_dir / "ja/Game.locres"))
+    assert en["ST_T01_001"]["2"].translation == "Synthetic patch two from pak ten."
+    assert ja["ST_T01_001"]["2"].translation == "合成基礎二"
+
+
+def test_extract_skips_paks_without_text(game_paks: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["extract"])
+    assert "FFRS-Windows_5.pak" not in capsys.readouterr().out
+    assert not (tmp_path / "vanilla/pak/FFRS/Content/Textures").exists()
+
+
+def test_extract_writes_build_id_from_manifest(game_paks: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["extract"])
+    assert (tmp_path / "vanilla/BUILDID").read_text() == "424242\n"
+
+
+def test_extract_writes_en_po_with_ja_comments_and_build_header(
+    game_paks: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["extract"])
+    po = polib.pofile(str(tmp_path / "vanilla/en.po"))
+    assert po.metadata["X-Game-Build"] == "424242"
+    assert [(e.msgctxt, e.msgid, e.msgstr, e.comment) for e in po] == [
+        ("ST_T01_001,1", "Synthetic base one.", "", "ja: 合成基礎一"),
+        ("ST_T01_001,2", "Synthetic patch two from pak ten.", "", "ja: 合成基礎二"),
+        ("ST_T03_001,1", "Same in both.", "", ""),
+    ]
+
+
+def test_extract_prints_each_text_pak_and_the_build_summary(game_paks: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.main(["extract"])
+    assert capsys.readouterr().out == (
+        "extracted text from FFRS-Windows.pak\n"
+        "extracted text from FFRS-Windows_2.pak\n"
+        "extracted text from FFRS-Windows_10.pak\n"
+        "build 424242: 3 English entries -> vanilla/en.po\n"
+    )
+
+
+def test_extract_is_registered_with_its_help(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert extract in cli.COMMANDS
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "pull the installed game's text into vanilla/" in capsys.readouterr().out
