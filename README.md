@@ -91,7 +91,7 @@ Set the game's Text Language to English before you play.
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
 | `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `arcs: N, M with changes` from `work/<name>/arcs.json` and one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
-| `ffrd run --lens <name> [--no-jev] [--concurrency N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. Keeps up to `N` Claude calls in flight at once, 8 by default. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd run --lens <name> [--no-jev] [--concurrency N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. Keeps up to `N` Claude calls in flight at once, 8 by default. `--through N` keeps only the lines in chapters at or below `N`. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
 | `ffrd probe [--shape {target,full,partial,ue4ss}]` | Checks which text shape the game honours, by running the game on the probe host. Without `--shape`, it tries `target`, then `full`. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
@@ -149,6 +149,10 @@ prefixes, plus the same three namespaces. Hard exclusions apply in every case:
 `ST_ConsumablesDescription`, `ST_EquipmentDescription` and `ST_ArtifactDescription`.
 Names, menus, items, skills and tutorials never change.
 
+The `unstraightening` lens is `lenses/unstraightening.toml`. Its rules, refinements,
+protections and precedence are recorded in
+[docs/lenses/unstraightening.md](docs/lenses/unstraightening.md).
+
 `ffrd run` works in three stages.
 
 First, Opus writes a story bible for each chapter, in script order. A bible lists the
@@ -204,6 +208,19 @@ Claude calls run through `cswap`, which picks the least-used account. `--concurr
 sets how many Claude calls run at once across the bible, the scenes and the arc judges.
 It defaults to 8 and must be at least 1. The written files are the same whatever the
 concurrency. `ffrd run` needs `TYPESAFE_API_KEY` unless `--no-jev` is given.
+
+Scenes run in chapter order, Chapter 1 first. A scene's chapter is the smallest chapter
+among its in-scope lines. Scenes with no chaptered line run last. When every scene that
+holds a Chapter 1 line has finished its scene pass, the run writes
+`reports/<name>-c01.txt`. It holds Chapter 1's provisional counts in the report format.
+These counts come before the arc judge, so they can still change. The run does not
+pause for them, and the other scenes keep running. The file is not written when the run
+has no Chapter 1 line.
+
+`--through N` keeps only the lines in chapters at or below `N`. `N` must be at least 1.
+Lines without a chapter are left out of the run. Scenes left with no lines are dropped.
+With `--through 1`, the run does Chapter 1's scenes, writes `reports/<name>-c01.txt` and
+their outputs, and stops.
 
 ### Smoke run
 
