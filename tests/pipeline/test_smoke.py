@@ -1,6 +1,5 @@
 import argparse
 import json
-import re
 import threading
 import time
 from collections import Counter
@@ -272,7 +271,7 @@ def test_run_reaches_every_stage_prints_keys_and_counts_and_writes_only_under_wo
         "prefix ST_UnitDescription: 0",
         "prefix outside fallback: 3",
         "prefix hard excluded: 0",
-        f"scene {SCENE_A}: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
+        "scene 1/1 54193dbc: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
         "total: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched",
         *FULL_STAGE_LINES,
     ]
@@ -326,7 +325,7 @@ def test_default_pick_is_the_first_scene_with_two_spoken_lines(
     cmd_smoke(_parse(["smoke"]))
 
     scene_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("scene ")]
-    assert [line.split(":")[0] for line in scene_lines] == [f"scene {SCENE_A}"]
+    assert [line.split(":")[0] for line in scene_lines] == ["scene 1/1 54193dbc"]
 
 
 def test_scene_key_picks_that_scene_and_an_unknown_key_fails_naming_it(
@@ -337,11 +336,41 @@ def test_scene_key_picks_that_scene_and_an_unknown_key_fails_naming_it(
 
     cmd_smoke(_parse(["smoke", "--scene", SCENE_B]))
     scene_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("scene ")]
-    assert [line.split(":")[0] for line in scene_lines] == [f"scene {SCENE_B}"]
+    assert [line.split(":")[0] for line in scene_lines] == ["scene 1/1 e4beb400"]
 
-    for missing in ("made-up-scene-missing", SCENE_NO_SCOPE):
-        with pytest.raises(Fail, match=re.escape(missing)):
+    for missing, label in (("made-up-scene-missing", "2b44d327"), (SCENE_NO_SCOPE, "9e56030d")):
+        with pytest.raises(Fail) as raised:
             cmd_smoke(_parse(["smoke", "--scene", missing]))
+        assert str(raised.value) == f"no in-scope scene has the key {label}"
+
+
+# Made-up scene key holding a sentinel name. Not game text.
+SENTINEL = "made-up-scene-Zorbleth"
+
+
+def test_smoke_output_never_names_a_sentinel_scene_key(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(), FakeJev(JEV_HIGH), [_speaker_scene(SENTINEL, NS_A)])
+
+    cmd_smoke(_parse(["smoke"]))
+
+    captured = capsys.readouterr()
+    assert "Zorbleth" not in captured.out
+    assert "Zorbleth" not in captured.err
+    scene_lines = [line for line in captured.out.splitlines() if line.startswith("scene ")]
+    assert [line.split(":")[0] for line in scene_lines] == ["scene 1/1 2a41d117"]
+
+
+def test_unknown_scene_failure_never_names_a_sentinel_scene_key(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out_of_scope = Scene(SENTINEL, (SceneLine(NS_HARD, "1", SPEAKER_A, "Made-up english. Not game text.", "Made-up japanese.", 1),))
+    _bind(monkeypatch, FakeClaude(), FakeJev(JEV_HIGH), [out_of_scope])
+
+    with pytest.raises(Fail) as raised:
+        cmd_smoke(_parse(["smoke", "--scene", SENTINEL]))
+    assert str(raised.value) == "no in-scope scene has the key 2a41d117"
 
 
 def test_prefix_report_counts_each_family_once_and_the_table_only_and_hard_excluded_lines(
@@ -404,7 +433,7 @@ def test_stages_a_run_leaves_empty_are_exercised_and_change_no_outcome(
     cmd_smoke(_parse(["smoke"]))
 
     printed = capsys.readouterr().out.splitlines()
-    assert f"scene {SCENE_A}: 0 changed, 0 kept for plot, 2 gate failed, 0 unfinished, 1 untouched" in printed
+    assert "scene 1/1 54193dbc: 0 changed, 0 kept for plot, 2 gate failed, 0 unfinished, 1 untouched" in printed
     assert [line for line in printed if line.startswith("stage ")] == [
         "stage bible: 1",
         "stage bible_setups: 1",
