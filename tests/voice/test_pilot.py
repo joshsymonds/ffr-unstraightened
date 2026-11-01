@@ -368,6 +368,47 @@ def test_a_training_that_prints_no_staged_count_fails(fakes: Fakes) -> None:
         pilot.measure(2, clock=fakes.clock)
 
 
+def test_all_calls_failed_prints_the_pairs_lines_and_trains_nothing(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    fakes.report = ["calls 2", "resumed 0", "failed 2", "train pairs 4", "heldout pairs 0"]
+    with pytest.raises(Fail, match="all 2 pairs calls failed"):
+        pilot.measure(2, clock=fakes.clock)
+    out = capsys.readouterr().out.splitlines()
+    assert out[:5] == ["pairs scenes 2", "pairs lines 4", "pairs calls 2", "pairs resumed 0", "pairs failed 2"]
+    assert "pairs account 7 weekly_pct n/a 40.00" in out
+    assert not any(row.startswith(("classifier ", "lora ", "projected ")) for row in out)
+    assert fakes.trained == []
+
+
+def test_zero_train_pairs_prints_the_pairs_lines_and_trains_nothing(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    fakes.report = ["calls 2", "resumed 0", "failed 1", "train pairs 0", "heldout pairs 2"]
+    with pytest.raises(Fail, match="pairs wrote no train pairs"):
+        pilot.measure(2, clock=fakes.clock)
+    out = capsys.readouterr().out.splitlines()
+    assert out[:5] == ["pairs scenes 2", "pairs lines 4", "pairs calls 2", "pairs resumed 0", "pairs failed 1"]
+    assert not any(row.startswith(("classifier ", "lora ", "projected ")) for row in out)
+    assert fakes.trained == []
+
+
+def test_a_classifier_that_stages_nothing_fails_without_its_metric_lines(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    fakes.classifier_staged = "staged 0 classifier examples"
+    with pytest.raises(Fail, match="classifier training staged 0 examples"):
+        pilot.measure(2, clock=fakes.clock)
+    out = capsys.readouterr().out.splitlines()
+    assert "pairs failed 1" in out
+    assert not any(row.startswith("classifier ") for row in out)
+    assert fakes.trained == ["classifier"]
+
+
+def test_a_lora_that_stages_nothing_fails_without_its_metric_lines(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    fakes.lora_staged = "staged 0 lora records"
+    with pytest.raises(Fail, match="lora training staged 0 records"):
+        pilot.measure(2, clock=fakes.clock)
+    out = capsys.readouterr().out.splitlines()
+    assert "classifier examples 6" in out
+    assert not any(row.startswith("lora ") for row in out)
+    assert not any(row.startswith("projected ") for row in out)
+
+
 # --scenes validation
 
 
@@ -448,7 +489,7 @@ def test_reset_wait_is_zero_when_the_headroom_already_covers_the_weekly_projecti
 
 def test_projection_is_n_a_for_the_calls_it_needs_when_the_pilot_made_no_calls(fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
     fakes.bodies = []
-    fakes.report = ["calls 0", "resumed 0", "failed 0"]
+    fakes.report = ["calls 0", "resumed 0", "failed 0", "train pairs 4", "heldout pairs 0"]
     _two_accounts(
         fakes,
         [_account(3, 0.0), _account(7, 0.0)],

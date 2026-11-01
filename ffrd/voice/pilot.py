@@ -256,6 +256,8 @@ def _training(name: str, noun: str, staged: re.Pattern[str], train: Callable[[],
     ended = clock()
     if watch.count is None:
         raise Fail(f"{name} training printed no staged count")
+    if watch.count == 0:
+        raise Fail(f"{name} training staged 0 {noun}")
     steps = watch.steps
     startup = steps[0] - started if steps else None
     per_step = (steps[-1] - steps[0]) / (len(steps) - 1) if len(steps) > 1 else None
@@ -268,10 +270,18 @@ def _weekly(rows: Iterable[accounts.Account]) -> dict[int, float]:
 
 def _reported(report: Sequence[str], name: str) -> int:
     for row in report:
-        key, _, value = row.partition(" ")
+        key, _, value = row.rpartition(" ")
         if key == name:
             return int(value)
     raise Fail(f"pairs reported no {name} count")
+
+
+def _check_pairs(calls: int, failed: int, train_pairs: int) -> None:
+    """Fails when the pairs run gave nothing to train on: every call it made failed, or it wrote no train pairs."""
+    if calls and failed == calls:
+        raise Fail(f"all {calls} pairs calls failed")
+    if train_pairs == 0:
+        raise Fail("pairs wrote no train pairs")
 
 
 def _mean_seconds(calls: Sequence[Call]) -> float | None:
@@ -412,12 +422,14 @@ def measure(count: int, clock: Clock = time.monotonic, now: Now = _utc_now) -> N
         wall = clock() - started
     after_rows = accounts.read()
     after = _weekly(after_rows)
+    calls = _reported(report, "calls")
+    failed = _reported(report, "failed")
     for row in [
         f"pairs scenes {len(first)}",
         f"pairs lines {len(in_scenes)}",
-        f"pairs calls {_reported(report, 'calls')}",
+        f"pairs calls {calls}",
         f"pairs resumed {_reported(report, 'resumed')}",
-        f"pairs failed {_reported(report, 'failed')}",
+        f"pairs failed {failed}",
         f"pairs wall_s {_num(wall)}",
         f"pairs api_requests {len(receiver.calls)}",
         f"pairs api_unreadable {receiver.malformed}",
@@ -426,6 +438,7 @@ def measure(count: int, clock: Clock = time.monotonic, now: Now = _utc_now) -> N
         *_account_lines(before, after),
     ]:
         print(row)
+    _check_pairs(calls, failed, _reported(report, "train pairs"))
     classifier_run = _training("classifier", "examples", CLASSIFIER_STAGED, classifier.train, clock)
     for row in classifier_run.lines():
         print(row)
