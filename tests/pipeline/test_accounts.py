@@ -119,6 +119,23 @@ class Sleeps:
         self.on_sleep()
 
 
+class Clock:
+    """Simulated time. Sleeping advances now, so a test can run out a bound without waiting."""
+
+    def __init__(self, on_sleep: Callable[[], None] = lambda: None) -> None:
+        self.elapsed = timedelta(0)
+        self.durations: list[float] = []
+        self.on_sleep = on_sleep
+
+    def now(self) -> datetime:
+        return NOW + self.elapsed
+
+    def sleep(self, seconds: float) -> None:
+        self.durations.append(seconds)
+        self.elapsed += timedelta(seconds=seconds)
+        self.on_sleep()
+
+
 @pytest.fixture
 def cswap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCswap:
     return FakeCswap(tmp_path, monkeypatch)
@@ -239,13 +256,50 @@ def test_choose_waits_at_least_sixty_seconds(cswap: FakeCswap, reset_in: timedel
     assert sleep.durations == [60.0]
 
 
-def test_choose_with_no_usable_account_raises_fail_without_waiting(cswap: FakeCswap) -> None:
+def test_choose_with_transient_empty_listing_returns_next_usable_account_after_one_backoff(cswap: FakeCswap) -> None:
     cswap.publish(listing(unusable(1), unusable(2, status="disabled")))
-    sleep = Sleeps()
+    sleep = Sleeps(on_sleep=lambda: cswap.publish(listing(usable(1, 10.0))))
+    assert choose(sleep=sleep, now=fixed_now).number == 1
+    assert sleep.durations == [30.0]
+    assert cswap.calls() == ["list --json", "list --json"]
+
+
+def test_choose_with_persistently_no_usable_account_raises_fail_after_five_minutes(cswap: FakeCswap) -> None:
+    cswap.publish(listing(unusable(1), unusable(2, status="disabled")))
+    clock = Clock()
     with pytest.raises(Fail) as exc:
-        choose(sleep=sleep, now=fixed_now)
+        choose(sleep=clock.sleep, now=clock.now)
     assert str(exc.value) == "no usable cswap account"
-    assert sleep.durations == []
+    assert clock.durations == [30.0] * 10
+    assert clock.elapsed == timedelta(seconds=300)
+    assert cswap.calls() == ["list --json"] * 11
+
+
+def test_choose_restarts_the_absence_clock_once_usable_accounts_return(cswap: FakeCswap) -> None:
+    cswap.publish(listing(unusable(1)))
+    steps = iter([listing(usable(1, 95.0, timedelta(hours=1))), listing(unusable(1)), listing(usable(1, 10.0))])
+    clock = Clock(on_sleep=lambda: cswap.publish(next(steps)))
+    assert choose(sleep=clock.sleep, now=clock.now).number == 1
+    assert clock.durations == [30.0, 3570.0, 30.0]
+
+
+def test_concurrent_choose_through_transient_empty_listing_each_returns_a_usable_account(cswap: FakeCswap) -> None:
+    threads = 4
+    cswap.publish(listing(unusable(1)))
+    # Every caller reads the empty listing and sleeps at the barrier. The barrier's action publishes the usable
+    # listing once, before any caller is released to read again.
+    barrier = threading.Barrier(threads, action=lambda: cswap.publish(listing(usable(1, 10.0), usable(2, 20.0))), timeout=5)
+
+    def arrive() -> None:
+        barrier.wait()
+
+    def pick(_: int) -> Account:
+        return choose(sleep=Sleeps(on_sleep=arrive), now=fixed_now)
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        picked = list(pool.map(pick, range(threads)))
+    assert [account.number for account in picked] == [1] * threads
+    assert cswap.calls() == ["list --json"] * (2 * threads)
 
 
 def test_read_with_cswap_missing_from_path_raises_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
