@@ -83,10 +83,9 @@ Set the game's Text Language to English before you play.
 | `ffrd install [--deck]` | Copies the three mod files into `<game>/FFRS/Content/Paks/~mods`. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
-| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. Never prints line text. |
+| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, and gate failures per gate. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `arcs: N, M with changes` from `work/<name>/arcs.json` and one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
-| `ffrd tune --lens <name>` | Sets the Jev triage threshold for `lenses/<name>.toml`. Samples up to 100 in-scope scenes, has the Sonnet screen label each one, and scores each one with Jev. The threshold is the lowest Jev score among the scenes the screen flagged, so no flagged sample falls below it. Saves `work/<name>/threshold.json` and prints the threshold and counts. Fails until the pipeline is bound. |
-| `ffrd run --lens <name> [--no-triage]` | Rewrites the in-scope lines of the lens's scenes, then writes each line's outcome to `work/<name>/outcomes.jsonl` and each changed line to `dialog/<name>/`. Triages with the threshold from `ffrd tune`, or screens every scene with `--no-triage`. Fails until the pipeline is bound. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd run --lens <name> [--no-jev]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene, then runs the Jev recall check unless `--no-jev` skips it. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. Fails until the pipeline is bound. See [Rewrite pipeline](#rewrite-pipeline). |
 
 Edits go in any `dialog/**/*.toml` file. Each edit is one table, keyed by namespace
 and key, with `vanilla` (the hash of the current English line) and `text` (your
@@ -109,7 +108,7 @@ To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck
 
 ### Rewrite pipeline
 
-`ffrd tune --lens <name>` and `ffrd run --lens <name>` change only in-scope lines.
+`ffrd run --lens <name>` changes only in-scope lines.
 A line is in scope when the scene source yields it from the game's scene table. That
 covers event dialogue, including unnumbered side events, which count under the chapter
 that unlocks them, and the `ST_DialogChoice`, `ST_MainSummary` and `ST_UnitDescription`
@@ -121,20 +120,52 @@ prefixes, plus the same three namespaces. Hard exclusions apply in every case:
 `ST_ConsumablesDescription`, `ST_EquipmentDescription` and `ST_ArtifactDescription`.
 Names, menus, items, skills and tutorials never change.
 
-`ffrd run` works through the lens's scenes in order. It writes a story bible for each
-chapter and triages each scene with Jev against the stored threshold, unless
-`--no-triage` is given. The Sonnet screen
-flags the lines to change. For each flagged line, Opus writes an intent and a draft, the
-voice is rendered, and the gates run: placeholders, tags, length within 120% of vanilla
-with the same line breaks, the classifier, a scene judge, and a cross-scene judge for
-lines a callback touches. The best passing candidate is kept. A line with no passing
-candidate stays vanilla. Each changed line goes to `dialog/<name>/chapter-NN.toml`, or
-to `dialog/<name>/unattributed.toml` when it names no chapter. Each table records the
-vanilla hash, the text, the lens, the reason, the writer, the verdict and the run.
+`ffrd run` works in three stages.
+
+First, Opus writes a story bible for each chapter, in script order. A bible lists the
+characters with their gender and notes, the facts, the callbacks, and the arcs. Each
+arc has an id, its characters, its state in that chapter, and beats. A beat sits on a
+line and has a kind (setup, escalation, declaration, payoff or other) and an earned
+flag. Lines that name no chapter are read after the last chapter, one chunk per
+namespace. Then a backward pass runs over the chapters in reverse order. It adds the
+setups that later bibles rely on to each chapter's callbacks.
+
+Second, the scenes run in order. Sonnet screens every line of the scene against
+the screen criteria, with the cast notes from the bibles. Jev scores the scene for each
+triage question. For each triage id that scores 0.5 or more and that the screen flagged
+on no line, Opus rechecks the scene for that id, and the lines it flags join the screen's
+flags. Opus then writes an intent for each flagged line, and one draft call writes the
+drafts for all the flagged lines in the scene. Each draft is also rendered in the voice,
+and both versions go through the gates in this order: placeholders, tags, length (within
+120% of vanilla, with the same line breaks), the classifier, and the scene judge. The
+scene judge checks meaning, plot, minimal change, callback and fixed. A line with
+callbacks also goes to the cross-scene judge, which runs only after the scene judge
+passes. If no candidate passes, the line gets one more draft, told which gate failed.
+If that also fails, the line stays vanilla. It counts as kept for plot when the plot gate
+failed, and as gate failed otherwise. Among the passing candidates, the one that restores
+the Japanese meaning ranks first, then the one with the smallest edit distance from the
+English line. A scene with two or more changed lines then goes through the coherence
+check. It reads the scene with its rewrites applied, against the arcs and the judge
+rubric.
+
+Third, after all scenes, the arc judge reads each arc that has a changed line, its lines
+in story order, with the rewrites applied. Each check works the same way. Opus names the
+lines it would revert. If it finds a problem, a recheck sees those proposals and names
+only the ones that must revert. A line reverts only when both passes name it.
+
+Each changed line goes to `dialog/<name>/chapter-NN.toml`, or to
+`dialog/<name>/unattributed.toml` when it names no chapter. Each table records the vanilla
+hash, the text, the lens, the reason (the list of triage ids that flagged the line, in
+lens order), the writer (`opus` or `voice`), the verdict and the run. The run also writes
+`work/<name>/outcomes.jsonl` with one record per line, `arcs.json` with the arc count and
+how many arcs have a change, and `recall.json` with, for each triage id, how many scenes
+Jev disagreed with the screen on and how many of those the recheck confirmed. With
+`--no-jev`, Jev is never called and every recall count is zero.
 
 Progress prints scene keys and counts only. Every model result is saved under
 `work/<name>/` as it arrives, so a rerun resumes where it stopped. Claude calls run
-through `cswap`, which picks the least-used account. Jev triage needs `TYPESAFE_API_KEY`.
+through `cswap`, which picks the least-used account. `ffrd run` needs `TYPESAFE_API_KEY`
+unless `--no-jev` is given.
 
 ### Environment variables
 
@@ -145,14 +176,14 @@ through `cswap`, which picks the least-used account. Jev triage needs `TYPESAFE_
 | `FFR_PROGRESS` | `$XDG_STATE_HOME/ffrd/progress`, else `~/.local/state/ffrd/progress` | The file holding the recorded chapter. |
 | `FFR_DECK_HOST` | `deck` | The `ssh` host for `--deck`. |
 | `FFR_DECK_PAKS` | `~/.local/share/Steam/steamapps/common/FINAL FANTASY RESONANCE/FFRS/Content/Paks` | The Steam Deck's game Paks folder for `--deck`. |
-| `TYPESAFE_API_KEY` | none | The Jev API key. `ffrd tune` requires it, and so does `ffrd run` without `--no-triage`. |
+| `TYPESAFE_API_KEY` | none | The Jev API key. `ffrd run` requires it unless `--no-jev` is given. |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | The Jev endpoint. |
 | `TYPESAFE_MODEL` | `jev-latest` | The Jev model. |
 
 ## Limits
 
-- **`ffrd tune` and `ffrd run` fail until the pipeline is bound.** Both need a scene
-  source, a classifier and a renderer. None is bound yet, so neither can run.
+- **`ffrd run` fails until the pipeline is bound.** It needs a scene source, a
+  classifier and a renderer. None is bound yet, so it cannot run.
 - **The default build is partial, and its loading is unproven.** `ffrd build` writes
   `en/Unstraightened.locres`, which holds only the edited entries. It relies on the
   game honouring a second `en/*.locres` over `Game.locres`. That behaviour is not
