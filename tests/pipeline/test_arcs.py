@@ -537,7 +537,13 @@ def test_failed_arc_is_unfinished_alone_and_a_rerun_asks_only_that_arc(tmp_path:
 
 
 def test_crashed_arc_keeps_the_other_arcs_saved_results(tmp_path: Path) -> None:
-    ask = ArcFake({ARC["id"]: [RuntimeError("Made-up crash detail. Not game text.")], ARC_BRIN["id"]: [_answer(True)]})
+    answers = ArcFake({ARC["id"]: [RuntimeError("Made-up crash detail. Not game text.")], ARC_BRIN["id"]: [_answer(True)]})
+    # Both arcs start before either answers, so the crash cannot cancel the other arc before it begins.
+    meet = threading.Barrier(2, timeout=10)
+
+    def ask(*args: Any) -> Any:
+        meet.wait()
+        return answers(*args)
 
     with _concurrency(2), pytest.raises(RuntimeError, match="Made-up crash detail"):
         _judge(Store(tmp_path), ask, [ARC, ARC_BRIN])
