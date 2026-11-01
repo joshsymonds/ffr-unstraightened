@@ -61,7 +61,9 @@ in
     repak
     pkgs.ruff
     pkgs.basedpyright
+    pkgs.dotnet-sdk_10
     pkgs.just
+    pkgs.lua5_4
     pkgs.mermaid-cli
     (pkgs.python3.withPackages (_: [
       pylocres
@@ -69,6 +71,8 @@ in
       py.pytest
     ]))
   ];
+
+  env.FFR_OODLE = "${oodle}/lib/liboo2corelinux64.so.9";
 
   scripts.ffrd.exec = ''cd "$DEVENV_ROOT" && exec python3 -m ffrd "$@"'';
 }

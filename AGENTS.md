@@ -22,6 +22,11 @@ contain game text. The only permitted ways to see game text are `ffrd find` and
 `ffrd diff --lens <name>`. Both are progress-gated: they need recorded progress
 before they show any game text.
 
+`vanilla/scenes.json` is covered by this rule too. Read it only through the counts that
+`ffrd scenes --check` prints, or through code that reduces it to counts and keys.
+
+Probe-host logs are read only through `ffrd probe` and `ffrd usmap`, never directly.
+
 ## Tests
 
 Tests use synthetic fixtures only. Write made-up lines and keep them in the

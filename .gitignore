@@ -3,6 +3,8 @@
 work/
 .env.local
 /build/
+/tools/scenes/bin/
+/tools/scenes/obj/
 result*
 .devenv/
 .devenv.flake.nix

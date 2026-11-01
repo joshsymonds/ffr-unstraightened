@@ -1,10 +1,11 @@
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from ffrd import cli
-from ffrd.game import MOD_NAME
+from ffrd import cli, deck
+from ffrd.game import MOD_NAME, Fail
 
 EXTS = ("pak", "utoc", "ucas")
 NAMES = tuple(f"{MOD_NAME}.{ext}" for ext in EXTS)
@@ -180,3 +181,134 @@ def test_help_documents_deck_flag_and_both_variables(
     assert "FFR_DECK_HOST" in out
     assert "default deck" in out
     assert "FFR_DECK_PAKS" in out
+
+
+# Stands in for ssh for ssh_status: logs each argument on its own line, writes to both output streams
+# (which the caller must not see), and exits with $FAKE_SSH_STATUS.
+FAKE_SSH_ARGS = """#!/bin/sh
+printf '%s\\n' "$@" >> "$FAKE_SSH_LOG"
+echo noise-on-stdout
+echo noise-on-stderr >&2
+exit "$FAKE_SSH_STATUS"
+"""
+
+
+@pytest.fixture
+def ssh_args_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bindir = tmp_path / "args-bin"
+    bindir.mkdir()
+    ssh = bindir / "ssh"
+    ssh.write_text(FAKE_SSH_ARGS)
+    ssh.chmod(0o755)
+    log = tmp_path / "ssh-args.log"
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_SSH_LOG", str(log))
+    monkeypatch.setenv("FAKE_SSH_STATUS", "0")
+    return log
+
+
+@pytest.fixture
+def no_ssh_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+
+def expand_remote(path: str) -> bytes:
+    # The remote shell is sh; printing the quoted word shows what it expands to here.
+    return subprocess.run(["sh", "-c", f"printf %s {deck.remote(path)}"], capture_output=True, check=True).stdout
+
+
+def test_remote_expands_leading_tilde_to_home_and_quotes_the_rest(deck_home: Path, tmp_path: Path) -> None:
+    assert expand_remote("~/mods test/Deck's Paks") == str(deck_home / "mods test/Deck's Paks").encode()
+    assert expand_remote(str(tmp_path / "abs dir")) == str(tmp_path / "abs dir").encode()
+
+
+def test_ssh_returns_remote_stdout_and_runs_plain_ssh_host_command(ssh_log: Path) -> None:
+    assert deck.ssh("synthetic-host", "printf 'remote-out'") == b"remote-out"
+    assert ssh_calls(ssh_log) == [("2", "synthetic-host", "printf 'remote-out'")]
+
+
+def test_ssh_streams_stdin_to_the_remote_command(ssh_log: Path, tmp_path: Path) -> None:
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"synthetic payload")
+    with payload.open("rb") as data:
+        assert deck.ssh("synthetic-host", "cat", stdin=data) == b"synthetic payload"
+
+
+def test_ssh_nonzero_exit_raises_fail_naming_host_and_status(ssh_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_SSH_FAIL", "255")
+    with pytest.raises(Fail) as failure:
+        deck.ssh("synthetic-host", "true")
+    assert str(failure.value) == "ssh to synthetic-host exited 255"
+
+
+def test_ssh_without_ssh_on_path_raises_fail_naming_host(no_ssh_on_path: None) -> None:
+    with pytest.raises(Fail) as failure:
+        deck.ssh("synthetic-host", "true")
+    assert str(failure.value) == "ssh not found on PATH; cannot reach synthetic-host"
+
+
+@pytest.mark.parametrize("status", [0, 1, 255])
+def test_ssh_status_returns_exit_status_without_raising_and_discards_output(
+    status: int, ssh_args_log: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FAKE_SSH_STATUS", str(status))
+    assert deck.ssh_status("synthetic-host", "pgrep -f synthetic") == status
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_ssh_status_passes_batchmode_and_connect_timeout_before_host(ssh_args_log: Path) -> None:
+    deck.ssh_status("synthetic-host", "pgrep -f synthetic")
+    assert ssh_args_log.read_text().splitlines() == [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "synthetic-host",
+        "pgrep -f synthetic",
+    ]
+
+
+def test_ssh_status_without_ssh_on_path_raises_fail_naming_host(no_ssh_on_path: None) -> None:
+    with pytest.raises(Fail) as failure:
+        deck.ssh_status("synthetic-host", "true")
+    assert str(failure.value) == "ssh not found on PATH; cannot reach synthetic-host"
+
+
+def test_put_writes_files_to_explicit_host_and_dest_independent_of_env(
+    repo: Path, deck_home: Path, ssh_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FFR_DECK_HOST", "wrong-host")
+    monkeypatch.setenv("FFR_DECK_PAKS", "~/wrong/Paks")
+    dest = deck_home / "mods test/Deck's Paks/~mods"
+    files = [repo / "build" / name for name in NAMES]
+
+    deck.put("synthetic-host", "~/mods test/Deck's Paks/~mods", files)
+
+    for name in NAMES:
+        assert (dest / name).read_bytes() == (repo / "build" / name).read_bytes()
+    assert not (deck_home / "wrong").exists()
+    calls = ssh_calls(ssh_log)
+    assert len(calls) == len(NAMES)
+    assert {host for _, host, _ in calls} == {"synthetic-host"}
+
+
+def test_delete_removes_named_files_from_explicit_host_and_dest_tolerating_absent(
+    deck_home: Path, ssh_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FFR_DECK_HOST", "wrong-host")
+    monkeypatch.setenv("FFR_DECK_PAKS", "~/wrong/Paks")
+    dest = deck_home / "mods test/Deck's Paks/~mods"
+    dest.mkdir(parents=True)
+    (dest / NAMES[0]).write_bytes(b"installed")
+    (dest / "Other.pak").write_bytes(b"unrelated")
+
+    deck.delete("synthetic-host", "~/mods test/Deck's Paks/~mods", list(NAMES))
+    deck.delete("synthetic-host", "~/no such dir", list(NAMES))
+
+    assert not (dest / NAMES[0]).exists()
+    assert (dest / "Other.pak").read_bytes() == b"unrelated"
+    assert {host for _, host, _ in ssh_calls(ssh_log)} == {"synthetic-host"}
