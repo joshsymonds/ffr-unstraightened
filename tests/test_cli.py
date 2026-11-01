@@ -383,6 +383,8 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.leakcheck",
         "ffrd.pipeline.report",
         "ffrd.pipeline.diff",
+        "ffrd.pipeline.tune",
+        "ffrd.pipeline.run",
     ]
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--help"])
@@ -430,3 +432,84 @@ def test_report_without_a_lens_file_exits_1_through_the_cli(repo: Path, capsys: 
     assert err.startswith("ffrd: ")
     assert "made-up-lens.toml" in err
     assert err.endswith("\n")
+
+
+# Made-up lens text. Not game text.
+TUNE_RUN_LENS_TOML = """\
+[[triage]]
+id = "made-up-first-id"
+question = "Made-up first question. Not game text."
+
+[screen]
+criteria = ["Made-up criterion. Not game text."]
+
+[intent]
+rule = "Made-up intent rule. Not game text."
+
+[judge]
+rubric = "Made-up judge rubric. Not game text."
+"""
+TUNE_RUN_LENS = "made-up-lens"
+
+
+@pytest.fixture
+def made_up_lens(repo: Path) -> Path:
+    path = repo / "lenses" / f"{TUNE_RUN_LENS}.toml"
+    path.parent.mkdir()
+    path.write_text(TUNE_RUN_LENS_TOML, encoding="utf-8")
+    return path
+
+
+def test_tune_and_run_are_registered_after_diff_with_their_help(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "set a lens's Jev triage threshold from Sonnet screen labels on up to 100 scenes" in out
+    assert "run a lens's scenes through triage, screen, drafts, gates and selection, then write its outcomes and dialog" in out
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["tune", "--help"])
+    assert exit_info.value.code == 0
+    assert "name of the lens to tune, read from lenses/<name>.toml and saved under work/<name>/" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["run", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "screen every scene without the Jev triage threshold" in out
+
+
+def test_run_no_triage_through_the_cli_exits_1_before_any_work_is_written(
+    repo: Path, made_up_lens: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["run", "--lens", TUNE_RUN_LENS, "--no-triage"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: no scene source, classifier and renderer are bound yet\n"
+    assert not (repo / "work").exists()
+    assert not (repo / "dialog").exists()
+
+
+def test_tune_through_the_cli_exits_1_before_any_work_is_written(
+    repo: Path, made_up_lens: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["tune", "--lens", TUNE_RUN_LENS])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: no scene source, classifier and renderer are bound yet\n"
+    assert not (repo / "work").exists()
+    assert not (repo / "dialog").exists()
+
+
+def test_run_without_a_stored_threshold_through_the_cli_exits_1_and_names_tune(
+    repo: Path, made_up_lens: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["run", "--lens", TUNE_RUN_LENS])
+    assert exit_info.value.code == 1
+    threshold = repo.resolve() / "work" / TUNE_RUN_LENS / "threshold.json"
+    assert capsys.readouterr().err == (f"ffrd: no triage threshold at {threshold}; run `ffrd tune --lens <name>` or pass --no-triage\n")
+    assert not (repo / "work").exists()
+    assert not (repo / "dialog").exists()
