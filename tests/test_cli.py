@@ -381,6 +381,7 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.build",
         "ffrd.install",
         "ffrd.leakcheck",
+        "ffrd.scenes",
         "ffrd.probe",
     ]
     with pytest.raises(SystemExit) as exit_info:
