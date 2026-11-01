@@ -1,4 +1,4 @@
-"""Steam Deck transport: copy the built mod into the Deck's Paks/~mods and remove it again, over ssh."""
+"""Steam Deck transport: ssh to a host, copy the built mod into its Paks/~mods and remove it again."""
 
 import os
 import shlex
@@ -24,29 +24,52 @@ def target() -> str:
     return f"{host()}:{paks()}/~mods"
 
 
-def _remote(path: str) -> str:
-    # Only a leading ~/ is left unquoted, so the remote shell expands it to the Deck's home.
+def remote(path: str) -> str:
+    # Only a leading ~/ is left unquoted, so the remote shell expands it to the remote home.
     if path.startswith("~/"):
         return "~/" + shlex.quote(path[2:])
     return shlex.quote(path)
 
 
-def _ssh(command: str, stdin: IO[bytes] | int) -> None:
+def ssh(host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
     try:
-        result = subprocess.run(["ssh", host(), command], stdin=stdin, check=False)
+        result = subprocess.run(["ssh", host, command], stdin=stdin, stdout=subprocess.PIPE, check=False)
     except FileNotFoundError as e:
-        raise Fail(f"ssh not found on PATH; cannot reach {host()}") from e
+        raise Fail(f"ssh not found on PATH; cannot reach {host}") from e
     if result.returncode != 0:
-        raise Fail(f"ssh to {host()} exited {result.returncode}")
+        raise Fail(f"ssh to {host} exited {result.returncode}")
+    return result.stdout
+
+
+def ssh_status(host: str, command: str) -> int:
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        raise Fail(f"ssh not found on PATH; cannot reach {host}") from e
+    return result.returncode
+
+
+def put(host: str, dest: str, files: list[Path]) -> None:
+    remote_dest = remote(dest)
+    for f in files:
+        with f.open("rb") as data:
+            ssh(host, f"mkdir -p {remote_dest} && cat > {remote_dest}/{shlex.quote(f.name)}", data)
+
+
+def delete(host: str, dest: str, names: list[str]) -> None:
+    remote_dest = remote(dest)
+    ssh(host, "rm -f " + " ".join(f"{remote_dest}/{shlex.quote(name)}" for name in names))
 
 
 def install(files: list[Path]) -> None:
-    dest = _remote(f"{paks()}/~mods")
-    for f in files:
-        with f.open("rb") as data:
-            _ssh(f"mkdir -p {dest} && cat > {dest}/{shlex.quote(f.name)}", data)
+    put(host(), f"{paks()}/~mods", files)
 
 
 def uninstall(names: list[str]) -> None:
-    dest = _remote(f"{paks()}/~mods")
-    _ssh("rm -f " + " ".join(f"{dest}/{shlex.quote(name)}" for name in names), subprocess.DEVNULL)
+    delete(host(), f"{paks()}/~mods", names)
