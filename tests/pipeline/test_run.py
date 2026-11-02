@@ -48,7 +48,7 @@ LENS = "made-up-lens"
 RUN = "made-up-run-id"
 TRIAGE_ORDER = ["made-up-first-id", "made-up-second-id"]
 TRIAGE = frozenset(TRIAGE_ORDER)
-OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason", "plan"}
+OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason", "plan", "redo"}
 FIELD_ORDER = ["vanilla", "text", "lens", "reason", "writer", "verdict", "run"]
 PLAN_ID = "made-up-plan-one"
 
@@ -893,6 +893,93 @@ def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path, failure: U
     assert all(schema is bible.SCHEMA for _, _, schema in claude.calls)
     assert claude.batches == 1
     assert not (tmp_path / "work" / LENS / report.OUTCOMES).exists()
+
+
+# Made-up redo notes. Not game text.
+REDO_NOTE = "Made-up redo note. Not game text."
+
+
+def _redo_file(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "repo" / "lenses" / f"{LENS}.redo.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_no_redo_file_marks_no_outcome_and_makes_the_same_batches(tmp_path: Path) -> None:
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert [o.redo for o in outcomes] == [False] * len(EXPECTED_OUTCOMES)
+    assert claude.batches == 2 + len(SCENES)
+
+
+def test_listed_line_outcome_is_redo_and_every_other_outcome_is_not(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n\n[{NS_B}]\n1 = "{REDO_NOTE}"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "1"), (NS_B, "1")}
+    assert [replace(o, redo=False) for o in outcomes] == EXPECTED_OUTCOMES
+    records = [json.loads(line) for line in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()]
+    assert {(r["namespace"], r["key"]) for r in records if r["redo"] is True} == {(NS_A, "1"), (NS_B, "1")}
+    assert all(r["redo"] is False for r in records if (r["namespace"], r["key"]) not in {(NS_A, "1"), (NS_B, "1")})
+
+
+def test_note_of_exactly_200_characters_is_accepted(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n1 = "{"x" * 200}"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "1")}
+
+
+def test_listed_key_beyond_through_is_accepted_and_the_listed_line_in_range_is_redo(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n1 = "{REDO_NOTE}"\n[{NS_B}]\n1 = "{REDO_NOTE}"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), through=1)
+    assert NS_B not in {o.namespace for o in outcomes}
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "1")}
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        pytest.param(f'{NS_A} = "{REDO_NOTE}"\n', [NS_A], id="namespace-value-not-a-table"),
+        pytest.param(f"[{NS_A}]\n1 = 5\n", [f"{NS_A}/1"], id="note-not-a-string"),
+        pytest.param(f'[{NS_A}]\n1 = ""\n', [f"{NS_A}/1"], id="note-empty"),
+        pytest.param(f'[{NS_A}]\n1 = "   "\n', [f"{NS_A}/1"], id="note-only-whitespace"),
+        pytest.param(f'[{NS_A}]\n1 = "{"x" * 201}"\n', [f"{NS_A}/1"], id="note-over-200-characters"),
+        pytest.param(f'[{NS_OUT}]\n1 = "{REDO_NOTE}"\n', [f"{NS_OUT}/1"], id="key-out-of-scope"),
+        pytest.param(f'[{NS_A}]\n9 = "{REDO_NOTE}"\n', [f"{NS_A}/9"], id="key-not-a-line"),
+    ],
+)
+def test_invalid_redo_file_fails_naming_the_file_and_key_before_any_claude_call(tmp_path: Path, text: str, names: list[str]) -> None:
+    path = _redo_file(tmp_path, text)
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    message = str(raised.value)
+    assert message.startswith(str(path))
+    assert all(name in message for name in names)
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_redo_file_that_is_not_toml_fails_naming_the_file_before_any_claude_call(tmp_path: Path) -> None:
+    path = _redo_file(tmp_path, f"[{NS_A}\n")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(str(path))):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_redo_path_that_cannot_be_read_fails_naming_the_file_and_strerror(tmp_path: Path) -> None:
+    path = tmp_path / "repo" / "lenses" / f"{LENS}.redo.toml"
+    path.mkdir(parents=True)
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    message = str(raised.value)
+    assert str(path) in message
+    assert "Is a directory" in message
+    assert claude.calls == []
+    assert claude.batches == 0
 
 
 def test_cross_judge_runs_for_a_callback_line_with_its_related_lines(tmp_path: Path) -> None:
@@ -2429,6 +2516,7 @@ def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = (), lens
         arcs=arcs.consolidate(bibles),
         lines={},
         table_lines=frozenset(),
+        redo={},
     )
 
 

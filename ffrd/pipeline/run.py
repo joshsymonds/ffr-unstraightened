@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import threading
+import tomllib
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +33,7 @@ from ffrd.pipeline.store import Store, work_dir
 CHAPTER_FILE = re.compile(r"chapter-\d{2,}\.toml")
 UNATTRIBUTED_FILE = "unattributed.toml"
 RECHECK_AT = 0.5
+REDO_NOTE_MAX = 200
 
 OutcomeKind = Literal["changed", "kept_for_plot", "gate_failed", "unfinished", "untouched"]
 WriterName = Literal["voice", "opus"]
@@ -49,6 +51,7 @@ class Outcome:
     writer: WriterName | None
     keep_reason: str | None = None
     plan: str | None = None
+    redo: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ def _outcome_line(o: Outcome) -> str:
         "writer": o.writer,
         "keep_reason": o.keep_reason,
         "plan": o.plan,
+        "redo": o.redo,
     }
     return json.dumps(record, ensure_ascii=False) + "\n"
 
@@ -184,6 +188,7 @@ class _Context:
     arcs: Sequence[Mapping[str, Any]]
     lines: Mapping[tuple[str, str], SceneLine]
     table_lines: frozenset[tuple[str, str]]
+    redo: Mapping[tuple[str, str], str]
 
 
 @dataclass
@@ -829,6 +834,35 @@ def _write_recall(path: Path, lens: Lens, recall: _Recall) -> None:
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _redo(path: Path, scenes: Sequence[Scene]) -> dict[tuple[str, str], str]:
+    """Reads the lens's redo list, where a missing file is an empty list. Each key must name a line of the in-scope scenes, and each note must be a non-empty string of at most REDO_NOTE_MAX characters."""
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise Fail(f"{path}: cannot read: {e.strerror}") from e
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise Fail(f"{path}: cannot read as UTF-8 TOML: {e}") from e
+    in_scope = {(line.namespace, line.key) for scene in scenes for line in scene.lines}
+    redo: dict[tuple[str, str], str] = {}
+    for namespace, keys in data.items():
+        if not isinstance(keys, dict):
+            raise Fail(f"{path}: {namespace}: must be a table of notes")
+        for key, note in keys.items():
+            ref = f"{namespace}/{key}"
+            if (namespace, key) not in in_scope:
+                raise Fail(f"{path}: {ref}: is not an in-scope line")
+            if not isinstance(note, str):
+                raise Fail(f"{path}: {ref}: note must be a string")
+            if not note.strip():
+                raise Fail(f"{path}: {ref}: note is empty")
+            if len(note) > REDO_NOTE_MAX:
+                raise Fail(f"{path}: {ref}: note is longer than {REDO_NOTE_MAX} characters")
+            redo[(namespace, key)] = note
+    return redo
+
+
 def run(
     root: Path,
     lens: Lens,
@@ -848,6 +882,7 @@ def run(
         raise Fail("through must be at least 1")
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
     scenes = scoped(scenes, scene_table=scene_table)
+    redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
     if through is not None:
         scenes = _limited(scenes, through)
     scenes = sorted(scenes, key=_chapter_order)
@@ -867,6 +902,7 @@ def run(
         arcs=arcs.consolidate(built),
         lines=_first_lines(scenes),
         table_lines=table_lines,
+        redo=redo,
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
@@ -898,6 +934,7 @@ def run(
         recall.confirmed.update(scene_recall.confirmed)
     outcomes, changes = _unified(ctx, outcomes, changes)
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
+    outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)
