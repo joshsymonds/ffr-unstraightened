@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from ffrd.game import Fail
-from ffrd.pipeline.lens import Lens, TriageQuestion, load_lens
+from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion, load_lens
 
 # Made-up lens text. Not game text.
 VALID = """\
@@ -35,6 +35,24 @@ EXPECTED_LENS = Lens(
     screen_criteria=("Made-up criterion one.", "Made-up criterion two."),
     intent_rule="Made-up intent rule, café.",
     judge_rubric="Made-up judge rubric.",
+)
+
+# Made-up scene section. Not game text.
+PATTERNS = 'patterns = [{ id = "made-up-pattern", question = "Made-up pattern question." }, { id = "second-pattern", question = "Made-up second pattern question, café." }]'
+CRITERIA = 'criteria = ["Made-up scene criterion one.", "Made-up scene criterion two."]'
+PLAN = 'plan = "Made-up scene plan."'
+RUBRIC = 'rubric = "Made-up scene rubric."'
+SCENE = "[scene]\n" + "\n".join((PATTERNS, CRITERIA, PLAN, RUBRIC)) + "\n"
+VALID_WITH_SCENE = VALID + "\n" + SCENE
+
+EXPECTED_SCENE = SceneSection(
+    patterns=(
+        ScenePattern(id="made-up-pattern", question="Made-up pattern question."),
+        ScenePattern(id="second-pattern", question="Made-up second pattern question, café."),
+    ),
+    criteria=("Made-up scene criterion one.", "Made-up scene criterion two."),
+    plan="Made-up scene plan.",
+    rubric="Made-up scene rubric.",
 )
 
 
@@ -160,6 +178,99 @@ def test_editing_one_stage_changes_only_that_stage_text(tmp_path: Path) -> None:
     assert edited.stage_text("judge") != original.stage_text("judge")
     for stage in ("triage", "screen", "intent"):
         assert edited.stage_text(stage) == original.stage_text(stage)
+
+
+def test_valid_lens_with_scene_loads_scene_section(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, VALID_WITH_SCENE))
+    assert lens.scene == EXPECTED_SCENE
+    assert lens.stage_text("triage") == (
+        '[{"id": "made-up-id", "question": "Made-up triage question. Not game text."}, '
+        '{"id": "second-id", "question": "Made-up second question."}]'
+    )
+    assert lens.stage_text("screen") == '{"criteria": ["Made-up criterion one.", "Made-up criterion two."]}'
+    assert lens.stage_text("intent") == '{"rule": "Made-up intent rule, café."}'
+    assert lens.stage_text("judge") == '{"rubric": "Made-up judge rubric."}'
+
+
+def test_scene_stage_text_is_exact(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, VALID_WITH_SCENE))
+    assert lens.stage_text("scene") == (
+        '{"criteria": ["Made-up scene criterion one.", "Made-up scene criterion two."], '
+        '"patterns": [{"id": "made-up-pattern", "question": "Made-up pattern question."}, '
+        '{"id": "second-pattern", "question": "Made-up second pattern question, café."}], '
+        '"plan": "Made-up scene plan.", "rubric": "Made-up scene rubric."}'
+    )
+
+
+def test_lens_without_scene_has_no_scene_section(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, VALID))
+    assert lens == EXPECTED_LENS
+    assert lens.scene is None
+    with pytest.raises(Fail, match=re.escape("lens sample has no [scene] section")):
+        lens.stage_text("scene")
+
+
+# Each case edits SCENE and names the one problem it must report.
+SCENE_INVALID_CASES: list[tuple[str, str, str, str]] = [
+    ("unknown scene key", PLAN, PLAN + '\nnote = "Made-up."', "scene.note is an unknown key"),
+    ("missing patterns", PATTERNS + "\n", "", "scene.patterns is missing"),
+    ("missing criteria", CRITERIA + "\n", "", "scene.criteria is missing"),
+    ("missing plan", PLAN + "\n", "", "scene.plan is missing"),
+    ("missing rubric", RUBRIC + "\n", "", "scene.rubric is missing"),
+    ("empty patterns", PATTERNS, "patterns = []", "scene.patterns must be one or more tables"),
+    ("patterns not a list", PATTERNS, 'patterns = "Made-up."', "scene.patterns must be one or more tables"),
+    (
+        "pattern not a table",
+        PATTERNS,
+        'patterns = [{ id = "made-up-pattern", question = "Made-up pattern question." }, "Made-up."]',
+        "scene.patterns[1] must be a table",
+    ),
+    (
+        "unknown pattern key",
+        'id = "made-up-pattern", ',
+        'id = "made-up-pattern", note = "Made-up.", ',
+        "scene.patterns[0].note is an unknown key",
+    ),
+    ("missing pattern id", 'id = "made-up-pattern", ', "", "scene.patterns[0].id is missing"),
+    ("malformed pattern id", '"made-up-pattern"', '"Made_Up"', "scene.patterns[0].id must be"),
+    (
+        "duplicate pattern id",
+        'id = "second-pattern"',
+        'id = "made-up-pattern"',
+        "scene.patterns[1].id duplicates scene.patterns[0].id",
+    ),
+    ("pattern id collides with triage", 'id = "second-pattern"', 'id = "made-up-id"', "scene.patterns[1].id duplicates triage[0].id"),
+    (
+        "empty pattern question",
+        'question = "Made-up second pattern question, café."',
+        'question = ""',
+        "scene.patterns[1].question must be a non-empty string",
+    ),
+    ("empty scene criteria", CRITERIA, "criteria = []", "scene.criteria must be a non-empty list"),
+    ("empty scene criterion", '"Made-up scene criterion two."]', '""]', "scene.criteria[1] must be a non-empty string"),
+    ("scene criterion wrong type", '"Made-up scene criterion two."]', "5]", "scene.criteria[1] must be a non-empty string"),
+    ("empty scene plan", PLAN, 'plan = ""', "scene.plan must be a non-empty string"),
+    ("empty scene rubric", RUBRIC, 'rubric = ""', "scene.rubric must be a non-empty string"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "old", "new", "problem"),
+    SCENE_INVALID_CASES,
+    ids=[case[0] for case in SCENE_INVALID_CASES],
+)
+def test_invalid_scene_raises_fail_naming_file_and_field(tmp_path: Path, label: str, old: str, new: str, problem: str) -> None:
+    assert SCENE.count(old) == 1, label
+    path = write_lens(tmp_path, VALID + "\n" + SCENE.replace(old, new))
+    with pytest.raises(Fail, match=re.escape(f"{path}: {problem}")):
+        load_lens(path)
+
+
+def test_scene_not_a_table_raises_fail_naming_field(tmp_path: Path) -> None:
+    # A top-level key must come before the first table header, so the bad value goes first.
+    path = write_lens(tmp_path, 'scene = "Made-up."\n' + VALID)
+    with pytest.raises(Fail, match=re.escape(f"{path}: scene must be a table")):
+        load_lens(path)
 
 
 README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
