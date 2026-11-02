@@ -50,15 +50,16 @@ def check(
     ask: Ask,
     stage: str = STAGE,
     rubric: Stage = "judge",
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> frozenset[tuple[str, str]] | Unfinished | Rejected:
-    first = _pass(store, lens, scene, rewrites, arcs, ask, INSTRUCTIONS, None, stage, rubric)
+    first = _pass(store, lens, scene, rewrites, arcs, ask, INSTRUCTIONS, None, stage, rubric, base_rewrites)
     if isinstance(first, Unfinished | Rejected):
         return first
     first_coherent, proposed = first
     if first_coherent:
         return frozenset()
 
-    recheck = _pass(store, lens, scene, rewrites, arcs, ask, RECHECK_INSTRUCTIONS, proposed, stage, rubric)
+    recheck = _pass(store, lens, scene, rewrites, arcs, ask, RECHECK_INSTRUCTIONS, proposed, stage, rubric, base_rewrites)
     if isinstance(recheck, Unfinished | Rejected):
         return recheck
     recheck_coherent, named = recheck
@@ -78,6 +79,7 @@ def _pass(
     proposed: frozenset[tuple[str, str]] | None,
     stage: str,
     rubric: Stage,
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None,
 ) -> tuple[bool, frozenset[tuple[str, str]]] | Unfinished | Rejected:
     rubric_text = lens.stage_text(rubric)
     parts = [
@@ -87,6 +89,10 @@ def _pass(
         f"Scene lines:\n{_json(_scene_dicts(scene, rewrites))}",
     ]
     inputs: dict[str, Any] = {**_inputs(scene), "rewrites": _rewrite_list(rewrites), "arcs": list(arcs)}
+    base = _base_rewrite_list(scene, base_rewrites)
+    if base:
+        parts.append(f"Base lens rewrites (the arcs describe these lines as they read before the base lens rewrote them):\n{_json(base)}")
+        inputs["base_rewrites"] = base
     if proposed is not None:
         parts.append(f"Proposed reverts:\n{_json(_ref_list(proposed))}")
         inputs["proposed"] = _ref_list(proposed)
@@ -117,6 +123,24 @@ def _ref_list(refs: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
 
 def _rewrite_list(rewrites: Mapping[tuple[str, str], str]) -> list[dict[str, str]]:
     return [{"namespace": namespace, "key": key, "text": text} for (namespace, key), text in sorted(rewrites.items())]
+
+
+def _base_rewrite_list(scene: Scene, base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    if base_rewrites is None:
+        return []
+    listed: list[dict[str, Any]] = []
+    for line in scene.lines:
+        base = base_rewrites.get((line.namespace, line.key))
+        if base is not None:
+            listed.append(
+                {
+                    "namespace": line.namespace,
+                    "key": line.key,
+                    "lens": base["lens"],
+                    "reasons": base["reasons"],
+                }
+            )
+    return listed
 
 
 def _scene_dicts(scene: Scene, rewrites: Mapping[tuple[str, str], str]) -> list[dict[str, Any]]:
