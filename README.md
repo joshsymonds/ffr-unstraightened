@@ -163,7 +163,7 @@ Lines that name no chapter are read after the last chapter, one chunk per namesp
 those chunks run at the same time. Then a backward pass runs over the chapters in
 reverse order. It adds the setups that later bibles rely on to each chapter's callbacks.
 
-Second, the scenes run at the same time, each as its own batch. Sonnet screens every
+Second, the scenes run at the same time, each as its own batch. Opus screens every
 line of the scene against the screen criteria, with the cast notes from the bibles. Jev
 scores the scene for each triage question. For each triage id that scores 0.5 or more
 and that the screen flagged on no line, Opus rechecks the scene for that id, and the
@@ -188,11 +188,12 @@ covers the screen with Jev, the recheck for each disagreeing triage id, the inte
 renders of a line's drafts, and the judges of the flagged lines and of their candidates.
 
 When the lens has a `[scene]` section, each scene from the game's scene table then gets a
-scene pass, after its line pass. Sonnet screens the whole scene against the scene
+scene pass, after its line pass. Opus screens the whole scene against the scene
 criteria and names each scene pattern it hits, with the lines that carry it. For a scene
 with a hit, Opus writes a plan: either it keeps the scene and names one of the lens's
 scene keep reasons, or it plans at most four line rewrites, each marked required or
-optional. A plan never touches a line the line pass flagged, whatever that line's
+optional and each quoting the words of its line that carry the pattern; a planned line
+with no such words is rejected. A plan never touches a line the line pass flagged, whatever that line's
 outcome. Each planned line is drafted and rendered like a line-pass line and goes
 through the placeholder, tag, length and classifier gates, but not the per-line judge.
 An optional line that fails is dropped. A required line that fails sends the scene back

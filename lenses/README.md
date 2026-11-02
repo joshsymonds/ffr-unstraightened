@@ -11,7 +11,7 @@ comes from the lens. The code adds only generic instructions, such as the output
 ## Sections
 
 A lens has four required sections and one optional section, `[scene]`. Each one feeds
-the stages that read it. The line stages run in this order: the Sonnet screen with the
+the stages that read it. The line stages run in this order: the Opus screen with the
 Jev recall check, Opus intents and drafts, then the judges. The scene pass runs after
 the line stages.
 
