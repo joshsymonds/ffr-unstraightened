@@ -1116,17 +1116,25 @@ def run(
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
     vanilla_hashes = {ref: vanilla_hash(line.english) for ref, line in _first_lines(scenes).items()}
     base_texts = {} if lens.base is None else _base(root / "dialog" / lens.base, lens.base, scenes)
-    scenes = _chained(scenes, base_texts)
-    scenes = scoped(scenes, scene_table=scene_table)
+    game_scenes = scoped(scenes, scene_table=scene_table)
+    scenes = _chained(game_scenes, base_texts)
     redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
     in_scope = sorted(scenes, key=_chapter_order)
     scenes = in_scope if through is None else _limited(in_scope, through)
     selecting = lens.selection == "queering"
-    bible_ask = batch()
-    built = bible.build(store, _chapters(in_scope if selecting else scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema))
-    if not isinstance(built, list):
-        out(f"bible: unfinished ({built.detail})")
-        raise Fail("story bible unfinished; rerun ffrd run")
+    if lens.base is None:
+        bible_ask = batch()
+        built = bible.build(
+            store, _chapters(in_scope if selecting else scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema)
+        )
+        if not isinstance(built, list):
+            out(f"bible: unfinished ({built.detail})")
+            raise Fail("story bible unfinished; rerun ffrd run")
+    else:
+        built = bible.stored(Store(store.root.parent / lens.base), _chapters(sorted(game_scenes, key=_chapter_order)))
+        if not isinstance(built, list):
+            out(f"bible: {built.detail}")
+            raise Fail(f"work/{lens.base}/: {built.detail}; run ffrd run --lens {lens.base} first")
     ctx = _Context(
         lens=lens,
         store=store,

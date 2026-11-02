@@ -21,6 +21,8 @@ from ffrd.pipeline.run import (
     Change,
     Outcome,
     _arc_judged,
+    _chapter_order,
+    _chapters,
     _coherent,
     _Context,
     _record,
@@ -30,6 +32,7 @@ from ffrd.pipeline.run import (
     write_dialog,
     write_outcomes,
 )
+from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
@@ -1016,8 +1019,24 @@ def _base_file(tmp_path: Path, text: str, name: str = "chapter-01.toml") -> Path
     return path
 
 
+def _base_dir(tmp_path: Path) -> None:
+    (tmp_path / "repo" / "dialog" / BASE).mkdir(parents=True, exist_ok=True)
+
+
+def _seed_base(tmp_path: Path, bibles: dict[int, dict[str, Any] | Unfinished | Rejected], scenes: Sequence[Scene] = SCENES) -> None:
+    # Writes the base lens's whole-game bible under work/<BASE>/, as a base run over these scenes writes it, with the chapter bibles given. Not game text.
+    seed = FakeClaude()
+    seed.bible = bibles
+    base_scenes = sorted(scoped(scenes, scene_table=False), key=_chapter_order)
+    built = bible.build(
+        Store(tmp_path / "work" / BASE), _chapters(base_scenes), lambda parts, schema: seed.ask(claude_module.OPUS, parts, schema)
+    )
+    assert isinstance(built, list)
+
+
 def test_base_rewrite_is_the_starting_english_of_every_prompt(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     claude = _claude()
     jev = FakeJev(JEV_HIGH)
     outcomes = _run(tmp_path, claude, [], jev=jev, lens=replace(LENS_OBJ, base=BASE))
@@ -1029,6 +1048,7 @@ def test_base_rewrite_is_the_starting_english_of_every_prompt(tmp_path: Path) ->
 
 def test_changed_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
     dialog = tmp_path / "repo" / "dialog" / LENS
     chapter_one = tomllib.loads((dialog / "chapter-01.toml").read_text(encoding="utf-8"))
@@ -1081,6 +1101,7 @@ def test_malformed_base_record_fails_naming_the_file_and_key_before_any_claude_c
 
 def test_base_record_for_a_key_outside_the_passed_scenes_is_neither_checked_nor_used(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1) + f'[{NS_A}.9]\nvanilla = "stale"\n')
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
     assert outcomes == EXPECTED_OUTCOMES
 
@@ -1114,6 +1135,7 @@ def test_change_with_a_base_writes_base_directly_after_vanilla(tmp_path: Path) -
 def test_scene_pass_change_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
     claude = _scene_claude()
+    _seed_base(tmp_path, claude.bible, (TABLE_SCENE,))
     # The plan quotes the carrier from the base text, the English the scene pass now reads.
     claude.scene_plan = {
         "keep": False,
@@ -1129,6 +1151,7 @@ def test_scene_pass_change_started_from_a_base_rewrite_records_the_game_hash_and
 
 def test_base_rewrite_draft_equal_to_the_game_line_is_never_judged_or_written_and_the_run_completes(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     claude = _claude()
     claude.drafts[(NS_A, "1")] = [EN_A1, OPUS_A1]
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
@@ -1140,6 +1163,7 @@ def test_base_rewrite_draft_equal_to_the_game_line_is_never_judged_or_written_an
 
 def test_base_rewrite_whose_only_draft_is_the_game_line_completes_the_run_and_writes_no_game_line(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     claude = _claude()
     claude.drafts[(NS_A, "1")] = [EN_A1]
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
@@ -1147,6 +1171,33 @@ def test_base_rewrite_whose_only_draft_is_the_game_line_completes_the_run_and_wr
     assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "writer", None)
     dialog = tmp_path / "repo" / "dialog" / LENS
     assert not any(EN_A1 in path.read_text(encoding="utf-8") for path in dialog.glob("*.toml"))
+
+
+def test_chained_run_makes_no_bible_call_and_its_prompts_carry_the_seeded_whole_game_bible(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
+    # The run's own claude answers no bible, so a bible call would leave the prompts without the seeded callback. Not game text.
+    claude = _claude()
+    claude.bible = {}
+    jev = FakeJev(JEV_HIGH)
+    _run(tmp_path, claude, [], jev=jev, lens=replace(LENS_OBJ, base=BASE))
+    assert not any(schema in (bible.SCHEMA, bible.SETUP_SCHEMA) for _, _, schema in claude.calls)
+    assert claude.batches == 1 + len(SCENES)
+    assert any(CHAPTER_ONE_BIBLE["callbacks"][0]["meaning"] in text for text in _all_prompts(claude, jev))
+
+
+def test_chained_run_with_the_chapter_two_record_missing_fails_naming_it_before_any_claude_call(tmp_path: Path) -> None:
+    _base_dir(tmp_path)
+    # Only chapter one is stored, so the chained run reads the whole game's chapters and finds chapter two missing even with through set. Not game text.
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE}, scenes=(SCENE_A,))
+    claude = _claude()
+    printed: list[str] = []
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, printed, jev=FakeJev(JEV_HIGH), through=1, lens=replace(LENS_OBJ, base=BASE))
+    assert str(raised.value) == f"work/{BASE}/: chapter 2 bible is not stored; run ffrd run --lens {BASE} first"
+    assert printed == ["bible: chapter 2 bible is not stored"]
+    assert claude.calls == []
+    assert claude.batches == 0
 
 
 def _note_drafts(claude: FakeClaude) -> list[tuple[list[tuple[str, str]], str]]:
@@ -4183,6 +4234,7 @@ def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_has
 ) -> None:
     _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
     claude = _phase_claude()
+    _seed_base(tmp_path, claude.bible, PHASE_SCENES)
     outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=replace(QUEER_LENS, base=BASE))
     prompts = [part for _, parts, _ in claude.calls for part in parts]
     assert not any(EN_A2 in text for text in prompts)
@@ -4217,6 +4269,25 @@ def test_queering_through_takes_the_core_cast_from_the_whole_game_bible(tmp_path
     claude.bible = {2: THROUGH_BIBLE}
     claude.flags = {(NS_A, "2"): [ALPHA]}
     outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=QUEER_LENS, through=1)
+    assert _screens(claude) == [(claude_module.HAIKU, [{"namespace": NS_A, "key": "2"}])]
+    assert outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
+        Outcome(NS_A, "2", 1, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
+    ]
+
+
+def test_queering_through_chained_run_takes_the_core_cast_from_the_seeded_whole_game_bible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same made-up speaker as the test above. The seeded whole-game bible names its arc in chapter 2, while the run's own claude answers no bible at all. Not game text.
+    monkeypatch.setattr(queering, "CORE_LINES", 2)
+    monkeypatch.setattr(queering, "CORE_ARCS", 1)
+    _base_dir(tmp_path)
+    _seed_base(tmp_path, {2: THROUGH_BIBLE}, THROUGH_SCENES)
+    claude = FakeClaude()
+    claude.bible = {}
+    claude.flags = {(NS_A, "2"): [ALPHA]}
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=replace(QUEER_LENS, base=BASE), through=1)
     assert _screens(claude) == [(claude_module.HAIKU, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
