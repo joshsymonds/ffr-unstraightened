@@ -48,7 +48,7 @@ LENS = "made-up-lens"
 RUN = "made-up-run-id"
 TRIAGE_ORDER = ["made-up-first-id", "made-up-second-id"]
 TRIAGE = frozenset(TRIAGE_ORDER)
-OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason", "plan"}
+OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason", "plan", "redo"}
 FIELD_ORDER = ["vanilla", "text", "lens", "reason", "writer", "verdict", "run"]
 PLAN_ID = "made-up-plan-one"
 
@@ -497,6 +497,8 @@ class FakeClaude:
         # Lines whose intent answer keeps them unchanged, with the keep reason it names. Not game text.
         self.keeps: dict[tuple[str, str], str] = {}
         self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
+        # Answers for draft calls that carry a reviewer note, by the one line they name. Not game text.
+        self.redrafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         self.judgments: dict[str, dict[str, bool]] = {}
         self.judge_failures: dict[str, Unfinished | Rejected] = {}
         self.consistent: dict[str, bool] = {}
@@ -540,11 +542,12 @@ class FakeClaude:
             return {"intent": answer, "keep": ref in self.keeps, "keep_reason": self.keeps.get(ref, "none")}
         if schema is DRAFT_SCHEMA:
             refs = _draft_refs(parts)
+            answers = self.redrafts if any(part.startswith("Reviewer note:\n") for part in parts) else self.drafts
             for ref in refs:
-                answer = self.drafts[ref]
+                answer = answers[ref]
                 if isinstance(answer, Unfinished | Rejected):
                     return answer
-            return {"drafts": [{"namespace": namespace, "key": key, "drafts": self.drafts[(namespace, key)]} for namespace, key in refs]}
+            return {"drafts": [{"namespace": namespace, "key": key, "drafts": answers[(namespace, key)]} for namespace, key in refs]}
         if schema is JUDGE_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.judge_failures:
@@ -674,6 +677,8 @@ def _claude() -> FakeClaude:
         OPUS_A2: _judgment(minimal_change=False),
         OPUS_A3: _judgment(plot=False),
     }
+    # The redrafts of line 1 of scenes a and b pass every gate unless a test says otherwise. Not game text.
+    claude.redrafts = {(NS_A, "1"): [REDRAFT_A1], (NS_B, "1"): [REDRAFT_B1]}
     return claude
 
 
@@ -893,6 +898,207 @@ def test_bible_failure_stops_the_run_before_any_scene(tmp_path: Path, failure: U
     assert all(schema is bible.SCHEMA for _, _, schema in claude.calls)
     assert claude.batches == 1
     assert not (tmp_path / "work" / LENS / report.OUTCOMES).exists()
+
+
+# Made-up redo notes and redrafts. Not game text.
+REDO_NOTE = "Made-up redo note. Not game text."
+REDO_NOTE_TWO = "Made-up second redo note. Not game text."
+REDRAFT_A1 = "Made-up redraft one. Not game text."
+REDRAFT_B1 = "Made-up redraft of b one. Not game text."
+DRAFT_STAGES = frozenset({"intent", "draft", "render", "judge", "cross_judge"})
+
+
+def _redo_file(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "repo" / "lenses" / f"{LENS}.redo.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_no_redo_file_marks_no_outcome_and_makes_the_same_batches(tmp_path: Path) -> None:
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert [o.redo for o in outcomes] == [False] * len(EXPECTED_OUTCOMES)
+    assert claude.batches == 2 + len(SCENES)
+
+
+def test_listed_line_outcome_is_redo_and_every_other_outcome_is_not(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n\n[{NS_B}]\n1 = "{REDO_NOTE}"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "1"), (NS_B, "1")}
+    # Line 1 of scene a ships its redraft, which has no voiced version, so its writer is opus.
+    expected = [replace(o, writer="opus") if (o.namespace, o.key) == (NS_A, "1") else o for o in EXPECTED_OUTCOMES]
+    assert [replace(o, redo=False) for o in outcomes] == expected
+    records = [json.loads(line) for line in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()]
+    assert {(r["namespace"], r["key"]) for r in records if r["redo"] is True} == {(NS_A, "1"), (NS_B, "1")}
+    assert all(r["redo"] is False for r in records if (r["namespace"], r["key"]) not in {(NS_A, "1"), (NS_B, "1")})
+
+
+def test_note_of_exactly_200_characters_is_accepted(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n1 = "{"x" * 200}"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "1")}
+
+
+def test_listed_key_beyond_through_is_accepted_and_the_listed_line_in_range_is_redo(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n1 = "{REDO_NOTE}"\n[{NS_B}]\n1 = "{REDO_NOTE}"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), through=1)
+    assert NS_B not in {o.namespace for o in outcomes}
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "1")}
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        pytest.param(f'{NS_A} = "{REDO_NOTE}"\n', [NS_A], id="namespace-value-not-a-table"),
+        pytest.param(f"[{NS_A}]\n1 = 5\n", [f"{NS_A}/1"], id="note-not-a-string"),
+        pytest.param(f'[{NS_A}]\n1 = ""\n', [f"{NS_A}/1"], id="note-empty"),
+        pytest.param(f'[{NS_A}]\n1 = "   "\n', [f"{NS_A}/1"], id="note-only-whitespace"),
+        pytest.param(f'[{NS_A}]\n1 = "{"x" * 201}"\n', [f"{NS_A}/1"], id="note-over-200-characters"),
+        pytest.param(f'[{NS_OUT}]\n1 = "{REDO_NOTE}"\n', [f"{NS_OUT}/1"], id="key-out-of-scope"),
+        pytest.param(f'[{NS_A}]\n9 = "{REDO_NOTE}"\n', [f"{NS_A}/9"], id="key-not-a-line"),
+    ],
+)
+def test_invalid_redo_file_fails_naming_the_file_and_key_before_any_claude_call(tmp_path: Path, text: str, names: list[str]) -> None:
+    path = _redo_file(tmp_path, text)
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    message = str(raised.value)
+    assert message.startswith(str(path))
+    assert all(name in message for name in names)
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_redo_file_that_is_not_toml_fails_naming_the_file_before_any_claude_call(tmp_path: Path) -> None:
+    path = _redo_file(tmp_path, f"[{NS_A}\n")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(str(path))):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_redo_path_that_cannot_be_read_fails_naming_the_file_and_strerror(tmp_path: Path) -> None:
+    path = tmp_path / "repo" / "lenses" / f"{LENS}.redo.toml"
+    path.mkdir(parents=True)
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    message = str(raised.value)
+    assert str(path) in message
+    assert "Is a directory" in message
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def _note_drafts(claude: FakeClaude) -> list[tuple[list[tuple[str, str]], str]]:
+    """Each draft call that carries a reviewer note, with the lines it names and its note."""
+    return [
+        (_draft_refs(parts), _part(parts, "Reviewer note:\n"))
+        for _, parts, schema in claude.calls
+        if schema is DRAFT_SCHEMA and any(part.startswith("Reviewer note:\n") for part in parts)
+    ]
+
+
+def _stored(work: Path) -> dict[str, str]:
+    """Each stored result of the run's draft stages, by result key, with its stage."""
+    stored: dict[str, str] = {}
+    for path in (work / "results").glob("*.json"):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record["stage"] in DRAFT_STAGES:
+            stored[path.stem] = record["stage"]
+    return stored
+
+
+def _dialog_texts(tmp_path: Path) -> dict[tuple[str, str], str]:
+    texts: dict[tuple[str, str], str] = {}
+    for path in (tmp_path / "repo" / "dialog" / LENS).iterdir():
+        for namespace, table in tomllib.loads(path.read_text(encoding="utf-8")).items():
+            texts.update({(namespace, key): entry["text"] for key, entry in table.items()})
+    return texts
+
+
+# A later line that shares scene a's line 1 English. Not game text.
+LATE_DUPLICATE = Scene("made-up-scene-duplicate", (_line(NS_B, "1", "made-up-speaker-b", EN_A1, 2),))
+EARLY_DUPLICATE = Scene("made-up-scene-first", (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),))
+
+
+def test_listed_line_is_redrafted_with_its_note_and_the_redraft_ships(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n')
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert _note_drafts(claude) == [([(NS_A, "1")], REDO_NOTE)]
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "opus", redo=True)
+    assert _dialog_texts(tmp_path)[(NS_A, "1")] == REDRAFT_A1
+
+
+def test_every_draft_stage_result_of_the_run_without_the_redo_file_is_also_stored_with_it(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    listed = tmp_path / "listed"
+    _run(plain, _claude(), [], jev=FakeJev(JEV_HIGH))
+    _redo_file(listed, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n')
+    _run(listed, _claude(), [], jev=FakeJev(JEV_HIGH))
+    plain_stored = _stored(plain / "work" / LENS)
+    assert set(plain_stored.values()) == DRAFT_STAGES
+    assert set(plain_stored.items()) <= set(_stored(listed / "work" / LENS).items())
+
+
+def test_failed_redraft_is_gate_failed_under_redo_and_ships_no_first_rewrite(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n')
+    claude = _claude()
+    claude.judgments[REDRAFT_A1] = _judgment(plot=False)
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "redo", None, redo=True)
+    assert (NS_A, "1") not in _dialog_texts(tmp_path)
+    retries = [
+        parts
+        for _, parts, _ in claude.calls
+        if any(part.startswith("Reviewer note:\n") for part in parts) and _draft_refs(parts) == [(NS_A, "1")]
+    ]
+    assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in retries[-1])
+    assert _note_drafts(claude) == [([(NS_A, "1")], REDO_NOTE), ([(NS_A, "1")], REDO_NOTE)]
+
+
+def test_unfinished_redraft_is_unfinished_and_ships_no_first_rewrite(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n')
+    claude = _claude()
+    claude.redrafts[(NS_A, "1")] = Unfinished("Made-up redraft failure. Not game text.")
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None, redo=True)
+    assert (NS_A, "1") not in _dialog_texts(tmp_path)
+
+
+def test_listed_line_the_run_would_not_change_makes_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{REDO_NOTE}"\n3 = "{REDO_NOTE}"\n4 = "{REDO_NOTE}"\n')
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert _note_drafts(claude) == []
+    assert {(o.namespace, o.key) for o in outcomes if o.redo} == {(NS_A, "2"), (NS_A, "3"), (NS_A, "4")}
+    assert [replace(o, redo=False) for o in outcomes] == EXPECTED_OUTCOMES
+
+
+def test_changed_note_asks_a_new_draft_on_the_same_store(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE}"\n')
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_NOTE_TWO}"\n')
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert _note_drafts(claude) == [([(NS_A, "1")], REDO_NOTE_TWO)]
+    assert [_draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA] == [[(NS_A, "1")]]
+
+
+def test_listed_later_duplicate_takes_its_redraft_as_its_groups_text(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_B}]\n"1" = "{REDO_NOTE}"\n')
+    claude = _claude()
+    claude.redrafts[(NS_B, "1")] = [REDRAFT_A1]
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(EARLY_DUPLICATE, LATE_DUPLICATE))
+    assert outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "opus"),
+        Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus", redo=True),
+    ]
+    assert _dialog_texts(tmp_path) == {(NS_A, "1"): REDRAFT_A1, (NS_B, "1"): REDRAFT_A1}
 
 
 def test_cross_judge_runs_for_a_callback_line_with_its_related_lines(tmp_path: Path) -> None:
@@ -2429,6 +2635,7 @@ def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = (), lens
         arcs=arcs.consolidate(bibles),
         lines={},
         table_lines=frozenset(),
+        redo={},
     )
 
 
@@ -3041,6 +3248,93 @@ def test_unfinished_scene_pass_stage_leaves_every_unflagged_line_unfinished_and_
     outcomes = _scene_run(tmp_path, claude)
     assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
     for key in ("2", "3", "4"):
+        assert _outcome_of(outcomes, (NS_A, key)) == Outcome(NS_A, key, 1, None, (), "unfinished", None, None)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+# Made-up scene-pass redrafts and reviewer note. Not game text.
+REDRAFT_A2 = "Made-up redraft of scene a line two. Not game text."
+SCENE_REDO = "Made-up scene redo note. Not game text."
+SCENE_REASONS = (PATTERN_ONE, PATTERN_TWO)
+
+
+def test_listed_planned_line_is_redrafted_with_its_note_and_the_redraft_ships_with_its_plan(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [REDRAFT_A2]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _note_drafts(claude) == [([(NS_A, "2")], SCENE_REDO)]
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "changed", None, "opus", None, plan, True)
+    assert _dialog_tables(tmp_path)[(NS_A, "2")]["text"] == REDRAFT_A2
+    assert _outcome_of(outcomes, (NS_A, "3")).redo is False
+
+
+def test_scene_run_draft_and_render_results_of_unlisted_lines_are_stored_with_the_redo_file(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    listed = tmp_path / "listed"
+    _scene_run(plain, _scene_claude())
+    _redo_file(listed, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [REDRAFT_A2]
+    _scene_run(listed, claude)
+    plain_stored = _stored(plain / "work" / LENS)
+    assert set(plain_stored.values()) >= {"draft", "render"}
+    assert set(plain_stored.items()) <= set(_stored(listed / "work" / LENS).items())
+
+
+@pytest.mark.parametrize("failure", ["gates", "judge"])
+def test_scene_pass_redraft_failing_its_gates_or_the_scene_judge_is_gate_failed_under_redo_with_no_plan_and_no_dialog_entry(
+    tmp_path: Path, failure: str
+) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.scene_plan = _plan_answer((NS_A, "2", False), (NS_A, "3", False))
+    if failure == "gates":
+        claude.redrafts[(NS_A, "2")] = [LONG]
+    else:
+        claude.redrafts[(NS_A, "2")] = [REDRAFT_A2]
+        claude.scene_judge = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    notes = _note_drafts(claude)
+    assert notes and all(refs == [(NS_A, "2")] and note == SCENE_REDO for refs, note in notes)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, SCENE_REASONS, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+
+
+def test_listed_planned_line_whose_normal_gating_fails_makes_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"3" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "3")] = [LONG]
+    outcomes = _scene_run(tmp_path, claude)
+    assert _note_drafts(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "3")) == replace(_untouched(NS_A, "3"), redo=True)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+
+
+def test_redo_failure_of_a_required_line_is_reported_when_the_replan_also_blocks_the_scene(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [LONG]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _outcome_of(outcomes, (NS_A, "4")) == _untouched(NS_A, "4")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_redo_failure_of_a_required_line_is_reported_when_the_replan_is_unfinished(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [LONG]
+    claude.scene_replan = Unfinished("Made-up re-plan failure. Not game text.")
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    for key in ("3", "4"):
         assert _outcome_of(outcomes, (NS_A, key)) == Outcome(NS_A, key, 1, None, (), "unfinished", None, None)
     assert _dialog_entries(tmp_path) == {(NS_A, "1")}
 

@@ -40,6 +40,7 @@ class Record:
     gate: str | None
     keep_reason: str | None
     plan: str | None = None
+    redo: bool = False
 
 
 def _require(obj: dict[str, object], name: str, where: str) -> object:
@@ -117,6 +118,15 @@ def _plan(obj: dict[str, object], where: str) -> str | None:
     raise Fail(f"{where}: field plan must be a string or null")
 
 
+def _redo(obj: dict[str, object], where: str) -> bool:
+    if "redo" not in obj:
+        return False
+    value = obj["redo"]
+    if isinstance(value, bool):
+        return value
+    raise Fail(f"{where}: field redo must be true or false")
+
+
 def _parse(text: str, where: str, accepted: frozenset[str]) -> Record:
     try:
         obj = json.loads(text)
@@ -135,6 +145,7 @@ def _parse(text: str, where: str, accepted: frozenset[str]) -> Record:
         gate=_gate(obj, outcome, where),
         keep_reason=_keep_reason(obj, where),
         plan=_plan(obj, where),
+        redo=_redo(obj, where),
     )
 
 
@@ -336,6 +347,13 @@ def _check_scene_patterns(path: Path, scenes: list[SceneRecord], scene_ids: list
             raise Fail(f"{path}:{lineno}: field patterns has an id that is not a scene pattern id of the lens")
 
 
+def _redo_line(records: list[Record]) -> str:
+    listed = [r for r in records if r.redo]
+    changed = sum(r.outcome == "changed" for r in listed)
+    gate_failed = sum(r.outcome == "gate_failed" for r in listed)
+    return f"redo: {len(listed)} listed, {changed} changed, {gate_failed} gate failed"
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     lens_dir = work_dir(args.lens)
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
@@ -354,6 +372,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         print(line)
     print(_scene_line(table, keys))
     print(f"arcs: {arcs}, {with_changes} with changes")
+    print(_redo_line(records))
     for rid in triage_ids:
         disagreements, confirmed = recall[rid]
         print(f"recall {rid}: {disagreements} disagreements, {confirmed} confirmed")

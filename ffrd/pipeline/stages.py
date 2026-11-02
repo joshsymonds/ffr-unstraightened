@@ -496,6 +496,12 @@ DRAFT_INSTRUCTIONS = (
     "English line's length. Keep the speaker's character traits. Refer to lines only by namespace and key."
 )
 
+DRAFT_NOTE_INSTRUCTIONS = (
+    "A reviewer read the earlier rewrite of this target line and named a problem in the reviewer note. Write candidates "
+    "that fix that problem. Where the note says the original line is itself weak, you may rewrite more freely, but keep "
+    "the line's point, its plot facts, its speaker and the speaker's voice."
+)
+
 DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -534,6 +540,7 @@ def draft(
     targets: Sequence[Target],
     retry: str | None,
     ask: Ask,
+    note: str | None = None,
 ) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
     expected = sorted((target.line.namespace, target.line.key) for target in targets)
     parts = [
@@ -542,6 +549,8 @@ def draft(
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
         f"Targets:\n{_json([_target_dict(target) for target in targets])}",
     ]
+    if note is not None:
+        parts.extend([DRAFT_NOTE_INSTRUCTIONS, f"Reviewer note:\n{note}"])
     if retry is not None:
         parts.append(f"The previous candidates failed the {retry} gate. Write candidates that pass it.")
 
@@ -559,6 +568,8 @@ def draft(
         "targets": [_target_dict(target) for target in targets],
         "retry": retry,
     }
+    if note is not None:
+        inputs["note"] = note
     try:
         entries = store.run("draft", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:

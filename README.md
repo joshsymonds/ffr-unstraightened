@@ -89,7 +89,7 @@ Set the game's Text Language to English before you play.
 | `ffrd install [--deck]` | Copies `build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas` into `<game>/FFRS/Content/Paks/~mods`, whichever pak shape the last build wrote. It does not copy the `--ue4ss` folder. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
-| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json` and one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
+| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json`, then `redo: n listed, m changed, k gate failed`: the lines on the redo list (those with `redo` true in `outcomes.jsonl`), how many of them changed and how many failed a gate, whatever the gate. Then it prints one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
 | `ffrd run --lens <name> [--no-jev] [--concurrency N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. Keeps up to `N` Claude calls in flight at once, 8 by default. `--through N` keeps only the lines in chapters at or below `N`. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
@@ -196,7 +196,10 @@ optional and each quoting the words of its line that carry the pattern; a planne
 with no such words is rejected. A plan never touches a line the line pass flagged, whatever that line's
 outcome. Each planned line is drafted and rendered like a line-pass line and goes
 through the placeholder, tag, length and classifier gates, but not the per-line judge.
-An optional line that fails is dropped. A required line that fails sends the scene back
+An optional line that fails is dropped. This is the carrier gate. After the gates above,
+a candidate that still contains the words the plan quoted for its line, ignoring case,
+is dropped, since it has not changed the pattern. The candidate nearest the English line
+among the rest wins. A line left with no candidate fails the `scene` gate. A required line that fails sends the scene back
 for one new plan without that line; if that plan also loses a required line, the scene
 stays vanilla. Opus then judges the plan as a whole against the lens's scene rubric, in
 the same two-pass way as the coherence check, reading the scene with the line-pass
@@ -206,8 +209,30 @@ id. The scene judge reverts only the lines it names; when the arc judge reverts 
 of a plan, every line of that plan reverts. The pass writes one record per in-scope scene to
 `work/<name>/scenes.jsonl`. No Jev check runs for scene patterns.
 
-Third, after all scenes, the arc judge reads each arc that has a changed line, its lines
-in story order, with the rewrites applied. The arcs are judged at the same time. Each
+A redo list, `lenses/<lens>.redo.toml`, asks for a line to be drafted again. It is
+committed and holds only keys and notes, never game text. It has one table per namespace,
+with entries `key = "note"`, where the note is a plain-language problem such as
+"changes the line's point", "adds a prop not in the line" or "ungrammatical".
+`ffrd run` loads the file when it is present and validates it before any model call. Each
+key must be an in-scope line before `--through`, and each note a non-empty string of at
+most 200 characters. A failure names the file and the key.
+
+A listed line that the run would otherwise change gets a redraft: one draft call for that
+line alone, given its note and told to fix the problem. Where the note says the original
+line is weak, the redraft may rewrite more freely, keeping the line's point, plot facts,
+speaker and voice. The note is part of that call's stored key, so editing a note forces
+a new draft, and other lines keep their keys. The redraft faces the gates its line
+normally faces, the line-pass gates and judges or the scene pass's gates and scene judge,
+then coherence and the arc judges. If no redraft passes, the line is gate failed with gate
+`redo`, and the earlier rewrite is never kept. A listed line that the run would not change
+is left as it is. Each outcome record carries `redo`, which is true for a listed line.
+
+Third, after all scenes, the repeated lines are unified. Every changed line whose English
+text matches another changed line's takes the rewrite and the writer of the earliest of
+them in run order. Each line keeps its own key, plan and outcome, and the unification
+makes no model call. With a redo list, the earliest listed changed line in such a group
+is the source when there is one. Then the arc judge reads each arc that has a changed line,
+its lines in story order, with the rewrites applied. The arcs are judged at the same time. Each
 check works the same way. Opus names the lines it would revert. If it finds a problem, a
 recheck sees those proposals and names only the ones that must revert. A line reverts
 only when both passes name it. The arc judge reads only the line-pass rewrites, so adding a scene pass never

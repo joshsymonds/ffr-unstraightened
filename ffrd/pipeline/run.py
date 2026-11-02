@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import threading
+import tomllib
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +33,7 @@ from ffrd.pipeline.store import Store, work_dir
 CHAPTER_FILE = re.compile(r"chapter-\d{2,}\.toml")
 UNATTRIBUTED_FILE = "unattributed.toml"
 RECHECK_AT = 0.5
+REDO_NOTE_MAX = 200
 
 OutcomeKind = Literal["changed", "kept_for_plot", "gate_failed", "unfinished", "untouched"]
 WriterName = Literal["voice", "opus"]
@@ -49,6 +51,7 @@ class Outcome:
     writer: WriterName | None
     keep_reason: str | None = None
     plan: str | None = None
+    redo: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ def _outcome_line(o: Outcome) -> str:
         "writer": o.writer,
         "keep_reason": o.keep_reason,
         "plan": o.plan,
+        "redo": o.redo,
     }
     return json.dumps(record, ensure_ascii=False) + "\n"
 
@@ -184,6 +188,7 @@ class _Context:
     arcs: Sequence[Mapping[str, Any]]
     lines: Mapping[tuple[str, str], SceneLine]
     table_lines: frozenset[tuple[str, str]]
+    redo: Mapping[tuple[str, str], str]
 
 
 @dataclass
@@ -326,11 +331,11 @@ def _drafted_for(
 
 
 def _first_drafts(
-    ctx: _Context, scene: Scene, targets: Sequence[stages.Target], ask: Ask
+    ctx: _Context, scene: Scene, targets: Sequence[stages.Target], ask: Ask, note: str | None = None
 ) -> dict[tuple[str, str], tuple[str, ...] | Unfinished | Rejected]:
     if not targets:
         return {}
-    answer = stages.draft(ctx.store, ctx.lens, scene, targets, None, ask)
+    answer = stages.draft(ctx.store, ctx.lens, scene, targets, None, ask, note)
     return {(target.line.namespace, target.line.key): _drafted_for(answer, target.line) for target in targets}
 
 
@@ -363,6 +368,7 @@ def _line(
     reasons: tuple[str, ...],
     first: tuple[str, ...] | Unfinished | Rejected,
     ask: Ask,
+    note: str | None = None,
 ) -> tuple[Outcome, Change | None]:
     line = target.line
     origin: dict[str, WriterName] = {}
@@ -389,7 +395,9 @@ def _line(
         if retry is None:
             produced = _candidates(ctx, line, first, origin)
         else:
-            produced = _candidates(ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line), origin)
+            produced = _candidates(
+                ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask, note), line), origin
+            )
         if not isinstance(produced, Unfinished):
             check_round(produced)
         return produced
@@ -418,6 +426,20 @@ def _line(
         run=ctx.run_id,
     )
     return _outcome(line, reasons, "changed", writer=writer), change
+
+
+def _redraft(
+    ctx: _Context, scene: Scene, target: stages.Target, reasons: tuple[str, ...], note: str, ask: Ask
+) -> tuple[Outcome, Change | None]:
+    """Redrafts a line the redo list names, from its note, and gates the redraft like any line-pass line. A redraft that does not pass is gate_failed under redo, so the first rewrite never ships in its place."""
+    line = target.line
+    first = _first_drafts(ctx, scene, [target], ask, note)[(line.namespace, line.key)]
+    outcome, change = _line(ctx, scene, target, reasons, first, ask, note)
+    if outcome.outcome == "changed":
+        return outcome, change
+    if outcome.outcome == "unfinished":
+        return outcome, None
+    return _outcome(line, reasons, "gate_failed", gate="redo"), None
 
 
 def _join(
@@ -467,11 +489,11 @@ def _arc_outcome(outcome: Outcome, verdicts: arcs.Verdicts) -> Outcome:
 
 
 def _unified(ctx: _Context, outcomes: Sequence[Outcome], changes: Sequence[Change]) -> tuple[list[Outcome], list[Change]]:
-    """Gives every changed line that shares one English text the text and writer of the earliest of them in story order. Each line keeps its own key, plan and outcome, and only the rewrite and writer are copied."""
+    """Gives every changed line that shares one English text the text and writer of the earliest listed one in story order, or of the earliest one when none is listed. Each line keeps its own key, plan and outcome, and only the rewrite and writer are copied."""
     position = {(outcome.namespace, outcome.key): index for index, outcome in enumerate(outcomes) if outcome.outcome == "changed"}
     english = {(change.namespace, change.key): ctx.lines[(change.namespace, change.key)].english for change in changes}
     earliest: dict[str, Change] = {}
-    for change in sorted(changes, key=lambda c: position[(c.namespace, c.key)]):
+    for change in sorted(changes, key=lambda c: ((c.namespace, c.key) not in ctx.redo, position[(c.namespace, c.key)])):
         earliest.setdefault(english[(change.namespace, change.key)], change)
     sources = {ref: earliest[text] for ref, text in english.items()}
     unified_changes = [
@@ -526,8 +548,9 @@ def _scene_gate(
     target: stages.Target,
     first: tuple[str, ...] | Unfinished | Rejected,
     ask: Ask,
+    note: str | None = None,
 ) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
-    """Gates one planned line with the mechanical gates, drops the candidates that keep its carrier, then returns the passing candidate nearest the English line with that candidate's writer. A line left with none fails the scene gate."""
+    """Gates one planned line with the mechanical gates, drops the candidates that keep its carrier, then returns the passing candidate nearest the English line with that candidate's writer. A line left with none fails the scene gate. A redraft's retry carries its note."""
     line = target.line
     origin: dict[str, WriterName] = {}
     scores: dict[str, float] = {}
@@ -538,7 +561,7 @@ def _scene_gate(
         return scores[text]
 
     def write(retry: str | None) -> Sequence[Candidate] | Unfinished:
-        drafted = first if retry is None else _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line)
+        drafted = first if retry is None else _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask, note), line)
         if isinstance(drafted, Rejected):
             return Unfinished(drafted.detail)
         return _candidates(ctx, line, drafted, origin)
@@ -555,7 +578,7 @@ def _scene_gate(
 
 @dataclass(frozen=True)
 class _Round:
-    """One scene-pass plan after its gates and, when no required line failed the gates, the scene judge. Failed lines are gate failures and judge reverts."""
+    """One scene-pass plan after its gates and, when no required line failed the gates, the scene judge. Failed lines are gate failures and judge reverts. Redo_failed names the failed lines whose redraft under a reviewer note failed."""
 
     plan: scene_pass.Plan
     picks: dict[tuple[str, str], tuple[Candidate, WriterName]]
@@ -563,6 +586,7 @@ class _Round:
     required_failed: bool
     gates: Counter[str] = field(default_factory=Counter)
     reverts: int = 0
+    redo_failed: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -589,7 +613,14 @@ def _gate_plan(
 
     def gate(item: tuple[scene_pass.PlannedLine, stages.Target]) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
         entry, target = item
-        return _scene_gate(ctx, scene, entry, target, first[(target.line.namespace, target.line.key)], ask)
+        ref = (target.line.namespace, target.line.key)
+        normal = _scene_gate(ctx, scene, entry, target, first[ref], ask)
+        note = ctx.redo.get(ref)
+        if note is None or isinstance(normal, Kept | Unfinished | RateLimited):
+            return normal
+        redrafted = _first_drafts(ctx, scene, [target], ask, note)[ref]
+        redraft = _scene_gate(ctx, scene, entry, target, redrafted, ask, note)
+        return Kept("redo") if isinstance(redraft, Kept) else redraft
 
     gated = claude.fan_out(gate, planned)
     settled: dict[tuple[str, str], tuple[Candidate, WriterName] | Kept] = {}
@@ -622,6 +653,7 @@ def _settled(
     required = {(entry.namespace, entry.key) for entry in plan.lines if entry.required}
     picks = {ref: result for ref, result in gated.items() if not isinstance(result, Kept)}
     failed = {ref for ref, result in gated.items() if isinstance(result, Kept)}
+    redo_failed = {ref for ref, result in gated.items() if isinstance(result, Kept) and result.gate == "redo"}
     gates = Counter(result.gate for result in gated.values() if isinstance(result, Kept))
     reverts = 0
     if picks and not failed & required:
@@ -632,8 +664,21 @@ def _settled(
         reverted = frozenset(ref for ref in verdict if ref in picks)
         picks = {ref: pick for ref, pick in picks.items() if ref not in reverted}
         failed |= reverted
+        redo_failed |= {ref for ref in reverted if ref in ctx.redo}
         reverts = len(reverted)
-    return _Round(plan, picks, frozenset(failed), bool(required & failed), gates, reverts)
+    return _Round(plan, picks, frozenset(failed), bool(required & failed), gates, reverts, frozenset(redo_failed))
+
+
+def _redone(
+    outcomes: Sequence[Outcome], lines: Mapping[tuple[str, str], SceneLine], reasons: tuple[str, ...], failed: frozenset[tuple[str, str]]
+) -> list[Outcome]:
+    """Makes each listed line whose redraft failed a gate_failed under redo, with the scene pass's reasons and no plan. Every other outcome is kept."""
+    return [
+        _outcome(lines[(outcome.namespace, outcome.key)], reasons, "gate_failed", gate="redo")
+        if (outcome.namespace, outcome.key) in failed
+        else outcome
+        for outcome in outcomes
+    ]
 
 
 def _scene_pass(
@@ -646,14 +691,14 @@ def _scene_pass(
     line_rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
 ) -> tuple[list[Outcome], list[Change], _PassRecord]:
-    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan, with the surviving line-pass rewrites as context. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped."""
+    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan, with the surviving line-pass rewrites as context. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped. A listed line whose redraft failed in any round made is gate_failed under redo."""
+    lines = {(line.namespace, line.key): line for line in scene.lines}
 
-    def unfinished(hit_ids: tuple[str, ...] = ()) -> tuple[list[Outcome], list[Change], _PassRecord]:
-        return (
-            [outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes],
-            [],
-            _PassRecord(hit_ids),
-        )
+    def unfinished(
+        hit_ids: tuple[str, ...] = (), redone: frozenset[tuple[str, str]] = frozenset()
+    ) -> tuple[list[Outcome], list[Change], _PassRecord]:
+        kept = [outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes]
+        return _redone(kept, lines, hit_ids, redone), [], _PassRecord(hit_ids)
 
     hits = scene_pass.screen(ctx.store, ctx.lens, scene, cast, ask)
     if not isinstance(hits, dict):
@@ -668,15 +713,16 @@ def _scene_pass(
         return outcomes, [], _PassRecord(reasons, first.plan)
     chosen = first
     gates, reverts = first.gates, first.reverts
+    redone = first.redo_failed
     if first.required_failed:
         second = _settled(ctx, scene, cast, hits, flagged, first.failed, line_rewrites, ask)
         if not isinstance(second, _Round):
-            return unfinished(reasons)
+            return unfinished(reasons, redone)
         gates, reverts = gates + second.gates, reverts + second.reverts
+        redone = redone | second.redo_failed
         if second.required_failed:
-            return outcomes, [], _PassRecord(reasons, second.plan, True, gates, reverts)
+            return _redone(outcomes, lines, reasons, redone), [], _PassRecord(reasons, second.plan, True, gates, reverts)
         chosen = second
-    lines = {(line.namespace, line.key): line for line in scene.lines}
     shipped: dict[tuple[str, str], Outcome] = {}
     changes: list[Change] = []
     for ref, (candidate, writer) in chosen.picks.items():
@@ -697,7 +743,11 @@ def _scene_pass(
             )
         )
     passed = _PassRecord(reasons, chosen.plan, first.required_failed, gates, reverts)
-    return [shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], changes, passed
+    return (
+        _redone([shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], lines, reasons, redone),
+        changes,
+        passed,
+    )
 
 
 def _from_table(ctx: _Context, scene: Scene) -> bool:
@@ -751,7 +801,11 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         plan = planned[ref]
         if isinstance(plan, Outcome):
             return plan, None
-        return _line(ctx, scene, plan, reasons, first[ref], ask)
+        outcome, change = _line(ctx, scene, plan, reasons, first[ref], ask)
+        note = ctx.redo.get(ref)
+        if note is None or outcome.outcome != "changed":
+            return outcome, change
+        return _redraft(ctx, scene, plan, reasons, note, ask)
 
     gated = claude.fan_out(gate, scene.lines)
     outcomes = [outcome for outcome, _ in gated]
@@ -829,6 +883,35 @@ def _write_recall(path: Path, lens: Lens, recall: _Recall) -> None:
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _redo(path: Path, scenes: Sequence[Scene]) -> dict[tuple[str, str], str]:
+    """Reads the lens's redo list, where a missing file is an empty list. Each key must name a line of the in-scope scenes, and each note must be a non-empty string of at most REDO_NOTE_MAX characters."""
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise Fail(f"{path}: cannot read: {e.strerror}") from e
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise Fail(f"{path}: cannot read as UTF-8 TOML: {e}") from e
+    in_scope = {(line.namespace, line.key) for scene in scenes for line in scene.lines}
+    redo: dict[tuple[str, str], str] = {}
+    for namespace, keys in data.items():
+        if not isinstance(keys, dict):
+            raise Fail(f"{path}: {namespace}: must be a table of notes")
+        for key, note in keys.items():
+            ref = f"{namespace}/{key}"
+            if (namespace, key) not in in_scope:
+                raise Fail(f"{path}: {ref}: is not an in-scope line")
+            if not isinstance(note, str):
+                raise Fail(f"{path}: {ref}: note must be a string")
+            if not note.strip():
+                raise Fail(f"{path}: {ref}: note is empty")
+            if len(note) > REDO_NOTE_MAX:
+                raise Fail(f"{path}: {ref}: note is longer than {REDO_NOTE_MAX} characters")
+            redo[(namespace, key)] = note
+    return redo
+
+
 def run(
     root: Path,
     lens: Lens,
@@ -848,6 +931,7 @@ def run(
         raise Fail("through must be at least 1")
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
     scenes = scoped(scenes, scene_table=scene_table)
+    redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
     if through is not None:
         scenes = _limited(scenes, through)
     scenes = sorted(scenes, key=_chapter_order)
@@ -867,6 +951,7 @@ def run(
         arcs=arcs.consolidate(built),
         lines=_first_lines(scenes),
         table_lines=table_lines,
+        redo=redo,
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
@@ -898,6 +983,7 @@ def run(
         recall.confirmed.update(scene_recall.confirmed)
     outcomes, changes = _unified(ctx, outcomes, changes)
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
+    outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)

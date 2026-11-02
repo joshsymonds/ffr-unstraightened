@@ -43,6 +43,7 @@ SUMMARY = (
 )
 DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
+REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
 SCENE_DETAIL = (
     r"  scene (eligible: [0-9]+|plans: [0-9]+|replanned: [0-9]+|reverted lines: [0-9]+|changed lines: [0-9]+"
@@ -51,7 +52,7 @@ SCENE_DETAIL = (
     r"|gate [a-z0-9]+(?:[-_][a-z0-9]+)*: [0-9]+|character [0-9]+: [0-9]+)"
 )
 SCENE_LINE = r"scenes: [0-9]+ of [0-9]+ from the scene table, [0-9]+ outside it"
-LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{RECALL_LINE}")
+LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{REDO_LINE}|{RECALL_LINE}")
 
 # Made-up scene table build. Not game text.
 BUILD = "424242"
@@ -125,6 +126,7 @@ total: 4 changed, 1 kept for plot, 1 gate failed, 1 unfinished, 1 untouched
   gate made-up-gate: 1
 scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
+redo: 0 listed, 0 changed, 0 gate failed
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
 """
@@ -266,6 +268,7 @@ total: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 4 untouched
   kept none: 1
 scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
+redo: 0 listed, 0 changed, 0 gate failed
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
 """
@@ -323,6 +326,48 @@ def test_absent_plan_reads_as_none(tmp_path: Path) -> None:
     path.write_bytes(_without("plan"))
     (record,) = report._records(path, frozenset({FIRST, SECOND}))
     assert record.plan is None
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_redo_true_or_false_parses_into_the_record(tmp_path: Path, value: bool) -> None:
+    path = tmp_path / "outcomes.jsonl"
+    path.write_bytes(_lines(_record(redo=value)))
+    (record,) = report._records(path, frozenset({FIRST, SECOND}))
+    assert record.redo is value
+
+
+def test_absent_redo_reads_as_false(tmp_path: Path) -> None:
+    path = tmp_path / "outcomes.jsonl"
+    path.write_bytes(_without("redo"))
+    (record,) = report._records(path, frozenset({FIRST, SECOND}))
+    assert record.redo is False
+
+
+# Made-up outcomes for the redo line: four listed (one changed, two gate failed, one untouched),
+# one listed as false, one with no redo field. Not game text.
+REDO_RECORDS = (
+    _record(outcome="changed", reasons=[FIRST], redo=True),
+    _record(outcome="gate_failed", gate="redo", redo=True),
+    _record(outcome="gate_failed", gate="made-up-gate", redo=True),
+    _record(outcome="untouched", redo=True),
+    _record(outcome="changed", reasons=[FIRST], redo=False),
+    _record(outcome="changed", reasons=[FIRST]),
+)
+
+
+def test_redo_line_counts_listed_changed_and_gate_failed_right_after_arcs(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, _lines(*REDO_RECORDS))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    out = capsys.readouterr().out
+    for line in out.splitlines():
+        assert LINE.fullmatch(line), line
+    assert "SENTINEL" not in out
+    lines = out.splitlines()
+    arcs = lines.index("arcs: 3, 2 with changes")
+    assert lines[arcs + 1] == "redo: 4 listed, 1 changed, 2 gate failed"
+    assert lines[arcs + 2].startswith("recall made-up-first-id: ")
 
 
 @pytest.mark.parametrize("value", ["made-up-reason", "Plot", 3])
@@ -415,6 +460,7 @@ total: 0 changed, 0 kept for plot, 3 gate failed, 0 unfinished, 0 untouched
   gate scene: 1
 scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
+redo: 0 listed, 0 changed, 0 gate failed
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
 """
@@ -448,6 +494,7 @@ total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 5 untouched
   no speaker: 1
 scenes: 2 of 3 from the scene table, 2 outside it
 arcs: 3, 2 with changes
+redo: 0 listed, 0 changed, 0 gate failed
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
 """
@@ -497,8 +544,9 @@ def test_recall_lines_follow_arcs_in_lens_order(repo: Path, capsys: pytest.Captu
     # Made-up recall counts with the second id first in the file. Not game text.
     _write_recall(repo, _bytes({SECOND: {"disagreements": 2, "confirmed": 2}, FIRST: {"disagreements": 5, "confirmed": 3}}))
     _invoke()
-    assert capsys.readouterr().out.splitlines()[-3:] == [
+    assert capsys.readouterr().out.splitlines()[-4:] == [
         "arcs: 3, 2 with changes",
+        "redo: 0 listed, 0 changed, 0 gate failed",
         "recall made-up-first-id: 5 disagreements, 3 confirmed",
         "recall made-up-second-id: 2 disagreements, 2 confirmed",
     ]
@@ -635,6 +683,9 @@ BAD_LINES = [
     pytest.param(_lines(_record(outcome="gate_failed", gate=None)), "field gate", id="gate-missing"),
     pytest.param(_lines(_record(outcome="gate_failed", gate=3)), "field gate", id="gate-type"),
     pytest.param(_lines(_record(outcome="gate_failed", gate="SENTINEL Bad Gate")), "field gate", id="gate-name"),
+    pytest.param(_lines(_record(redo="SENTINEL-REDO")), "field redo must be true or false", id="redo-type"),
+    pytest.param(_lines(_record(redo=1)), "field redo must be true or false", id="redo-number"),
+    pytest.param(_lines(_record(redo=None)), "field redo must be true or false", id="redo-null"),
 ]
 
 
@@ -838,6 +889,7 @@ total: 3 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 2 untouched
   scene character 2: 1
 scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
+redo: 0 listed, 0 changed, 0 gate failed
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
 """
