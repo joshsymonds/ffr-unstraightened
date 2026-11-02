@@ -340,3 +340,35 @@ MINOR_FLIRT_DOC_SENTENCE = "A minor-flirt hit counts even once and wins over eve
 def test_doc_minor_flirt_bullet_carries_the_even_once_sentence() -> None:
     (bullet,) = re.findall(r"^- `minor-flirt`:.*(?:\n  .*)*", DOC.read_text(encoding="utf-8"), re.M)
     assert MINOR_FLIRT_DOC_SENTENCE in " ".join(bullet.split())
+
+
+# DL76: a scene's importance never keeps it. Each paragraph carries its phrase.
+DL76_PHRASES: tuple[tuple[str, str, str], ...] = (
+    ("plan", "keep-facts", "never a reason to keep it"),
+    ("plan", "keep-facts", "what the scene means"),
+    ("plan", "keep-facts", "the plan rewrites"),
+    ("plan", "named-keep", "never a reason to keep it"),
+    ("plan", "named-keep", "only when every in-budget fix would change a plot fact or the scene's meaning"),
+    ("rubric", "reduce-pattern", "keeps its meaning and plot facts"),
+    ("rubric", "reduce-pattern", "however central the scene is"),
+)
+
+
+@pytest.mark.parametrize(("part", "label", "phrase"), DL76_PHRASES)
+def test_dl76_paragraph_carries_its_phrase(scene: SceneSection, part: str, label: str, phrase: str) -> None:
+    assert phrase in scene_paragraph(scene_part(scene, part), label)
+
+
+def test_named_keep_no_longer_names_plot_for_a_plain_plot_change(scene: SceneSection) -> None:
+    assert "Name plot when the fix needs a plot change" not in scene_paragraph(scene.plan, "named-keep")
+
+
+DL76_DOC_SENTENCE = (
+    "A scene's importance to the story is never a reason to keep it, and `plot` is named only when "
+    "every in-budget fix would change a plot fact or the scene's meaning."
+)
+
+
+def test_doc_named_keep_bullet_carries_the_dl76_sentence() -> None:
+    (bullet,) = re.findall(r"^- `named-keep`:.*(?:\n  .*)*", DOC.read_text(encoding="utf-8"), re.M)
+    assert DL76_DOC_SENTENCE in " ".join(bullet.split())
