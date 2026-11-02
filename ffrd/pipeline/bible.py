@@ -155,11 +155,14 @@ class _Refused(Exception):
 
 def _refs(bible: Mapping[str, Any]) -> list[tuple[str, str]]:
     refs = [(ref["namespace"], ref["key"]) for fact in bible["facts"] for ref in fact["lines"]]
-    for callback in bible["callbacks"]:
-        refs.append((callback["line"]["namespace"], callback["line"]["key"]))
-        refs.extend((ref["namespace"], ref["key"]) for ref in callback["depends"])
+    refs.extend((callback["line"]["namespace"], callback["line"]["key"]) for callback in bible["callbacks"])
     refs.extend((beat["line"]["namespace"], beat["line"]["key"]) for arc in bible["arcs"] for beat in arc["beats"])
     return refs
+
+
+def _in_scope(depends: Sequence[Mapping[str, Any]], scope: Set[tuple[str, str]]) -> list[Mapping[str, Any]]:
+    # A depends ref naming no line passed to the story bible is dropped, not rejected; in-scope refs keep their order.
+    return [ref for ref in depends if (ref["namespace"], ref["key"]) in scope]
 
 
 def _label(number: int | None) -> str:
@@ -211,7 +214,8 @@ def chapter(
         if problem is not None:
             raise _Refused(problem)
         arcs = [{**arc, "characters": [speaker for speaker in arc["characters"] if speaker]} for arc in output["arcs"]]
-        return {**output, "arcs": arcs, "chapter": number}
+        callbacks = [{**callback, "depends": _in_scope(callback["depends"], scope)} for callback in output["callbacks"]]
+        return {**output, "arcs": arcs, "callbacks": callbacks, "chapter": number}
 
     inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "earlier": list(earlier)}
     try:
@@ -220,17 +224,12 @@ def chapter(
         return refused.failure
 
 
-def _check_setups(output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]]) -> Rejected | None:
+def _check_setups(output: Mapping[str, Any], number: int | None, lines: Sequence[Line]) -> Rejected | None:
     chapter_refs = {(line.namespace, line.key) for line in lines}
     for setup in output["setups"]:
         namespace, key = setup["line"]["namespace"], setup["line"]["key"]
         if (namespace, key) not in chapter_refs:
             return Rejected(f"{_label(number)} setup line {namespace}/{key} is no line of this chapter")
-        for ref in setup["depends"]:
-            if (ref["namespace"], ref["key"]) not in scope:
-                return Rejected(
-                    f"{_label(number)} setup depends ref {ref['namespace']}/{ref['key']} names no line passed to the story bible"
-                )
     return None
 
 
@@ -249,10 +248,10 @@ def setups(
         output = ask(parts, SETUP_SCHEMA)
         if isinstance(output, Unfinished | Rejected):
             raise _Refused(output)
-        problem = _check_setups(output, number, lines, scope)
+        problem = _check_setups(output, number, lines)
         if problem is not None:
             raise _Refused(problem)
-        return output["setups"]
+        return [{**setup, "depends": _in_scope(setup["depends"], scope)} for setup in output["setups"]]
 
     inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
     try:
