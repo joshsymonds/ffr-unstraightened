@@ -54,7 +54,7 @@ Classifier = Callable[[str], float]
 Judge = Callable[[Candidate], Judgment | Unfinished | RateLimited | Rejected]
 
 
-def check(candidate: Candidate, *, classify: Classifier, threshold: float, judge: Judge) -> Verdict:
+def mechanical(candidate: Candidate, *, classify: Classifier, threshold: float) -> Failed | None:
     text, english = candidate.text, candidate.english
     if set(PLACEHOLDER.findall(text)) - set(PLACEHOLDER.findall(english)):
         return Failed(candidate, "placeholder")
@@ -64,6 +64,13 @@ def check(candidate: Candidate, *, classify: Classifier, threshold: float, judge
         return Failed(candidate, "length")
     if classify(text) < threshold:
         return Failed(candidate, "classifier")
+    return None
+
+
+def check(candidate: Candidate, *, classify: Classifier, threshold: float, judge: Judge) -> Verdict:
+    failure = mechanical(candidate, classify=classify, threshold=threshold)
+    if failure is not None:
+        return failure
     verdict = judge(candidate)
     if isinstance(verdict, Rejected):
         return Failed(candidate, "judge")
@@ -89,31 +96,43 @@ class Kept:
 Writer = Callable[[str | None], Sequence[Candidate] | Unfinished | RateLimited]
 
 
-def _gate_round(
+def _gate_round[Accepted](
     produced: Sequence[Candidate] | Unfinished | RateLimited,
-    *,
-    classify: Classifier,
-    threshold: float,
-    judge: Judge,
-) -> tuple[Passed, ...] | str | Unfinished | RateLimited:
+    gate_one: Callable[[Candidate], Accepted | Failed | Unfinished | RateLimited],
+) -> tuple[Accepted, ...] | str | Unfinished | RateLimited:
     """Gates one writer round. A str result is the round's failing gate, or "writer" when it gave no candidates."""
     if isinstance(produced, Unfinished | RateLimited):
         return produced
-    passed: list[Passed] = []
+    passed: list[Accepted] = []
     first_failure: str | None = None
     for candidate in produced:
-        verdict = check(candidate, classify=classify, threshold=threshold, judge=judge)
+        verdict = gate_one(candidate)
         if isinstance(verdict, Unfinished | RateLimited):
             return verdict
-        if isinstance(verdict, Passed):
+        if isinstance(verdict, Failed):
+            if first_failure is None:
+                first_failure = verdict.gate
+        else:
             passed.append(verdict)
-        elif first_failure is None:
-            first_failure = verdict.gate
     if passed:
         return tuple(passed)
     if first_failure is None:
         return "writer"
     return first_failure
+
+
+def _gate_line[Accepted](
+    write: Writer,
+    gate_one: Callable[[Candidate], Accepted | Failed | Unfinished | RateLimited],
+) -> tuple[Accepted, ...] | Kept | Unfinished | RateLimited:
+    """Gates a line's first round; on failure asks the writer once more, told the failing gate, and keeps the line vanilla if that also fails."""
+    first = _gate_round(write(None), gate_one)
+    if not isinstance(first, str):
+        return first
+    retry = _gate_round(write(first), gate_one)
+    if isinstance(retry, str):
+        return Kept(retry)
+    return retry
 
 
 def gate_line(
@@ -123,11 +142,19 @@ def gate_line(
     threshold: float,
     judge: Judge,
 ) -> tuple[Passed, ...] | Kept | Unfinished | RateLimited:
-    """Gates a line's first round; on failure asks the writer once more, told the failing gate, and keeps the line vanilla if that also fails."""
-    first = _gate_round(write(None), classify=classify, threshold=threshold, judge=judge)
-    if not isinstance(first, str):
-        return first
-    retry = _gate_round(write(first), classify=classify, threshold=threshold, judge=judge)
-    if isinstance(retry, str):
-        return Kept(retry)
-    return retry
+    return _gate_line(write, lambda candidate: check(candidate, classify=classify, threshold=threshold, judge=judge))
+
+
+def _mechanical_pass(candidate: Candidate, *, classify: Classifier, threshold: float) -> Candidate | Failed:
+    failure = mechanical(candidate, classify=classify, threshold=threshold)
+    return candidate if failure is None else failure
+
+
+def gate_mechanical(
+    write: Writer,
+    *,
+    classify: Classifier,
+    threshold: float,
+) -> tuple[Candidate, ...] | Kept | Unfinished | RateLimited:
+    """Gates a scene-pass line's rounds with the mechanical gates only, under gate_line's one-retry rule."""
+    return _gate_line(write, lambda candidate: _mechanical_pass(candidate, classify=classify, threshold=threshold))

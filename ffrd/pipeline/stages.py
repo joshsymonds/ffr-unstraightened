@@ -6,7 +6,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from ffrd import find
@@ -36,6 +36,8 @@ class SceneLine:
 class Scene:
     key: str
     lines: tuple[SceneLine, ...]
+    # True when the scene was built from the game's scene table; not part of a scene's identity.
+    table: bool = field(default=False, compare=False)
 
 
 class SceneSource(Protocol):
@@ -89,7 +91,7 @@ def _table_scenes(
         if not text:
             raise Fail(f"scene table line {row.namespace}/{row.key} has no English text; run `ffrd scenes`")
         grouped.setdefault(row.scene, []).append(_line(row.namespace, row.key, row.speaker, text, japanese))
-    return [Scene(key=key, lines=tuple(lines)) for key, lines in grouped.items()]
+    return [Scene(key=key, lines=tuple(lines), table=True) for key, lines in grouped.items()]
 
 
 def _family_scenes(

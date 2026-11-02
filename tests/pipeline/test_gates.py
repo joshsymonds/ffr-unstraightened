@@ -3,7 +3,19 @@ from collections.abc import Sequence
 import pytest
 
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
-from ffrd.pipeline.gates import GATES, Candidate, Failed, Judgment, Kept, Passed, Verdict, check, gate_line
+from ffrd.pipeline.gates import (
+    GATES,
+    Candidate,
+    Failed,
+    Judgment,
+    Kept,
+    Passed,
+    Verdict,
+    check,
+    gate_line,
+    gate_mechanical,
+    mechanical,
+)
 
 # Made-up lines only. Not game text.
 ENGLISH = "Made-up line one. Not game text."
@@ -416,3 +428,136 @@ def test_stop_ends_the_round_so_an_earlier_pass_is_not_returned() -> None:
 
     assert verdict == Unfinished("synthetic transport")
     assert writer.calls == [None]
+
+
+MECHANICAL_GATES = ("placeholder", "tags", "length", "classifier")
+JUDGE_GATES = ("judge", "meaning", "plot", "minimal_change", "callback", "fixed")
+
+
+def _mechanical_run(candidate: Candidate, score: float = 1.0) -> tuple[Failed | None, FakeClassify]:
+    classify = FakeClassify(score)
+    return mechanical(candidate, classify=classify, threshold=THRESHOLD), classify
+
+
+def test_clean_candidate_passes_mechanical() -> None:
+    failure, _ = _mechanical_run(_candidate(TEXT_OK))
+
+    assert failure is None
+
+
+@pytest.mark.parametrize("gate", MECHANICAL_GATES)
+def test_mechanical_names_each_mechanical_gate(gate: str) -> None:
+    candidate, score, _ = FAILING[gate]
+
+    failure, _ = _mechanical_run(candidate, score=score)
+
+    assert failure == Failed(candidate, gate)
+
+
+@pytest.mark.parametrize("gate", JUDGE_GATES)
+def test_mechanical_does_not_apply_the_judge_gates(gate: str) -> None:
+    candidate, score, _ = FAILING[gate]
+
+    failure, _ = _mechanical_run(candidate, score=score)
+
+    assert failure is None
+
+
+def test_mechanical_classifier_score_at_threshold_passes() -> None:
+    failure, classify = _mechanical_run(_candidate(TEXT_OK), score=THRESHOLD)
+
+    assert failure is None
+    assert classify.seen == [TEXT_OK]
+
+
+def _mechanical_gate(
+    writer: FakeWriter, score: float = 1.0
+) -> tuple[tuple[Candidate, ...] | Kept | Unfinished | RateLimited, FakeClassify]:
+    classify = FakeClassify(score)
+    verdict = gate_mechanical(writer, classify=classify, threshold=THRESHOLD)
+    return verdict, classify
+
+
+def test_mechanical_passing_first_round_returns_every_passing_candidate_without_a_retry() -> None:
+    writer = FakeWriter([PASS_B, FAIL_PLACEHOLDER, PASS_A])
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict == (PASS_B, PASS_A)
+    assert writer.calls == [None]
+
+
+def test_mechanical_candidate_failing_only_judge_gates_passes() -> None:
+    judged_out = FAILING["meaning"][0]
+    writer = FakeWriter([judged_out])
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict == (judged_out,)
+    assert writer.calls == [None]
+
+
+def test_mechanical_failed_first_round_retries_once_told_the_first_failing_gate() -> None:
+    writer = FakeWriter([FAIL_TAGS, FAIL_PLACEHOLDER], [PASS_A])
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict == (PASS_A,)
+    assert writer.calls == [None, "tags"]
+
+
+def test_mechanical_classifier_failure_is_the_gate_the_retry_is_told() -> None:
+    writer = FakeWriter([FAILING["classifier"][0]], [PASS_A])
+    scores = iter([0.49, 1.0])
+
+    verdict = gate_mechanical(writer, classify=lambda _text: next(scores), threshold=THRESHOLD)
+
+    assert verdict == (PASS_A,)
+    assert writer.calls == [None, "classifier"]
+
+
+def test_mechanical_empty_first_round_retries_told_writer() -> None:
+    writer = FakeWriter([], [PASS_A])
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict == (PASS_A,)
+    assert writer.calls == [None, "writer"]
+
+
+def test_mechanical_failed_retry_keeps_the_line_with_the_retry_round_gate() -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [FAIL_LENGTH])
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict == Kept("length")
+    assert writer.calls == [None, "placeholder"]
+
+
+def test_mechanical_writer_is_never_asked_a_third_time() -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], [FAIL_LENGTH], [PASS_A])
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict == Kept("length")
+    assert writer.calls == [None, "placeholder"]
+
+
+@pytest.mark.parametrize("stop", [Unfinished("synthetic transport"), RateLimited("synthetic limit")])
+def test_mechanical_writer_stop_in_first_round_is_returned_and_not_retried(stop: Unfinished | RateLimited) -> None:
+    writer = FakeWriter(stop)
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict is stop
+    assert writer.calls == [None]
+
+
+@pytest.mark.parametrize("stop", [Unfinished("synthetic transport"), RateLimited("synthetic limit")])
+def test_mechanical_writer_stop_in_retry_is_returned_and_not_kept(stop: Unfinished | RateLimited) -> None:
+    writer = FakeWriter([FAIL_PLACEHOLDER], stop)
+
+    verdict, _ = _mechanical_gate(writer)
+
+    assert verdict is stop
+    assert writer.calls == [None, "placeholder"]

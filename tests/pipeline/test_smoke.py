@@ -11,10 +11,11 @@ from typing import Any
 import pytest
 
 from ffrd.game import Fail
-from ffrd.pipeline import arcs, bible, coherence, stages
+from ffrd.pipeline import arcs, bible, coherence, scene_pass, stages
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Unfinished
 from ffrd.pipeline.lens import TriageQuestion
+from ffrd.pipeline.scene_record import SCENE_KEEP_REASONS
 from ffrd.pipeline.smoke import CLASSIFIER, _CountingClassifier, _CountingStore, cmd_smoke, register
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
@@ -42,6 +43,8 @@ NS_HARD = "ST_UI_Made"
 SPEAKER_A = "made-up-speaker-a"
 SPEAKER_B = "made-up-speaker-b"
 SMOKE_OUTPUT_FORBIDDEN = ("Made-up english", "Not game text", "Reworded", "Voiced", "Made-up japanese")
+# Made-up scene pattern id of the smoke lens. Not game text.
+SCENE_PATTERN = "smoke-scene-hit"
 
 
 def _line(namespace: str, key: str, speaker: str | None, *, chapter: int | None = 1) -> SceneLine:
@@ -75,12 +78,16 @@ class FakeClaude:
         unfinished_judge: bool = False,
         flag_none: bool = False,
         overlong_draft: bool = False,
+        scene_hit: bool = False,
+        unfinished_scene_screen: bool = False,
     ) -> None:
         self.arcs_in_bible = arcs_in_bible
         self.unfinished_intent = unfinished_intent
         self.unfinished_judge = unfinished_judge
         self.flag_none = flag_none
         self.overlong_draft = overlong_draft
+        self.scene_hit = scene_hit
+        self.unfinished_scene_screen = unfinished_scene_screen
 
     def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> Any:
         if schema is bible.SCHEMA:
@@ -92,6 +99,16 @@ class FakeClaude:
                 return {"flagged": []}
             speakers = [line for line in _section(parts, "Scene lines:\n") if line["speaker"]][:2]
             return {"flagged": [{"namespace": s["namespace"], "key": s["key"], "reasons": ["smoke-fixable"]} for s in speakers]}
+        if schema is scene_pass.SCREEN_SCHEMA:
+            if self.unfinished_scene_screen:
+                return Unfinished("Made-up scene screen failure. Not game text.")
+            if not self.scene_hit:
+                return {"patterns": []}
+            first = _section(parts, "Scene lines:\n")[0]
+            return {"patterns": [{"id": SCENE_PATTERN, "carriers": [{"namespace": first["namespace"], "key": first["key"]}]}]}
+        if schema is scene_pass.PLAN_SCHEMA:
+            # A kept scene plans no lines, so the scene judge is never reached. Not game text.
+            return {"keep": True, "keep_reason": SCENE_KEEP_REASONS[0], "lines": []}
         if schema is RESCREEN_SCHEMA:
             return {"flagged": []}
         if schema is INTENT_SCHEMA:
@@ -198,6 +215,9 @@ FULL_STAGE_LINES = [
     "stage scene_coherence: 1",
     "stage arc_judge: 1",
     "stage selection: 3",
+    "stage scene_screen: 0",
+    "stage scene_plan: 0",
+    "stage scene_judge: 0",
 ]
 
 
@@ -228,6 +248,11 @@ def _bind(
     monkeypatch.setattr(stages, "bindings", bindings)
     monkeypatch.setattr(jev_module, "triage", jev)
     monkeypatch.setattr(stages, "Batch", Batch)
+
+
+def _table_scene(key: str, namespace: str) -> Scene:
+    # Made-up scene from the scene table: two spoken lines, both flagged by the line screen. Not game text.
+    return Scene(key, (_line(namespace, "1", SPEAKER_A), _line(namespace, "2", SPEAKER_B)), table=True)
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -449,6 +474,9 @@ def test_stages_a_run_leaves_empty_are_exercised_and_change_no_outcome(
         "stage scene_coherence: 1 (exercised)",
         "stage arc_judge: 1 (exercised)",
         "stage selection: 3",
+        "stage scene_screen: 0",
+        "stage scene_plan: 0",
+        "stage scene_judge: 0",
     ]
     work = smoke_repo / "work" / "smoke"
     outcomes = [json.loads(line) for line in (work / "outcomes.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -495,6 +523,60 @@ def test_a_screen_that_flags_nothing_fails_naming_the_stages_that_need_a_draft(
     out = capsys.readouterr().out.splitlines()
     assert "stage selection: 3" in out
     assert not any(line.endswith("(exercised)") for line in out)
+
+
+def test_a_table_scene_with_a_scene_screen_hit_counts_one_scene_screen_and_passes(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(scene_hit=True), FakeJev(JEV_HIGH), [_table_scene(SCENE_A, NS_A)])
+
+    cmd_smoke(_parse(["smoke"]))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "stage scene_screen: 1" in out
+    assert "stage scene_plan: 1" in out
+    assert "stage scene_judge: 0" in out
+    assert "stage selection: 2" in out
+
+
+def test_a_table_scene_whose_screen_hits_nothing_passes_with_no_scene_plan_or_judge(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(scene_hit=False), FakeJev(JEV_HIGH), [_table_scene(SCENE_A, NS_A)])
+
+    cmd_smoke(_parse(["smoke"]))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "stage scene_screen: 1" in out
+    assert "stage scene_plan: 0" in out
+    assert "stage scene_judge: 0" in out
+
+
+def test_a_table_scene_whose_scene_screen_is_unfinished_fails_naming_scene_screen(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(unfinished_scene_screen=True), FakeJev(JEV_HIGH), [_table_scene(SCENE_A, NS_A)])
+
+    with pytest.raises(Fail, match=r"^smoke: no result from scene_screen$"):
+        cmd_smoke(_parse(["smoke"]))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "stage scene_screen: 0" in out
+    assert "stage scene_plan: 0" in out
+    assert "stage selection: 2" in out
+
+
+def test_a_non_table_scene_prints_no_scene_screen_result_and_passes(
+    smoke_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, FakeClaude(scene_hit=True), FakeJev(JEV_HIGH), [_speaker_scene(SCENE_A, NS_A)])
+
+    cmd_smoke(_parse(["smoke"]))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "stage scene_screen: 0" in out
+    assert "stage scene_plan: 0" in out
+    assert "stage scene_judge: 0" in out
 
 
 THREADS = 8

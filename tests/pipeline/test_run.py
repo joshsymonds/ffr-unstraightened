@@ -5,18 +5,31 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import arcs, bible, coherence, report, stages
+from ffrd.pipeline import arcs, bible, coherence, report, scene_pass, scene_record, stages
 from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
-from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.run import Change, Outcome, _record, cmd_run, register, run, write_dialog, write_outcomes
+from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
+from ffrd.pipeline.run import (
+    Change,
+    Outcome,
+    _arc_judged,
+    _coherent,
+    _Context,
+    _record,
+    cmd_run,
+    register,
+    run,
+    write_dialog,
+    write_outcomes,
+)
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
@@ -433,6 +446,11 @@ def _part(parts: Sequence[str], prefix: str) -> str:
     return next(part for part in parts if part.startswith(prefix)).removeprefix(prefix)
 
 
+def _is_scene_judge(parts: Sequence[str]) -> bool:
+    """True for a coherence call judged under the lens scene rubric, the plan-level scene judge."""
+    return f"Judge rubric:\n{SCENE_LENS.stage_text('scene')}" in parts
+
+
 def _target(parts: Sequence[str]) -> tuple[str, str]:
     ref = json.loads(_part(parts, "Target line:\n"))
     return ref["namespace"], ref["key"]
@@ -482,6 +500,12 @@ class FakeClaude:
         self.coherence: list[dict[str, Any] | Unfinished | Rejected] = []
         # Answers for arc judge calls in order, first pass then recheck; an empty queue answers holds with no reverts. Not game text.
         self.arc: list[dict[str, Any] | Unfinished | Rejected] = []
+        # Answers for the scene pass's screen and plan calls. The re-plan, the plan call that names excluded lines, has its own answer. Not game text.
+        self.scene_screen: dict[str, Any] | Unfinished | Rejected = {"patterns": []}
+        self.scene_plan: dict[str, Any] | Unfinished | Rejected = {"keep": True, "keep_reason": "plot", "lines": []}
+        self.scene_replan: dict[str, Any] | Unfinished | Rejected = {"keep": True, "keep_reason": "plot", "lines": []}
+        # Answers for the scene judge's coherence calls in order, first pass then recheck; an empty queue answers coherent. Not game text.
+        self.scene_judge: list[dict[str, Any] | Unfinished | Rejected] = []
 
     def start_batch(self) -> Ask:
         self.batches += 1
@@ -525,9 +549,17 @@ class FakeClaude:
                 return self.cross_failures[candidate]
             return {"consistent": self.consistent.get(candidate, True)}
         if schema is coherence.SCHEMA:
+            if _is_scene_judge(parts):
+                return self.scene_judge.pop(0) if self.scene_judge else {"coherent": True, "revert": []}
             return self.coherence.pop(0) if self.coherence else {"coherent": True, "revert": []}
         if schema is arcs.SCHEMA:
             return self.arc.pop(0) if self.arc else {"holds": True, "revert": []}
+        if schema is scene_pass.SCREEN_SCHEMA:
+            return self.scene_screen
+        if schema is scene_pass.PLAN_SCHEMA:
+            if json.loads(_part(parts, "Excluded lines:\n")):
+                return self.scene_replan
+            return self.scene_plan
         raise AssertionError("unexpected schema")
 
     def _screen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished:
@@ -648,10 +680,11 @@ def _run(
     scene_table: bool = False,
     batch: Callable[[], Ask] | None = None,
     through: int | None = None,
+    lens: Lens = LENS_OBJ,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
-        LENS_OBJ,
+        lens,
         Store(tmp_path / "work" / LENS),
         scenes,
         classifier=FakeClassifier() if classifier is None else classifier,
@@ -2141,3 +2174,617 @@ def test_run_command_passes_through_to_the_run(lens_repo: Path, monkeypatch: pyt
     assert _dialog_files(lens_repo / "dialog" / LENS) == ["chapter-01.toml"]
     assert len(jev.calls) == 1
     assert (lens_repo / "reports" / f"{LENS}-c01.txt").read_text(encoding="utf-8") == EXPECTED_PROVISIONAL
+
+
+# Made-up plan lines, scenes and answers for the revert of a whole plan. Not game text.
+PLAN_TWO_ID = "made-up-plan-two"
+PLAN_SCENE = Scene(
+    "made-up-scene-e",
+    (
+        _line(NS_C, "2", None, EN_ONE, 3),
+        _line(NS_C, "3", None, EN_TWO, 3),
+        _line(NS_C, "4", None, EN_A3, 3),
+        _line(NS_C, "5", None, EN_B2, 3),
+    ),
+)
+
+
+def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = ()) -> _Context:
+    return _Context(
+        lens=LENS_OBJ,
+        store=Store(tmp_path / "work" / LENS),
+        classifier=FakeClassifier(),
+        renderer=FakeRenderer({}),
+        run_id=RUN,
+        jev=None,
+        bibles=list(bibles),
+        arcs=arcs.consolidate(bibles),
+        lines={},
+        table_lines=frozenset(),
+    )
+
+
+def _arc_answers(claude: FakeClaude, answers: Mapping[str, dict[str, Any] | Unfinished | Rejected]) -> Ask:
+    """Answers the arc judge of each named arc by its id and every other call from the FakeClaude. Not game text."""
+
+    def ask(model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
+        if schema is arcs.SCHEMA:
+            arc_id = json.loads(_part(parts, "Arc:\n"))["id"]
+            if arc_id in answers:
+                return answers[arc_id]
+        return claude.ask(model, parts, schema)
+
+    return ask
+
+
+def test_coherence_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan_and_the_unplanned_line_ships(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.coherence = [_verdict(False, (NS_C, "2")), _verdict(False, (NS_C, "2"))]
+    changes = [_change(NS_C, "2", 3, plan=PLAN_ID), _change(NS_C, "3", 3, plan=PLAN_ID), _change(NS_C, "4", 3)]
+    outcomes = [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice"),
+    ]
+    kept_outcomes, kept_changes = _coherent(_plan_context(tmp_path), PLAN_SCENE, outcomes, changes, claude.start_batch())
+    assert kept_outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice"),
+    ]
+    assert kept_changes == [_change(NS_C, "4", 3)]
+
+
+def test_coherence_revert_of_one_plan_leaves_the_other_plan_to_ship(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.coherence = [_verdict(False, (NS_C, "2")), _verdict(False, (NS_C, "2"))]
+    changes = [
+        _change(NS_C, "2", 3, plan=PLAN_ID),
+        _change(NS_C, "3", 3, plan=PLAN_ID),
+        _change(NS_C, "4", 3, plan=PLAN_TWO_ID),
+        _change(NS_C, "5", 3, plan=PLAN_TWO_ID),
+    ]
+    outcomes = [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+        Outcome(NS_C, "5", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    kept_outcomes, kept_changes = _coherent(_plan_context(tmp_path), PLAN_SCENE, outcomes, changes, claude.start_batch())
+    assert kept_outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+        Outcome(NS_C, "5", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    assert kept_changes == changes[2:]
+
+
+def test_arc_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    answers = {ARC_A: _arc_verdict(False, (NS_A, "1"))}
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_B, "1", 2, plan=PLAN_ID)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+    ]
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+    ]
+    assert kept_changes == []
+
+
+def test_arc_revert_of_one_plan_leaves_the_other_plan_to_ship(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    answers = {ARC_A: _arc_verdict(False, (NS_A, "1")), ARC_C: _arc_verdict(True)}
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_B, "1", 2, plan=PLAN_ID), _change(NS_A, "2", 1, plan=PLAN_TWO_ID)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    assert kept_changes == [changes[2]]
+
+
+def test_arc_unfinished_plan_line_leaves_every_changed_line_of_that_plan_unfinished(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    answers = {ARC_C: Unfinished("Made-up arc failure. Not game text.")}
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_A, "2", 1, plan=PLAN_ID), _change(NS_B, "1", 2)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    ]
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None, plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "unfinished", None, None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    ]
+    assert kept_changes == [changes[2]]
+
+
+# Made-up scene-pass lens, scene and answers. Not game text.
+PATTERN_ONE = "made-up-pattern-one"
+PATTERN_TWO = "made-up-pattern-two"
+SCENE_LENS = replace(
+    LENS_OBJ,
+    scene=SceneSection(
+        patterns=(
+            ScenePattern(PATTERN_ONE, "Made-up pattern one question. Not game text."),
+            ScenePattern(PATTERN_TWO, "Made-up pattern two question. Not game text."),
+        ),
+        criteria=("Made-up scene criterion. Not game text.",),
+        plan="Made-up scene plan rule. Not game text.",
+        rubric="Made-up scene rubric. Not game text.",
+    ),
+)
+OPUS_S2 = "Made-up line two of scene b. Not game text."
+OPUS_S3 = "Made-up line three of scene b. Not game text."
+OPUS_S4 = "Made-up line four of scene b. Not game text."
+VOICE_FAR = "Qwx zvk pjt mrb dlf hgn. Not game text."
+LONG = "Made-up overlong rewrite of the line, far past the length bar. Not game text."
+TABLE_SCENE = Scene(
+    "made-up-scene-table",
+    (
+        _line(NS_A, "1", None, EN_A1, 1),
+        _line(NS_A, "2", None, EN_A2, 1),
+        _line(NS_A, "3", None, EN_A3, 1),
+        _line(NS_A, "4", None, EN_A4, 1),
+    ),
+    table=True,
+)
+KEEP_ANSWER: dict[str, Any] = {"keep": True, "keep_reason": "plot", "lines": []}
+
+
+def _plan_answer(*lines: tuple[str, str, bool]) -> dict[str, Any]:
+    planned = [
+        {"namespace": namespace, "key": key, "intent": "Made-up scene intent. Not game text.", "required": required}
+        for namespace, key, required in lines
+    ]
+    return {"keep": False, "keep_reason": "none", "lines": planned}
+
+
+def _scene_claude() -> FakeClaude:
+    """Line 1 is flagged by the line pass. Lines 2 and 3 are the scene pass's planned lines, planned required and optional."""
+    claude = FakeClaude()
+    claude.bible = {}
+    claude.flags = {(NS_A, "1"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_S2], (NS_A, "3"): [OPUS_S3]}
+    claude.scene_screen = {
+        "patterns": [
+            {"id": PATTERN_TWO, "carriers": [{"namespace": NS_A, "key": "2"}]},
+            {"id": PATTERN_ONE, "carriers": [{"namespace": NS_A, "key": "2"}]},
+        ]
+    }
+    claude.scene_plan = _plan_answer((NS_A, "2", True), (NS_A, "3", False))
+    return claude
+
+
+def _scene_run(
+    tmp_path: Path,
+    claude: FakeClaude,
+    *,
+    scene: Scene = TABLE_SCENE,
+    lens: Lens = SCENE_LENS,
+) -> list[Outcome]:
+    # The voice of OPUS_S2 is far from its English line, so the opus draft is the nearer candidate and ships.
+    return _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        scenes=(scene,),
+        lens=lens,
+        renderer=FakeRenderer({OPUS_S2: VOICE_FAR}),
+    )
+
+
+def _scene_prompts(claude: FakeClaude, schema: Mapping[str, Any]) -> list[list[str]]:
+    return [parts for _, parts, called in claude.calls if called is schema]
+
+
+def _scene_judge_prompts(claude: FakeClaude) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is coherence.SCHEMA and _is_scene_judge(parts)]
+
+
+def _dialog_tables(tmp_path: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    tables: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in (tmp_path / "repo" / "dialog" / LENS).iterdir():
+        for namespace, table in tomllib.loads(path.read_text(encoding="utf-8")).items():
+            for key, entry in table.items():
+                tables[(namespace, key)] = entry
+    return tables
+
+
+def _untouched(namespace: str, key: str) -> Outcome:
+    return Outcome(namespace, key, 1, None, (), "untouched", None, None)
+
+
+def test_planned_required_and_optional_lines_ship_as_changed_with_hit_ids_plan_and_writer(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, reasons, "changed", None, "opus", None, plan)
+    tables = _dialog_tables(tmp_path)
+    assert set(tables) == {(NS_A, "1"), (NS_A, "2"), (NS_A, "3")}
+    assert tables[(NS_A, "2")]["text"] == OPUS_S2
+    assert tables[(NS_A, "2")]["writer"] == "opus"
+    assert tables[(NS_A, "2")]["reason"] == [PATTERN_ONE, PATTERN_TWO]
+    assert tables[(NS_A, "3")]["text"] == OPUS_S3
+    assert tables[(NS_A, "3")]["reason"] == [PATTERN_ONE, PATTERN_TWO]
+
+
+def test_plan_gets_the_line_pass_flagged_lines_as_final_and_no_excluded_lines(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    _scene_run(tmp_path, claude)
+    [parts] = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(parts, "Final lines:\n")) == [{"namespace": NS_A, "key": "1"}]
+    assert json.loads(_part(parts, "Excluded lines:\n")) == []
+
+
+def test_planned_lines_never_reach_the_reason_judge(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    _scene_run(tmp_path, claude)
+    judged = {text for _, text in _judged(claude, JUDGE_SCHEMA)}
+    assert OPUS_A1 in judged
+    assert not judged & {OPUS_S2, OPUS_S3, VOICE_FAR}
+
+
+def test_required_line_failing_its_gates_in_both_plans_blocks_every_scene_pass_change(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.drafts[(NS_A, "3")] = [LONG]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    for key in ("2", "3", "4"):
+        assert _outcome_of(outcomes, (NS_A, key)) == _untouched(NS_A, key)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+    assert len(_drafts_for(claude, (NS_A, "2"))) == 2
+    assert len(_scene_prompts(claude, scene_pass.PLAN_SCHEMA)) == 2
+
+
+def test_scene_judge_receives_the_passing_rewrites_under_the_scene_rubric(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    _scene_run(tmp_path, claude)
+    [parts] = _scene_judge_prompts(claude)
+    rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
+    assert rewrites == {(NS_A, "1"): None, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): None}
+
+
+def test_judge_reverted_optional_line_is_dropped_and_the_rest_ship(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "3")), _verdict(False, (NS_A, "3"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+    assert len(_scene_judge_prompts(claude)) == 2
+
+
+def test_judge_reverted_required_line_triggers_one_replan_that_excludes_it_and_ships_the_replan_with_its_id(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "4")] = [OPUS_S4]
+    claude.scene_judge = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    outcomes = _scene_run(tmp_path, claude)
+    first, replan = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(replan, "Excluded lines:\n")) == [{"namespace": NS_A, "key": "2"}]
+    assert json.loads(_part(first, "Excluded lines:\n")) == []
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "4")])
+    assert _outcome_of(outcomes, (NS_A, "4")) == Outcome(
+        NS_A, "4", 1, None, (PATTERN_ONE, PATTERN_TWO), "changed", None, "opus", None, plan
+    )
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "4")}
+    [replan_judge] = _scene_judge_prompts(claude)[2:]
+    assert [line["key"] for line in json.loads(_part(replan_judge, "Scene lines:\n")) if line["rewrite"]] == ["4"]
+
+
+def test_gate_failed_required_line_triggers_one_replan_that_excludes_it_and_ships_the_replan_with_its_id(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "3", True))
+    outcomes = _scene_run(tmp_path, claude)
+    first, replan = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(first, "Excluded lines:\n")) == []
+    assert json.loads(_part(replan, "Excluded lines:\n")) == [{"namespace": NS_A, "key": "2"}]
+    assert json.loads(_part(replan, "Final lines:\n")) == [{"namespace": NS_A, "key": "1"}]
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "3")])
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(
+        NS_A, "3", 1, None, (PATTERN_ONE, PATTERN_TWO), "changed", None, "opus", None, plan
+    )
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+    assert len(_scene_judge_prompts(claude)) == 1
+
+
+def test_replan_keep_leaves_no_scene_pass_change_and_makes_no_third_plan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.scene_replan = KEEP_ANSWER
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+    assert len(_scene_prompts(claude, scene_pass.PLAN_SCHEMA)) == 2
+
+
+def test_optional_planned_line_failing_its_gates_twice_is_dropped_and_the_required_line_ships(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "3")] = [LONG]
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+    assert len(_drafts_for(claude, (NS_A, "3"))) == 2
+
+
+def test_keep_plan_changes_nothing_and_drafts_no_planned_line(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_plan = KEEP_ANSWER
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _drafts_for(claude, (NS_A, "2")) == []
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_scene_with_no_pattern_hit_makes_no_plan_call_and_changes_nothing(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_screen = {"patterns": []}
+    outcomes = _scene_run(tmp_path, claude)
+    assert len(_scene_prompts(claude, scene_pass.SCREEN_SCHEMA)) == 1
+    assert _scene_prompts(claude, scene_pass.PLAN_SCHEMA) == []
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_non_table_scene_makes_no_scene_pass_call(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    outcomes = _scene_run(tmp_path, claude, scene=replace(TABLE_SCENE, table=False))
+    assert _scene_prompts(claude, scene_pass.SCREEN_SCHEMA) == []
+    assert _scene_prompts(claude, scene_pass.PLAN_SCHEMA) == []
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_lens_without_a_scene_section_makes_no_scene_pass_call(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    outcomes = _scene_run(tmp_path, claude, lens=LENS_OBJ)
+    assert _scene_prompts(claude, scene_pass.SCREEN_SCHEMA) == []
+    assert _scene_prompts(claude, scene_pass.PLAN_SCHEMA) == []
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+@pytest.mark.parametrize("failure", ["screen", "plan", "draft", "judge", "replan"])
+def test_unfinished_scene_pass_stage_leaves_every_unflagged_line_unfinished_and_changes_nothing(tmp_path: Path, failure: str) -> None:
+    claude = _scene_claude()
+    if failure == "screen":
+        claude.scene_screen = Unfinished("Made-up screen failure. Not game text.")
+    elif failure == "plan":
+        claude.scene_plan = Rejected("Made-up plan rejection. Not game text.")
+    elif failure == "draft":
+        claude.drafts[(NS_A, "2")] = Rejected("Made-up draft rejection. Not game text.")
+    elif failure == "judge":
+        claude.scene_judge = [Unfinished("Made-up scene judge failure. Not game text.")]
+    else:
+        claude.drafts[(NS_A, "2")] = [LONG]
+        claude.scene_replan = Unfinished("Made-up re-plan failure. Not game text.")
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    for key in ("2", "3", "4"):
+        assert _outcome_of(outcomes, (NS_A, key)) == Outcome(NS_A, key, 1, None, (), "unfinished", None, None)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+# Made-up scene records. Not game text.
+GATE_LENGTH = "length"
+
+
+def _records(tmp_path: Path) -> list[scene_record.SceneRecord]:
+    return scene_record.read_scenes(tmp_path / "work" / LENS / scene_record.SCENES)
+
+
+def _expected_record(**fields: Any) -> scene_record.SceneRecord:
+    base: dict[str, Any] = {
+        "scene": TABLE_SCENE.key,
+        "chapter": 1,
+        "eligible": True,
+        "patterns": (),
+        "plan": None,
+        "keep_reason": None,
+        "planned": 0,
+        "required": 0,
+        "changed": 0,
+        "reverted": 0,
+        "replanned": 0,
+        "gate_failures": {},
+    }
+    return scene_record.SceneRecord(**{**base, **fields})
+
+
+def test_shipped_plan_writes_one_record_with_its_plan_patterns_and_counts(tmp_path: Path) -> None:
+    _scene_run(tmp_path, _scene_claude())
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=2),
+    ]
+
+
+def test_one_record_per_in_scope_scene_in_run_order_with_ineligible_scenes_marked(tmp_path: Path) -> None:
+    _run(
+        tmp_path,
+        _scene_claude(),
+        [],
+        jev=None,
+        scenes=(SCENE_B, TABLE_SCENE),
+        lens=SCENE_LENS,
+        renderer=FakeRenderer({OPUS_S2: VOICE_FAR}),
+    )
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=2),
+        _expected_record(scene=SCENE_B.key, chapter=2, eligible=False),
+    ]
+
+
+@pytest.mark.parametrize(("lens", "table"), [(LENS_OBJ, True), (SCENE_LENS, False)])
+def test_lens_without_a_scene_section_or_a_non_table_scene_records_ineligible_with_empty_counts(
+    tmp_path: Path, lens: Lens, table: bool
+) -> None:
+    _scene_run(tmp_path, _scene_claude(), scene=replace(TABLE_SCENE, table=table), lens=lens)
+    assert _records(tmp_path) == [_expected_record(eligible=False)]
+
+
+def test_kept_scene_records_its_keep_reason_and_no_plan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_plan = KEEP_ANSWER
+    _scene_run(tmp_path, claude)
+    assert _records(tmp_path) == [_expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), keep_reason="plot")]
+
+
+def test_scene_with_no_pattern_hit_records_eligible_with_empty_counts(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_screen = {"patterns": []}
+    _scene_run(tmp_path, claude)
+    assert _records(tmp_path) == [_expected_record()]
+
+
+def test_replan_record_names_the_replan_id_and_counts_its_gate_failures(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "3", True))
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            changed=1,
+            replanned=1,
+            gate_failures={GATE_LENGTH: 1},
+        ),
+    ]
+
+
+def test_gate_failures_count_both_plans_and_the_record_names_the_replan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.drafts[(NS_A, "3")] = [LONG]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "4")])
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            replanned=1,
+            gate_failures={GATE_LENGTH: 3},
+        ),
+    ]
+
+
+def test_scene_judge_revert_of_an_optional_line_counts_as_reverted(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "3")), _verdict(False, (NS_A, "3"))]
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=1, reverted=1),
+    ]
+
+
+def test_scene_judge_revert_of_a_required_line_counts_in_both_plans_and_names_the_replan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "4")] = [OPUS_S4]
+    claude.scene_judge = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "4")])
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            changed=1,
+            reverted=1,
+            replanned=1,
+        ),
+    ]
+
+
+def test_coherence_revert_counts_every_reverted_line_of_the_plan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.coherence = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=0, reverted=2),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure", "patterns"),
+    [("screen", ()), ("plan", (PATTERN_ONE, PATTERN_TWO)), ("replan", (PATTERN_ONE, PATTERN_TWO))],
+)
+def test_unfinished_scene_pass_keeps_its_patterns_with_no_plan_and_zero_counts(
+    tmp_path: Path, failure: str, patterns: tuple[str, ...]
+) -> None:
+    claude = _scene_claude()
+    if failure == "screen":
+        claude.scene_screen = Unfinished("Made-up screen failure. Not game text.")
+    elif failure == "plan":
+        claude.scene_plan = Rejected("Made-up plan rejection. Not game text.")
+    else:
+        claude.drafts[(NS_A, "2")] = [LONG]
+        claude.scene_replan = Unfinished("Made-up re-plan failure. Not game text.")
+    _scene_run(tmp_path, claude)
+    assert _records(tmp_path) == [_expected_record(patterns=patterns)]
+
+
+def test_scenes_file_reads_back_and_holds_no_line_text(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "3")), _verdict(False, (NS_A, "3"))]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    _scene_run(tmp_path, claude)
+    path = tmp_path / "work" / LENS / scene_record.SCENES
+    assert len(scene_record.read_scenes(path)) == 1
+    written = path.read_text(encoding="utf-8")
+    assert not any(text in written for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_S2, OPUS_S3, OPUS_S4, VOICE_FAR, LONG))
+
+
+def test_rerun_with_a_scene_section_reuses_every_line_pass_result_and_asks_only_the_scene_screen(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_screen = {"patterns": []}
+    _scene_run(tmp_path, claude, lens=LENS_OBJ)
+    claude.calls.clear()
+    _scene_run(tmp_path, claude)
+    assert len(claude.calls) == 1
+    assert len(_scene_prompts(claude, scene_pass.SCREEN_SCHEMA)) == 1
+    assert _records(tmp_path) == [_expected_record()]

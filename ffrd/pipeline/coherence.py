@@ -5,7 +5,7 @@ from typing import Any
 
 from ffrd.pipeline import claude
 from ffrd.pipeline.claude import Rejected, Unfinished
-from ffrd.pipeline.lens import Lens
+from ffrd.pipeline.lens import Lens, Stage
 from ffrd.pipeline.stages import Ask, Scene, _inputs, _json, _Unanswered
 from ffrd.pipeline.store import Store
 
@@ -48,15 +48,17 @@ def check(
     rewrites: Mapping[tuple[str, str], str],
     arcs: Sequence[Mapping[str, Any]],
     ask: Ask,
+    stage: str = STAGE,
+    rubric: Stage = "judge",
 ) -> frozenset[tuple[str, str]] | Unfinished | Rejected:
-    first = _pass(store, lens, scene, rewrites, arcs, ask, INSTRUCTIONS, None)
+    first = _pass(store, lens, scene, rewrites, arcs, ask, INSTRUCTIONS, None, stage, rubric)
     if isinstance(first, Unfinished | Rejected):
         return first
     first_coherent, proposed = first
     if first_coherent:
         return frozenset()
 
-    recheck = _pass(store, lens, scene, rewrites, arcs, ask, RECHECK_INSTRUCTIONS, proposed)
+    recheck = _pass(store, lens, scene, rewrites, arcs, ask, RECHECK_INSTRUCTIONS, proposed, stage, rubric)
     if isinstance(recheck, Unfinished | Rejected):
         return recheck
     recheck_coherent, named = recheck
@@ -74,10 +76,13 @@ def _pass(
     ask: Ask,
     instructions: str,
     proposed: frozenset[tuple[str, str]] | None,
+    stage: str,
+    rubric: Stage,
 ) -> tuple[bool, frozenset[tuple[str, str]]] | Unfinished | Rejected:
+    rubric_text = lens.stage_text(rubric)
     parts = [
         instructions,
-        f"Judge rubric:\n{lens.stage_text('judge')}",
+        f"Judge rubric:\n{rubric_text}",
         f"Arcs:\n{_json(list(arcs))}",
         f"Scene lines:\n{_json(_scene_dicts(scene, rewrites))}",
     ]
@@ -96,7 +101,7 @@ def _pass(
         return answer
 
     try:
-        answer = store.run(STAGE, inputs, lens.stage_text("judge"), call).value
+        answer = store.run(stage, inputs, rubric_text, call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return bool(answer["coherent"]), _refs(answer)
