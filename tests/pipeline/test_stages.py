@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from ffrd import scenes as scene_file
 from ffrd.game import Fail
 from ffrd.pipeline import accounts, claude
 from ffrd.pipeline.accounts import Account
@@ -29,6 +30,8 @@ from ffrd.pipeline.stages import (
     Scene,
     SceneLine,
     Target,
+    _family_scenes,
+    _table_scenes,
     cross_judge,
     draft,
     intent,
@@ -388,6 +391,51 @@ def test_failed_screen_is_returned_unstored_and_asked_again(tmp_path: Path, fail
 def test_fresh_store_on_same_root_returns_stored_screen_without_asking(tmp_path: Path) -> None:
     expected = {(LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",)}
     screen(Store(tmp_path), LENS, SCENE, CAST, Fake(FLAGGED_ONE))
+    ask = Fake()
+
+    assert screen(Store(tmp_path), LENS, SCENE, CAST, ask) == expected
+    assert ask.calls == []
+
+
+TABLE_ROWS = [
+    scene_file.SceneLine("made-up-table-scene", 1, "ST_C01_001_01", "1", "Ash", None),
+    scene_file.SceneLine("made-up-table-scene", 2, "ST_C01_001_01", "2", None, None),
+]
+TABLE_ENGLISH = {
+    ("ST_C01_001_01", "1"): "Made-up table line one. Not game text.",
+    ("ST_C01_001_01", "2"): "Made-up table line two. Not game text.",
+}
+
+
+def test_table_scenes_are_built_with_the_table_flag() -> None:
+    scenes = _table_scenes(TABLE_ROWS, TABLE_ENGLISH, {})
+
+    assert [scene.key for scene in scenes] == ["made-up-table-scene"]
+    assert [scene.table for scene in scenes] == [True]
+
+
+def test_family_scenes_are_built_without_the_table_flag() -> None:
+    english = {("ST_DialogChoice_MadeUp", "1"): "Made-up choice line. Not game text."}
+    scenes = _family_scenes(english, {}, set())
+
+    assert [scene.key for scene in scenes] == ["ST_DialogChoice_MadeUp"]
+    assert [scene.table for scene in scenes] == [False]
+
+
+def test_scene_table_flag_defaults_to_false() -> None:
+    assert SCENE.table is False
+
+
+def test_table_scene_equals_and_hashes_like_the_same_key_and_lines_without_the_flag() -> None:
+    table = replace(SCENE, table=True)
+
+    assert table == SCENE
+    assert hash(table) == hash(SCENE)
+
+
+def test_screen_result_stored_for_a_table_scene_is_reused_for_the_same_scene_without_the_flag(tmp_path: Path) -> None:
+    expected = {(LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",)}
+    screen(Store(tmp_path), LENS, replace(SCENE, table=True), CAST, Fake(FLAGGED_ONE))
     ask = Fake()
 
     assert screen(Store(tmp_path), LENS, SCENE, CAST, ask) == expected
