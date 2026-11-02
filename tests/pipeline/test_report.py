@@ -40,7 +40,7 @@ SENTINELS = ("SENTINEL-NAMESPACE", "SENTINEL-KEY", "SENTINEL-TEXT", "Made-up lin
 SUMMARY = (
     r"(chapter [0-9]+|unattributed|total): [0-9]+ changed, [0-9]+ kept for plot, [0-9]+ gate failed, [0-9]+ unfinished, [0-9]+ untouched"
 )
-DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
+DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
 LINE = re.compile(f"{SUMMARY}|{DETAIL}|{ARCS_LINE}|{RECALL_LINE}")
@@ -59,6 +59,7 @@ def _record(**fields: object) -> dict[str, object]:
         "reasons": [],
         "outcome": "untouched",
         "gate": None,
+        "keep_reason": None,
         "writer": "made-up-writer",
         "text": "SENTINEL-TEXT Made-up line text. Not game text.",
     }
@@ -211,6 +212,81 @@ def test_character_numbers_do_not_move_when_an_outcome_changes(repo: Path, capsy
     after = capsys.readouterr().out.splitlines()
     assert "  character 1: 1" in after
     assert "  character 2: 1" in after
+
+
+KEPT = (
+    _record(chapter=1, speaker=SPEAKER_TWO, outcome="untouched", keep_reason="plot"),
+    _record(chapter=1, speaker=SPEAKER_TEN, outcome="untouched", keep_reason="earned"),
+    _record(chapter=1, speaker=None, outcome="untouched", keep_reason="none"),
+    _record(chapter=2, speaker=None, outcome="untouched", keep_reason="earned"),
+)
+
+EXPECTED_KEPT = """\
+chapter 1: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 3 untouched
+  kept earned: 1
+  kept plot: 1
+  kept none: 1
+chapter 2: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched
+  kept earned: 1
+total: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 4 untouched
+  kept earned: 2
+  kept plot: 1
+  kept none: 1
+arcs: 3, 2 with changes
+recall made-up-first-id: 4 disagreements, 1 confirmed
+recall made-up-second-id: 0 disagreements, 0 confirmed
+"""
+
+
+def test_kept_lines_print_per_block_and_total_in_enum_order_and_only_when_nonzero(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, _lines(*KEPT))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    assert capsys.readouterr().out == EXPECTED_KEPT
+
+
+def test_record_without_keep_reason_is_accepted_and_counts_no_kept_line(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    record = {k: v for k, v in _record(outcome="untouched").items() if k != "keep_reason"}
+    _write(repo, _lines(record))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    assert not any(line.startswith("  kept ") for line in capsys.readouterr().out.splitlines())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "no-hit",
+        "earned",
+        "no-invented-motive",
+        "gender-rule-narrow",
+        "own-wish",
+        "oaths-outside-romance",
+        "protection",
+        "plot",
+        "none",
+    ],
+)
+def test_keep_reason_accepts_null_and_every_listed_reason(repo: Path, value: str | None) -> None:
+    _write(repo, _lines(_record(outcome="untouched", keep_reason=value)))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+
+
+@pytest.mark.parametrize("value", ["made-up-reason", "Plot", 3])
+def test_keep_reason_outside_the_listed_reasons_fails_naming_the_field(repo: Path, value: object) -> None:
+    _write(repo, _lines(_record(outcome="untouched", keep_reason=value)))
+    _write_arcs(repo)
+    _write_recall(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert "keep_reason" in message
+    assert "SENTINEL" not in message
 
 
 def test_missing_outcomes_file_fails_naming_the_file(repo: Path) -> None:

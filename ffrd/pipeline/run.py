@@ -46,6 +46,7 @@ class Outcome:
     outcome: OutcomeKind
     gate: str | None
     writer: WriterName | None
+    keep_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ def _outcome_line(o: Outcome) -> str:
         "outcome": o.outcome,
         "gate": o.gate,
         "writer": o.writer,
+        "keep_reason": o.keep_reason,
     }
     return json.dumps(record, ensure_ascii=False) + "\n"
 
@@ -230,9 +232,14 @@ def _first_lines(scenes: Sequence[Scene]) -> dict[tuple[str, str], SceneLine]:
 
 
 def _outcome(
-    line: SceneLine, reasons: tuple[str, ...], kind: OutcomeKind, gate: str | None = None, writer: WriterName | None = None
+    line: SceneLine,
+    reasons: tuple[str, ...],
+    kind: OutcomeKind,
+    gate: str | None = None,
+    writer: WriterName | None = None,
+    keep_reason: str | None = None,
 ) -> Outcome:
-    return Outcome(line.namespace, line.key, line.chapter, line.speaker, reasons, kind, gate, writer)
+    return Outcome(line.namespace, line.key, line.chapter, line.speaker, reasons, kind, gate, writer, keep_reason)
 
 
 def _every_line(scene: Scene, kind: OutcomeKind) -> list[Outcome]:
@@ -335,7 +342,7 @@ def _intend(
     if not isinstance(intended, stages.Intent):
         return _outcome(line, reasons, "unfinished")
     if intended.keep:
-        return _outcome(line, reasons, "untouched")
+        return _outcome(line, reasons, "untouched", keep_reason=intended.keep_reason)
     return stages.Target(line, intended.text, callbacks, context)
 
 
@@ -528,6 +535,7 @@ def _record(outcome: Outcome) -> Record:
         reasons=frozenset(outcome.reasons),
         outcome=outcome.outcome,
         gate=outcome.gate,
+        keep_reason=outcome.keep_reason,
     )
 
 

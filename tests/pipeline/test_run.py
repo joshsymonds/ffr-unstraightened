@@ -35,7 +35,7 @@ LENS = "made-up-lens"
 RUN = "made-up-run-id"
 TRIAGE_ORDER = ["made-up-first-id", "made-up-second-id"]
 TRIAGE = frozenset(TRIAGE_ORDER)
-OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer"}
+OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason"}
 FIELD_ORDER = ["vanilla", "text", "lens", "reason", "writer", "verdict", "run"]
 
 # Made-up lines. Not game text.
@@ -120,6 +120,15 @@ def test_each_outcome_object_has_exactly_the_dl31_keys_and_no_text(tmp_path: Pat
         assert obj["reasons"] == list(outcome.reasons)
         assert obj["writer"] == outcome.writer
         assert obj["gate"] == outcome.gate
+
+
+def test_outcome_records_carry_keep_reason_only_for_a_line_the_intent_kept(tmp_path: Path) -> None:
+    path = tmp_path / "work" / LENS / "outcomes.jsonl"
+    kept = Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "untouched", None, None, keep_reason="earned")
+    write_outcomes(path, [kept, OUTCOMES[0]])
+    kept_record, other_record = (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+    assert kept_record["keep_reason"] == "earned"
+    assert other_record["keep_reason"] is None
 
 
 def test_outcomes_are_written_in_the_given_order_and_no_temp_file_remains(tmp_path: Path) -> None:
@@ -431,8 +440,8 @@ class FakeClaude:
         self.rescreen_flags: dict[tuple[str, str], list[str]] = {}
         self.rescreen_failures: dict[str, Unfinished | Rejected] = {}
         self.intents: dict[tuple[str, str], str | Unfinished] = {}
-        # Lines whose intent answer says keep, so the line stays unchanged. Not game text.
-        self.keeps: set[tuple[str, str]] = set()
+        # Lines whose intent answer keeps them unchanged, with the keep reason it names. Not game text.
+        self.keeps: dict[tuple[str, str], str] = {}
         self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         self.judgments: dict[str, dict[str, bool]] = {}
         self.judge_failures: dict[str, Unfinished | Rejected] = {}
@@ -464,7 +473,9 @@ class FakeClaude:
         if schema is INTENT_SCHEMA:
             ref = _target(parts)
             answer = self.intents.get(ref, "Made-up intent. Not game text.")
-            return answer if isinstance(answer, Unfinished) else {"intent": answer, "keep": ref in self.keeps}
+            if isinstance(answer, Unfinished):
+                return answer
+            return {"intent": answer, "keep": ref in self.keeps, "keep_reason": self.keeps.get(ref, "none")}
         if schema is DRAFT_SCHEMA:
             refs = _draft_refs(parts)
             for ref in refs:
@@ -775,9 +786,9 @@ def test_intent_failure_leaves_that_line_unfinished_and_drafts_nothing(tmp_path:
 
 def test_a_kept_line_is_untouched_with_its_reasons_and_never_drafted_or_judged(tmp_path: Path) -> None:
     claude = _claude()
-    claude.keeps = {(NS_A, "1")}
+    claude.keeps = {(NS_A, "1"): "earned"}
     outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
-    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "untouched", None, None)
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "untouched", None, None, keep_reason="earned")
     assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
     assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
     judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
@@ -1967,6 +1978,14 @@ def test_scenes_run_chapter_one_first_then_ascending_chapters_and_chapterless_la
 def test_provisional_file_holds_chapter_one_counts_in_report_format(tmp_path: Path) -> None:
     _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
     assert _c01_path(tmp_path).read_text(encoding="utf-8") == EXPECTED_PROVISIONAL
+
+
+def test_provisional_file_counts_an_intent_kept_line_under_its_keep_reason(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.keeps = {(NS_A, "1"): "earned"}
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    # The kept line is in chapter 1, so its keep reason shows in the chapter block and in the total.
+    assert _c01_path(tmp_path).read_text(encoding="utf-8").splitlines().count("  kept earned: 1") == 2
 
 
 def test_provisional_file_is_written_while_a_later_chapter_scene_still_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
