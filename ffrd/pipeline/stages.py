@@ -525,6 +525,10 @@ DRAFT_NOTE_INSTRUCTIONS = (
     "the line's point, its plot facts, its speaker and the speaker's voice."
 )
 
+SPEAKER_DRAFT_INSTRUCTIONS = (
+    "The targets are one speaker's lines across these scenes. Write them together so the speaker stays consistent from scene to scene."
+)
+
 DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -595,6 +599,45 @@ def draft(
         inputs["note"] = note
     try:
         entries = store.run("draft", inputs, lens.stage_text("intent"), call).value
+    except _Unanswered as unanswered:
+        return unanswered.failure
+    return {(entry["namespace"], entry["key"]): tuple(entry["drafts"]) for entry in entries}
+
+
+def draft_speaker(
+    store: Store,
+    lens: Lens,
+    groups: Sequence[tuple[Scene, Sequence[Target]]],
+    ask: Ask,
+) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+    expected = sorted((target.line.namespace, target.line.key) for _scene, targets in groups for target in targets)
+    parts = [
+        DRAFT_INSTRUCTIONS,
+        SPEAKER_DRAFT_INSTRUCTIONS,
+        f"Intent rule:\n{lens.stage_text('intent')}",
+        "Scenes:\n"
+        + _json(
+            [
+                {"scene": scene.key, "lines": _line_dicts(scene.lines), "targets": [_target_dict(target) for target in targets]}
+                for scene, targets in groups
+            ]
+        ),
+    ]
+
+    def call() -> list[dict[str, Any]]:
+        answer = ask(claude.OPUS, parts, DRAFT_SCHEMA)
+        if isinstance(answer, Unfinished | Rejected):
+            raise _Unanswered(answer)
+        entries = answer["drafts"]
+        if sorted((entry["namespace"], entry["key"]) for entry in entries) != expected:
+            raise _Unanswered(Rejected("draft entries do not name each target of the speaker's scenes once"))
+        return entries
+
+    inputs = {
+        "scenes": [{**_inputs(scene), "targets": [_target_dict(target) for target in targets]} for scene, targets in groups],
+    }
+    try:
+        entries = store.run("speaker_draft", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["drafts"]) for entry in entries}
