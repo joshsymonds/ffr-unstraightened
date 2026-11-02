@@ -234,9 +234,19 @@ def _pair(line: SceneLine) -> tuple[str, str]:
     return (line.namespace, line.key)
 
 
-def _entry(ref: tuple[str, str], required: bool = True, intent: str = PLAN_INTENT) -> dict[str, Any]:
+_ENGLISH = {_pair(line): line.english for line in SCENE.lines}
+
+
+def _entry(
+    ref: tuple[str, str],
+    required: bool = True,
+    intent: str = PLAN_INTENT,
+    carrier: str | None = None,
+) -> dict[str, Any]:
     namespace, key = ref
-    return {"namespace": namespace, "key": key, "intent": intent, "required": required}
+    if carrier is None:
+        carrier = _ENGLISH.get(ref, "")
+    return {"namespace": namespace, "key": key, "intent": intent, "carrier": carrier, "required": required}
 
 
 def _planned(*entries: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +310,30 @@ def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
     assert plan_id("other-made-up-scene", refs) != expected
 
 
+def test_plan_schema_requires_a_string_carrier_per_planned_line() -> None:
+    item = PLAN_SCHEMA["properties"]["lines"]["items"]
+
+    assert item["properties"]["carrier"] == {"type": "string"}
+    assert "carrier" in item["required"]
+
+
+def test_valid_carrier_yields_the_same_plan_and_no_carrier_is_stored(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    carrier = "Made-up narration"
+    answer = _planned(_entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text.", carrier=carrier))
+
+    result = plan(store, LENS, SCENE, CAST, HITS, (), (), Fake(answer))
+
+    assert result == Plan(id=plan_id(SCENE.key, [_pair(LINE_TWO)]), keep_reason=None, lines=(PLAN_LINE_TWO,))
+    keys = store.finished()
+    assert len(keys) == 1
+    saved = store.read(keys[0])
+    assert saved is not None
+    stored = _dump(saved.value)
+    assert "carrier" not in stored
+    assert carrier not in stored
+
+
 @pytest.mark.parametrize(
     ("answer", "final", "excluded", "detail"),
     [
@@ -357,6 +391,24 @@ def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
             (),
             "planned line ST_C01_001_01/1 is planned twice",
         ),
+        (
+            _planned(_entry(_pair(LINE_ONE), carrier="")),
+            (),
+            (),
+            "planned line ST_C01_001_01/1 has an empty carrier",
+        ),
+        (
+            _planned(_entry(_pair(LINE_TWO), carrier=" \t ")),
+            (),
+            (),
+            "planned line ST_C01_001_01/2 has an empty carrier",
+        ),
+        (
+            _planned(_entry(_pair(LINE_THREE), carrier="Made-up carrier absent from its line. Not game text.")),
+            (),
+            (),
+            "planned line ST_C01_001_01/3 carrier is not in its line",
+        ),
     ],
     ids=[
         "kept-without-reason",
@@ -368,6 +420,9 @@ def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
         "line-pass",
         "excluded",
         "twice",
+        "carrier-empty",
+        "carrier-whitespace",
+        "carrier-not-in-line",
     ],
 )
 def test_plan_rejects_invalid_answer_and_stores_nothing(
