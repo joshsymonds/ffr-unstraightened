@@ -156,13 +156,20 @@ You judge one rewrite of a flagged line against its vanilla line. A change that 
 
 [scene]
 criteria = [
-    "[s1-manhood-performance] Flag s1-manhood-performance for the scene when a character polices or mocks another character's manhood: calling a man unmanly, saying what real men do or do not do, telling a man to be a man, or ribbing a man for acting unmanly. The policing must recur in the scene (see recurring). Flag the scene for the pattern, not each line.",
-    "[s2-conquest-fixation] Flag s2-conquest-fixation for the scene when its banter is dominated by getting with women: women treated as prizes, targets or scores, and the ladies as the default topic of talk. Being dominated means getting with women is the main subject, not one topic among others (see presence-not-hit).",
-    "[s3-bechdel-fail] Flag s3-bechdel-fail for the scene when two or more women talk with each other only about a man: his desirability, the attention he gets, the approval he earns, or whom he favors. If the women talk about anything else, the pattern is not present. Talk about a man as a plot actor is exempt (see plot-actor-exempt).",
+    "[s1-manhood-performance] Flag s1-manhood-performance for the scene when a character ranks, polices or puts down a man as insufficiently manly: telling a man to be a man, saying what \"real men\" do or do not do, or ribbing a man as unmanly or girlish. The policing must recur in the scene (see recurring). Flag the scene for the pattern, not each line.",
+    "[s2-conquest-fixation] Flag s2-conquest-fixation for the scene when its banter is dominated by getting with women: women treated as prizes or scores, and the ladies as a man's default topic of talk. Being dominated means getting with women is the main subject, not one topic among others (see presence-not-hit). The named hits conquest-coaching, minor-flirt and slapstick-rejection also flag the scene without that.",
+    "[s3-bechdel-fail] Flag s3-bechdel-fail for the scene when two or more women talk with each other mainly about a man: his desirability, the attention he gets, the approval he earns, or whom he favors. If the women talk mainly about anything else, the pattern is not present. Judge the scene as a whole (see scene-not-line). Talk about a man as a plot actor is exempt (see plot-actor-exempt), and so is talk that advances her own goal (see own-goal-exempt).",
     "[recurring] s1-manhood-performance needs the policing to recur within the scene, not to appear in one line. A single line that polices a man's manhood does not flag s1-manhood-performance. Flag the pattern only when the scene holds more than one such line.",
     "[own-stance] A speaker's own stance about their own manhood is protected when the bible records it as a trait or an arc. A character saying what being a man means to them is not policing another character. Do not flag s1-manhood-performance for that stance when the bible records it as a trait or an arc.",
-    "[presence-not-hit] For s2-conquest-fixation, women being present or mentioned is not a hit. A scene with women in it, or a line that names a woman, does not flag the pattern. Flag s2-conquest-fixation only when getting with women is the scene's main subject.",
+    "[male-warmth] Male friendship, affection, camaraderie and brotherhood are exempt from s1-manhood-performance. Men who tease each other warmly, show affection or stand by each other are not policing manhood, and that warmth is never stripped from the scene. Only ranking or policing a man as insufficiently manly flags the pattern.",
+    "[presence-not-hit] For s2-conquest-fixation, women being present or mentioned is not a hit. A scene with women in it, or a line that names a woman, does not flag the pattern. Flag s2-conquest-fixation when getting with women is the scene's main subject, or when conquest-coaching, minor-flirt or slapstick-rejection applies.",
+    "[trait-density] For s2-conquest-fixation, crush hints and flirting that the bible records as a trait are characterization, not a hit, unless they take over a conversation that has another purpose. Flag the scene only when they take over that conversation. Then the fix keeps the trait and cuts its density.",
+    "[conquest-coaching] For s2-conquest-fixation, a man coaching another man on how to get women is a hit, even when the coaching takes up only part of the scene.",
+    "[minor-flirt] For s2-conquest-fixation, flirting aimed at a minor or a child-looking character is a hit even when not recurring. One such line flags the pattern.",
+    "[slapstick-rejection] For s2-conquest-fixation, a scene where a woman's only part is the slapstick rejection of a flirt is a hit. The fix gives her a line of her own, drawn from the scene's existing content (see own-line).",
+    "[scene-not-line] Judge each pattern by the scene as a whole, never by a single line, except where a criterion names a single line as a hit (see minor-flirt). Flag the scene for the pattern, not the line that shows it.",
     "[plot-actor-exempt] For s3-bechdel-fail, talk about a man as a plot actor is exempt. Women discussing what a man did, chose, must do or is doing in the story is not the pattern. Flag s3-bechdel-fail only when the talk is about his desirability, attention, approval or whom he favors.",
+    "[own-goal-exempt] For s3-bechdel-fail, talk that advances her own goal is exempt. This is the Mako Mori carve-out: a woman who talks about a man in order to pursue her own goal is not the pattern. Flag s3-bechdel-fail only when the talk stays on his desirability, attention, approval or whom he favors.",
 ]
 plan = """
 [plan-budget] Plan at most 4 changed lines per conversation. Count each line you plan to change, across the whole conversation, and stop planning once 4 lines are planned. A plan with 5 or more changed lines is out of budget and fails.
@@ -173,7 +180,13 @@ plan = """
 
 [keep-facts] Keep plot facts, relationships and traits. A planned change must not alter what happens, who does what, how two characters stand toward each other, or a character's trait. The plan changes the framing the pattern names, and nothing else.
 
-[no-invented-topic] An s3-bechdel-fail fix never invents a topic the scene does not offer. When the women talk only about a man, the fix may turn the talk toward a topic already present in the scene. It must not introduce a topic the scene does not offer.
+[male-warmth] A planned change never strips warmth between men. Lines that show male friendship, affection, camaraderie or brotherhood stay as written. The plan works only on the ranking or policing of a man as insufficiently manly.
+
+[trait-density] Where the bible records flirting or a crush as a trait, the plan keeps the trait and cuts its density. It softens or removes the flirt lines that take over a conversation with another purpose, and it leaves the trait visible elsewhere in the scene. The plan never removes the trait itself.
+
+[own-line] An s2-conquest-fixation slapstick-rejection fix gives the woman a line of her own. The line is drawn from the scene's existing content and invents no topic (see no-invented-topic).
+
+[no-invented-topic] Every fix, for every pattern, never invents a topic the scene does not offer. For s3-bechdel-fail, when the women talk mainly about a man, the fix may turn the talk toward a topic already present in the scene. It must not introduce a topic the scene does not offer. The same holds for the line of her own in an own-line fix.
 
 [named-keep] When no plan within the budget reduces the flagged pattern, keep the scene unchanged and name one reason from exactly these five: protection, plot, trait, earned-arc, not-recurring. Name protection when a protection in the lens applies to the fix. Name plot when the fix needs a plot change. Name trait when a character trait holds the pattern. Name earned-arc when the arc beats earn the stance. Name not-recurring when the pattern does not recur in the scene.
 """
@@ -182,17 +195,19 @@ rubric = """
 
 [keep-flirt-beat] For an s2-conquest-fixation plan, keep at least one flirt beat where the bible records flirting as a trait. A flirt beat is a line in which a character the bible records as flirting flirts. Reject an s2-conquest-fixation plan that leaves no flirt beat for such a character in the scene.
 
+[no-wiser-women] Reject a plan that fills removed banter by turning the women into eye-rolling straight men for the men, the unbothered foils who sit out the men's jokes. This is the Women Are Wiser double standard: the women are made the sensible ones while the men keep the jokes. Reject that move whatever pattern the plan reduces.
+
 [protections-hold] Every line-pass protection and exclusion still holds under the plan. Check protect-love-and-couples, protect-mutual-support, protect-plot, protect-traits, protect-operatic-stakes, protect-earned-declarations, protect-affectionate-teasing, exclude-queer-additions and exclude-clumsy-lines. Reject a plan that breaks any one of them, whatever pattern it reduces.
 """
 
 [[scene.patterns]]
 id = "s1-manhood-performance"
-question = "A character in this scene polices or mocks another character's manhood, such as calling a man unmanly or telling him to be a man, and this recurs across the scene."
+question = "A character in this scene ranks, polices or puts down a man as insufficiently manly, such as telling him to be a man or ribbing him as unmanly, and this recurs across the scene."
 
 [[scene.patterns]]
 id = "s2-conquest-fixation"
-question = "The banter in this scene is dominated by getting with women, with women treated as prizes or scores and the ladies as the default topic of talk."
+question = "The banter in this scene is dominated by getting with women, with women treated as prizes or scores and the ladies as a man's default topic of talk; or a man in this scene coaches another man on getting women, a character flirts with a minor or a child-looking character, or a woman's only part is the slapstick rejection of a flirt."
 
 [[scene.patterns]]
 id = "s3-bechdel-fail"
-question = "Two or more women in this scene talk with each other only about a man's desirability, the attention he gets, the approval he earns, or whom he favors."
+question = "Two or more women in this scene talk with each other mainly about a man's desirability, the attention he gets, the approval he earns, or whom he favors."

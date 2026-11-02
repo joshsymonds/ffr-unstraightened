@@ -3,13 +3,16 @@
 import argparse
 import json
 import re
+import statistics
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from ffrd import scenes as scene_file
 from ffrd.game import Fail, natural, repo_root
 from ffrd.pipeline.lens import load_lens
+from ffrd.pipeline.scene_record import SCENE_KEEP_REASONS, SCENES, SceneRecord, read_scenes
 from ffrd.pipeline.stages import KEEP_REASONS
 from ffrd.pipeline.store import work_dir
 
@@ -228,7 +231,43 @@ def _recall(path: Path, triage_ids: list[str]) -> dict[str, tuple[int, int]]:
     return recall
 
 
-def _block(label: str, records: list[Record], numbers: dict[str, int], triage_ids: list[str]) -> list[str]:
+def _numbered(speakers: Counter[str | None], numbers: dict[str, int]) -> list[tuple[int, int]]:
+    return sorted((numbers[s], n) for s, n in speakers.items() if s is not None)
+
+
+def _scene_lines(records: list[Record], scenes: list[SceneRecord], numbers: dict[str, int], scene_ids: Sequence[str]) -> list[str]:
+    planned = [s for s in scenes if s.plan is not None]
+    kept = Counter(s.keep_reason for s in scenes if s.keep_reason is not None)
+    gates: Counter[str] = Counter()
+    for scene in scenes:
+        gates.update(scene.gate_failures)
+    changed = [s.changed for s in planned]
+    median = statistics.median(changed) if changed else 0
+    median_text = str(int(median)) if float(median).is_integer() else f"{median:.1f}"
+
+    lines = [f"  scene eligible: {sum(s.eligible for s in scenes)}"]
+    lines += [f"  scene flagged {pattern}: {sum(pattern in s.patterns for s in scenes)}" for pattern in scene_ids]
+    lines.append(f"  scene plans: {len(planned)}")
+    lines += [f"  scene kept {reason}: {kept[reason]}" for reason in SCENE_KEEP_REASONS if kept[reason]]
+    lines.append(f"  scene planned lines: {sum(s.planned for s in scenes)} (required {sum(s.required for s in scenes)})")
+    lines.append(f"  scene changed lines: {sum(s.changed for s in scenes)}")
+    lines.append(f"  scene replanned: {sum(s.replanned for s in scenes)}")
+    lines.append(f"  scene reverted lines: {sum(s.reverted for s in scenes)}")
+    lines += [f"  scene gate {gate}: {gates[gate]}" for gate in sorted(gates) if gates[gate]]
+    lines.append(f"  scene changed per scene: max {max(changed, default=0)}, median {median_text}")
+    speakers = Counter(r.speaker for r in records if r.plan is not None and r.outcome == "changed")
+    lines += [f"  scene character {number}: {n}" for number, n in _numbered(speakers, numbers)]
+    return lines
+
+
+def _block(
+    label: str,
+    records: list[Record],
+    numbers: dict[str, int],
+    triage_ids: list[str],
+    scenes: list[SceneRecord] | None,
+    scene_ids: Sequence[str],
+) -> list[str]:
     counts = Counter(r.outcome for r in records)
     summary = ", ".join(f"{counts[outcome]} {text}" for outcome, text in OUTCOME_LABELS.items())
     lines = [f"{label}: {summary}"]
@@ -241,28 +280,44 @@ def _block(label: str, records: list[Record], numbers: dict[str, int], triage_id
     lines += [f"  kept {reason}: {kept[reason]}" for reason in KEEP_REASONS if kept[reason]]
 
     speakers = Counter(r.speaker for r in changed)
-    characters = sorted((numbers[s], n) for s, n in speakers.items() if s is not None)
-    lines += [f"  character {number}: {n}" for number, n in characters]
+    lines += [f"  character {number}: {n}" for number, n in _numbered(speakers, numbers)]
     if speakers[None]:
         lines.append(f"  no speaker: {speakers[None]}")
 
     gates = Counter(r.gate for r in records if r.outcome == "gate_failed" and r.gate is not None)
     lines += [f"  gate {gate}: {gates[gate]}" for gate in sorted(gates)]
+    if scenes is not None:
+        lines += _scene_lines(records, scenes, numbers, scene_ids)
     return lines
 
 
-def render(records: list[Record], triage_ids: list[str]) -> list[str]:
+def render(
+    records: list[Record],
+    triage_ids: list[str],
+    *,
+    scenes: Sequence[SceneRecord] | None = None,
+    scene_ids: Sequence[str] = (),
+) -> list[str]:
+    found: list[SceneRecord] = [] if scenes is None else list(scenes)
     speakers = sorted({r.speaker for r in records if r.speaker is not None}, key=lambda s: (natural(s), s))
     numbers = {speaker: number for number, speaker in enumerate(speakers, 1)}
-    chapters = sorted({r.chapter for r in records if r.chapter is not None})
+    chapters = sorted({r.chapter for r in records if r.chapter is not None} | {s.chapter for s in found if s.chapter is not None})
+
+    def block(label: str, outcomes: list[Record], chapter_scenes: list[SceneRecord]) -> list[str]:
+        return _block(label, outcomes, numbers, triage_ids, None if scenes is None else chapter_scenes, scene_ids)
 
     lines: list[str] = []
     for chapter in chapters:
-        lines += _block(f"chapter {chapter}", [r for r in records if r.chapter == chapter], numbers, triage_ids)
+        lines += block(
+            f"chapter {chapter}",
+            [r for r in records if r.chapter == chapter],
+            [s for s in found if s.chapter == chapter],
+        )
     unattributed = [r for r in records if r.chapter is None]
-    if unattributed:
-        lines += _block("unattributed", unattributed, numbers, triage_ids)
-    lines += _block("total", records, numbers, triage_ids)
+    unattributed_scenes = [s for s in found if s.chapter is None]
+    if unattributed or unattributed_scenes:
+        lines += block("unattributed", unattributed, unattributed_scenes)
+    lines += block("total", records, found)
     return lines
 
 
@@ -274,6 +329,13 @@ def _scene_line(table: list[scene_file.SceneLine], keys: set[Key]) -> str:
     return f"scenes: {len(covered)} of {len(scenes)} from the scene table, {len(family)} outside it"
 
 
+def _check_scene_patterns(path: Path, scenes: list[SceneRecord], scene_ids: list[str]) -> None:
+    # read_scenes keeps one record per line, so a record's index plus one is its line number.
+    for lineno, scene in enumerate(scenes, 1):
+        if any(pattern not in scene_ids for pattern in scene.patterns):
+            raise Fail(f"{path}:{lineno}: field patterns has an id that is not a scene pattern id of the lens")
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     lens_dir = work_dir(args.lens)
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
@@ -283,8 +345,12 @@ def cmd_report(args: argparse.Namespace) -> None:
     keys = _keys(lens_dir / OUTCOMES)
     arcs, with_changes = _arcs(lens_dir / ARCS)
     recall = _recall(lens_dir / RECALL, triage_ids)
+    scenes_path = lens_dir / SCENES
+    scenes = read_scenes(scenes_path) if scenes_path.exists() else None
+    if scenes is not None:
+        _check_scene_patterns(scenes_path, scenes, scene_ids)
     table = scene_file.load()
-    for line in render(records, triage_ids):
+    for line in render(records, triage_ids, scenes=scenes, scene_ids=scene_ids):
         print(line)
     print(_scene_line(table, keys))
     print(f"arcs: {arcs}, {with_changes} with changes")
