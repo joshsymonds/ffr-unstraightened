@@ -5,7 +5,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ffrd.game import Fail
+from ffrd.game import Fail, vanilla_hash
 from ffrd.pipeline import claude
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.coherence import check
@@ -148,6 +148,14 @@ class PlannedLine:
     key: str
     intent: str
     required: bool
+    quote_hash: str
+    quote_length: int
+
+
+def keeps_carrier(line: PlannedLine, text: str) -> bool:
+    folded = text.casefold()
+    length = line.quote_length
+    return any(vanilla_hash(folded[start : start + length]) == line.quote_hash for start in range(len(folded) - length + 1))
 
 
 @dataclass(frozen=True)
@@ -260,7 +268,17 @@ def _plan_answer(
         if ref in seen:
             return Rejected(f"planned line {namespace}/{key} is planned twice")
         seen.add(ref)
-        planned.append(PlannedLine(namespace=namespace, key=key, intent=entry["intent"], required=entry["required"]))
+        quote = carrier.casefold()
+        planned.append(
+            PlannedLine(
+                namespace=namespace,
+                key=key,
+                intent=entry["intent"],
+                required=entry["required"],
+                quote_hash=vanilla_hash(quote),
+                quote_length=len(quote),
+            )
+        )
     return Plan(id=plan_id(scene.key, seen), keep_reason=None, lines=tuple(planned))
 
 
