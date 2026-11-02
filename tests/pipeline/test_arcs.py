@@ -1,8 +1,9 @@
 import copy
 import json
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,9 @@ from ffrd.pipeline import claude
 from ffrd.pipeline.arcs import (
     INSTRUCTIONS,
     RECHECK_INSTRUCTIONS,
+    SCENE_INSTRUCTIONS,
+    SCENE_RECHECK_INSTRUCTIONS,
+    SCENE_STAGE,
     SCHEMA,
     STAGE,
     Verdicts,
@@ -19,11 +23,12 @@ from ffrd.pipeline.arcs import (
     consolidate,
     context,
     judge,
+    judge_scene,
     lines,
     with_changes,
 )
 from ffrd.pipeline.claude import Rejected, Unfinished
-from ffrd.pipeline.lens import Lens, TriageQuestion
+from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.stages import Ask, Scene, SceneLine
 from ffrd.pipeline.store import Store
 
@@ -342,7 +347,8 @@ class Fake:
 
 
 def _arc_id(parts: Sequence[str]) -> str:
-    return json.loads(parts[2].removeprefix("Arc:\n"))["id"]
+    arc = next(part for part in parts if part.startswith("Arc:\n"))
+    return json.loads(arc.removeprefix("Arc:\n"))["id"]
 
 
 class ArcFake:
@@ -377,6 +383,21 @@ def _concurrency(limit: int) -> Iterator[None]:
 
 def _judge(store: Store, ask: Ask, arcs: list[dict[str, Any]]) -> Verdicts:
     return judge(store, LENS, arcs, SCENES, REWRITES, ask)
+
+
+# Made-up scene section and scene-pass refs. Not game text.
+SCENE_SECTION = SceneSection(
+    patterns=(ScenePattern("made-up-pattern", "Made-up pattern question. Not game text."),),
+    criteria=("Made-up scene criterion. Not game text.",),
+    plan="Made-up scene plan. Not game text.",
+    rubric="Made-up scene rubric. Not game text.",
+)
+SCENE_LENS = replace(LENS, scene=SCENE_SECTION)
+SCENE_REFS = frozenset({_ref(LINE_ASH_ONE)})
+
+
+def _judge_scene(store: Store, ask: Ask, arcs: list[dict[str, Any]], scene_refs: Collection[tuple[str, str]] = SCENE_REFS) -> Verdicts:
+    return judge_scene(store, SCENE_LENS, arcs, SCENES, REWRITES, scene_refs, ask)
 
 
 def test_stage_name_is_arc_judge() -> None:
@@ -563,3 +584,156 @@ def test_fresh_store_on_same_root_returns_stored_verdicts_without_asking(tmp_pat
 
 def test_with_changes_counts_arcs_whose_lines_hold_a_rewritten_key() -> None:
     assert with_changes([ARC, PLAIN_ARC, CORR_ARC, ARC_TWO], SCENES, REWRITES) == 2
+
+
+def test_scene_stage_name_is_scene_arc() -> None:
+    assert SCENE_STAGE == "scene_arc"
+
+
+def test_scene_arc_without_a_scene_pass_line_makes_no_call(tmp_path: Path) -> None:
+    ask = Fake()
+
+    assert _judge_scene(Store(tmp_path), ask, [PLAIN_ARC, ARC_BRIN]) == Verdicts(frozenset(), frozenset())
+    assert ask.calls == []
+
+
+def test_scene_first_pass_prompt_carries_both_rubrics_arc_lines_and_scene_pass_lines(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    assert _judge_scene(Store(tmp_path), ask, [ARC]) == Verdicts(frozenset(), frozenset())
+
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema is SCHEMA
+    assert parts == [
+        SCENE_INSTRUCTIONS,
+        "Judge rubric:\n" + SCENE_LENS.stage_text("judge"),
+        "Scene rubric:\n" + SCENE_LENS.stage_text("scene"),
+        "Arc:\n" + _j(ARC),
+        "Arc lines:\n" + _j(_line_dicts([LINE_ASH_ONE, LINE_ASH_BEAT, LINE_ASH_TWO, LINE_NARRATION], REWRITES)),
+        "Scene-pass lines:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+    ]
+
+
+def test_scene_recheck_prompt_ends_with_proposed_reverts(tmp_path: Path) -> None:
+    ask = Fake(_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE))
+
+    _judge_scene(Store(tmp_path), ask, [ARC])
+
+    model, parts, schema = ask.calls[1]
+    assert model == claude.OPUS
+    assert schema is SCHEMA
+    assert parts == [
+        SCENE_RECHECK_INSTRUCTIONS,
+        "Judge rubric:\n" + SCENE_LENS.stage_text("judge"),
+        "Scene rubric:\n" + SCENE_LENS.stage_text("scene"),
+        "Arc:\n" + _j(ARC),
+        "Arc lines:\n" + _j(_line_dicts([LINE_ASH_ONE, LINE_ASH_BEAT, LINE_ASH_TWO, LINE_NARRATION], REWRITES)),
+        "Scene-pass lines:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+        "Proposed reverts:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+    ]
+
+
+def test_scene_pass_line_named_by_both_passes_reverts(tmp_path: Path) -> None:
+    ask = Fake(_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE))
+
+    assert _judge_scene(Store(tmp_path), ask, [ARC]) == Verdicts(frozenset({_ref(LINE_ASH_ONE)}), frozenset())
+    assert len(ask.calls) == 2
+
+
+def test_scene_pass_line_named_by_one_pass_only_does_not_revert(tmp_path: Path) -> None:
+    ask = Fake(_answer(False, LINE_ASH_ONE), _answer(False))
+
+    assert _judge_scene(Store(tmp_path), ask, [ARC]) == Verdicts(frozenset(), frozenset())
+    assert len(ask.calls) == 2
+
+
+def test_scene_pass_answer_naming_a_line_pass_line_is_rejected_and_leaves_it_out(tmp_path: Path) -> None:
+    ask = Fake(_answer(False, LINE_ASH_ONE, LINE_ASH_TWO))
+
+    assert _judge_scene(Store(tmp_path), ask, [ARC]) == Verdicts(frozenset(), frozenset({_ref(LINE_ASH_ONE)}))
+    assert len(ask.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        (Unfinished("Made-up unfinished detail. Not game text."),),
+        (Rejected("Made-up rejected detail. Not game text."),),
+        ({"holds": False, "revert": [UNKNOWN_REF]},),
+        (_answer(False, LINE_ASH_TWO),),
+        (_answer(False, LINE_ASH_ONE), Unfinished("Made-up unfinished detail. Not game text.")),
+        (_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_TWO)),
+    ],
+    ids=["first-unfinished", "first-rejected", "first-unknown-ref", "first-line-pass-ref", "recheck-unfinished", "recheck-line-pass-ref"],
+)
+def test_failed_scene_pass_puts_only_scene_pass_lines_in_unfinished(tmp_path: Path, answers: tuple[Any, ...]) -> None:
+    ask = Fake(*answers)
+
+    assert _judge_scene(Store(tmp_path), ask, [ARC]) == Verdicts(frozenset(), frozenset({_ref(LINE_ASH_ONE)}))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_scene_arc_is_unfinished_alone_and_a_rerun_asks_only_that_arc(tmp_path: Path, failure: Unfinished | Rejected) -> None:
+    arcs = [ARC, ARC_BRIN]
+    scene_refs = {_ref(LINE_ASH_ONE), _ref(LINE_BRIN_ONE)}
+    ask = ArcFake({ARC["id"]: [failure], ARC_BRIN["id"]: [_answer(False, LINE_BRIN_ONE), _answer(False, LINE_BRIN_ONE)]})
+
+    with _concurrency(2):
+        assert _judge_scene(Store(tmp_path), ask, arcs, scene_refs) == Verdicts(
+            frozenset({_ref(LINE_BRIN_ONE)}), frozenset({_ref(LINE_ASH_ONE)})
+        )
+
+    rerun = ArcFake({ARC["id"]: [_answer(True)]})
+    with _concurrency(2):
+        assert _judge_scene(Store(tmp_path), rerun, arcs, scene_refs) == Verdicts(frozenset({_ref(LINE_BRIN_ONE)}), frozenset())
+    assert len(rerun.calls) == 1
+
+
+def test_scene_results_are_stored_under_scene_arc_and_reused_by_a_fresh_store(tmp_path: Path) -> None:
+    first = _judge_scene(Store(tmp_path), Fake(_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE)), [ARC])
+    store = Store(tmp_path)
+    keys = store.finished()
+    assert keys
+    stages = set()
+    for key in keys:
+        result = store.read(key)
+        assert result is not None
+        stages.add(result.stage)
+    assert stages == {SCENE_STAGE}
+
+    ask = Fake()
+    assert _judge_scene(Store(tmp_path), ask, [ARC]) == first
+    assert ask.calls == []
+
+
+def test_changed_scene_rubric_asks_again(tmp_path: Path) -> None:
+    _judge_scene(Store(tmp_path), Fake(_answer(True)), [ARC])
+    changed_section = replace(SCENE_SECTION, rubric="Made-up changed scene rubric. Not game text.")
+    changed = replace(SCENE_LENS, scene=changed_section)
+    ask = Fake(_answer(True))
+
+    assert judge_scene(Store(tmp_path), changed, [ARC], SCENES, REWRITES, SCENE_REFS, ask) == Verdicts(frozenset(), frozenset())
+    assert len(ask.calls) == 1
+
+
+def test_judge_saved_keys_are_the_same_with_or_without_a_scene_section(tmp_path: Path) -> None:
+    answers = (_answer(False, LINE_ASH_ONE), _answer(False, LINE_ASH_ONE))
+    plain = Store(tmp_path / "plain")
+    with_scene = Store(tmp_path / "with-scene")
+
+    judge(plain, LENS, [ARC], SCENES, REWRITES, Fake(*answers))
+    judge(with_scene, SCENE_LENS, [ARC], SCENES, REWRITES, Fake(*answers))
+
+    assert plain.finished()
+    assert with_scene.finished() == plain.finished()
+    stages = set()
+    for key in plain.finished():
+        result = plain.read(key)
+        assert result is not None
+        stages.add(result.stage)
+    assert stages == {STAGE}
