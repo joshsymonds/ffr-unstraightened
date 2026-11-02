@@ -466,6 +466,25 @@ def _arc_outcome(outcome: Outcome, verdicts: arcs.Verdicts) -> Outcome:
     return outcome
 
 
+def _unified(ctx: _Context, outcomes: Sequence[Outcome], changes: Sequence[Change]) -> tuple[list[Outcome], list[Change]]:
+    """Gives every changed line that shares one English text the text and writer of the earliest of them in story order. Each line keeps its own key, plan and outcome, and only the rewrite and writer are copied."""
+    position = {(outcome.namespace, outcome.key): index for index, outcome in enumerate(outcomes) if outcome.outcome == "changed"}
+    english = {(change.namespace, change.key): ctx.lines[(change.namespace, change.key)].english for change in changes}
+    earliest: dict[str, Change] = {}
+    for change in sorted(changes, key=lambda c: position[(c.namespace, c.key)]):
+        earliest.setdefault(english[(change.namespace, change.key)], change)
+    sources = {ref: earliest[text] for ref, text in english.items()}
+    unified_changes = [
+        replace(change, text=sources[(change.namespace, change.key)].text, writer=sources[(change.namespace, change.key)].writer)
+        for change in changes
+    ]
+    unified_outcomes = [
+        replace(outcome, writer=sources[(outcome.namespace, outcome.key)].writer) if outcome.outcome == "changed" else outcome
+        for outcome in outcomes
+    ]
+    return unified_outcomes, unified_changes
+
+
 def _arc_judged(
     ctx: _Context, scenes: Sequence[Scene], outcomes: list[Outcome], changes: list[Change], ask: Ask
 ) -> tuple[list[Outcome], list[Change]]:
@@ -873,6 +892,7 @@ def run(
         passes.append(scene_pass_record)
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
+    outcomes, changes = _unified(ctx, outcomes, changes)
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
