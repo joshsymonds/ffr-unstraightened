@@ -12,6 +12,7 @@ from pathlib import Path
 from ffrd import scenes as scene_file
 from ffrd.game import Fail, natural, repo_root
 from ffrd.pipeline.lens import load_lens
+from ffrd.pipeline.queering import SELECTIONS
 from ffrd.pipeline.scene_record import SCENE_KEEP_REASONS, SCENES, SceneRecord, read_scenes
 from ffrd.pipeline.stages import KEEP_REASONS
 from ffrd.pipeline.store import work_dir
@@ -28,6 +29,9 @@ OUTCOME_LABELS = {
     "untouched": "untouched",
 }
 GATE = re.compile(r"[a-z0-9]+([-_][a-z0-9]+)*")
+QUEERING_BUCKETS = ("queer", "trans", "untouched")
+QUEERING_REWRITES = ("queer", "trans", "redirect")
+FLIRT_BUCKETS = frozenset({"redirect", "not-redirected"})
 Key = tuple[str, str]  # (namespace, key)
 
 
@@ -41,6 +45,7 @@ class Record:
     keep_reason: str | None
     plan: str | None = None
     redo: bool = False
+    bucket: str | None = None
 
 
 def _require(obj: dict[str, object], name: str, where: str) -> object:
@@ -127,6 +132,17 @@ def _redo(obj: dict[str, object], where: str) -> bool:
     raise Fail(f"{where}: field redo must be true or false")
 
 
+def _bucket(obj: dict[str, object], where: str) -> str | None:
+    if "bucket" not in obj:
+        return None
+    value = obj["bucket"]
+    if value is None:
+        return None
+    if isinstance(value, str) and value in SELECTIONS:
+        return value
+    raise Fail(f"{where}: field bucket is not a queering bucket or null")
+
+
 def _parse(text: str, where: str, accepted: frozenset[str]) -> Record:
     try:
         obj = json.loads(text)
@@ -146,6 +162,7 @@ def _parse(text: str, where: str, accepted: frozenset[str]) -> Record:
         keep_reason=_keep_reason(obj, where),
         plan=_plan(obj, where),
         redo=_redo(obj, where),
+        bucket=_bucket(obj, where),
     )
 
 
@@ -354,6 +371,20 @@ def _redo_line(records: list[Record]) -> str:
     return f"redo: {len(listed)} listed, {changed} changed, {gate_failed} gate failed"
 
 
+def _queering_lines(records: list[Record]) -> list[str]:
+    marked = Counter(r.bucket for r in records if r.bucket is not None)
+    flirt = sum(r.bucket in FLIRT_BUCKETS for r in records)
+    redirect = sum(r.bucket == "redirect" for r in records)
+    changed = Counter(r.bucket for r in records if r.outcome == "changed")
+    gate_failed = Counter(r.bucket for r in records if r.outcome == "gate_failed")
+    lines = [f"queering marked: {sum(marked.values())}"]
+    lines += [f"queering bucket {bucket}: {marked[bucket]}" for bucket in QUEERING_BUCKETS]
+    lines.append(f"queering flirt marked: {flirt}, redirect half: {redirect}")
+    lines += [f"queering changed {bucket}: {changed[bucket]}" for bucket in QUEERING_REWRITES]
+    lines += [f"queering gate failed {bucket}: {gate_failed[bucket]}" for bucket in QUEERING_REWRITES]
+    return lines
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     lens_dir = work_dir(args.lens)
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
@@ -373,6 +404,9 @@ def cmd_report(args: argparse.Namespace) -> None:
     print(_scene_line(table, keys))
     print(f"arcs: {arcs}, {with_changes} with changes")
     print(_redo_line(records))
+    if lens.selection == "queering":
+        for line in _queering_lines(records):
+            print(line)
     for rid in triage_ids:
         disagreements, confirmed = recall[rid]
         print(f"recall {rid}: {disagreements} disagreements, {confirmed} confirmed")

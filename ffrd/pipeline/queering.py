@@ -15,6 +15,9 @@ TRANS_PERCENT = 5
 REDIRECT_PERCENT = 50
 
 Bucket = Literal["queer", "trans", "untouched"]
+Selection = Literal["queer", "trans", "untouched", "redirect", "not-redirected"]
+SELECTIONS: tuple[Selection, ...] = ("queer", "trans", "untouched", "redirect", "not-redirected")
+REWRITTEN: frozenset[Selection] = frozenset({"queer", "trans", "redirect"})
 
 ANTAGONIST_PREFIXES = ("villain", "antagonis")
 ANTAGONIST_WORDS = frozenset({"nemesis", "archenemy", "archvillain"})
@@ -68,6 +71,22 @@ def bucket(namespace: str, key: str, speaker: str | None, core: Collection[str],
 
 def redirected(namespace: str, key: str) -> bool:
     return _share(f"{namespace}/{key}") < REDIRECT_PERCENT
+
+
+def markable(speaker: str | None, core: Collection[str], antagonists: Collection[str], flirt: str | None) -> bool:
+    if flirt is not None and speaker == flirt:
+        return True
+    if not speaker:
+        return True
+    return speaker not in core and speaker not in antagonists
+
+
+def select(
+    namespace: str, key: str, speaker: str | None, core: Collection[str], antagonists: Collection[str], flirt: str | None
+) -> Selection:
+    if flirt is not None and speaker == flirt:
+        return "redirect" if redirected(namespace, key) else "not-redirected"
+    return bucket(namespace, key, speaker, core, antagonists)
 
 
 def _characters(bibles: Sequence[Mapping[str, Any]]) -> Iterator[Mapping[str, Any]]:

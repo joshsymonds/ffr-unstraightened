@@ -73,6 +73,21 @@ A lens with a base chains onto that lens's rewrites:
   lenses on one key are an error.
 - `ffrd diff --lens <name>` shows the vanilla line beside the chained result.
 
+## Selection
+
+A lens may declare a selection mode with one top-level line, placed before the
+first table header: `selection = "queering"`. `selection` is optional. A lens
+without it loads with no selection. `selection` is not a section. It does not
+change any stage text.
+
+The only value is `"queering"`. With it, `ffrd run` runs the queering selection
+instead of the default one. The queering selection runs a Haiku screen over the
+lines of speakers who are neither core cast nor antagonists, plus the flirt's lines.
+It buckets the marked lines per speaker and makes one draft call per speaker. It
+does not call Jev.
+
+The example below does not declare a selection.
+
 ## Validation
 
 `load_lens` checks the whole file and reports every problem it finds in one
@@ -95,6 +110,8 @@ example `lenses/made-up-lens.toml: triage[1].id duplicates triage[0].id`.
 - `scene.plan` and `scene.rubric` each need a non-empty string.
 - `base`, when present, must match the lens name pattern above. It must not name the
   lens itself. The loader does not check that the base lens's file exists.
+- `selection`, when present, must be the string `"queering"`. Any other value
+  is an error.
 - Unknown keys are errors at every level, including unknown sections.
 
 ## Example

@@ -209,5 +209,71 @@ def test_redirected_is_near_half_and_stable() -> None:
     assert queering.redirected("Made-up-ns", "7") == queering.redirected("Made-up-ns", "7")
 
 
+def test_selection_order_and_rewritten_set() -> None:
+    assert queering.SELECTIONS == ("queer", "trans", "untouched", "redirect", "not-redirected")
+    assert frozenset({"queer", "trans", "redirect"}) == queering.REWRITTEN
+
+
+def test_markable_admits_flirt_even_when_core_or_antagonist() -> None:
+    assert queering.markable(SYNTH_A, frozenset({SYNTH_A}), frozenset(), SYNTH_A)
+    assert queering.markable(SYNTH_A, frozenset(), frozenset({SYNTH_A}), SYNTH_A)
+
+
+def test_markable_admits_speakerless_and_minor_speakers() -> None:
+    assert queering.markable(None, frozenset({SYNTH_A}), frozenset({SYNTH_B}), SYNTH_C)
+    assert queering.markable("", frozenset({SYNTH_A}), frozenset({SYNTH_B}), SYNTH_C)
+    assert queering.markable(SYNTH_C, frozenset({SYNTH_A}), frozenset({SYNTH_B}), SYNTH_A)
+    assert queering.markable(SYNTH_C, frozenset({SYNTH_A}), frozenset({SYNTH_B}), None)
+
+
+def test_markable_refuses_core_and_antagonist_speakers() -> None:
+    assert not queering.markable(SYNTH_A, frozenset({SYNTH_A}), frozenset(), None)
+    assert not queering.markable(SYNTH_B, frozenset(), frozenset({SYNTH_B}), None)
+    assert not queering.markable(SYNTH_A, frozenset({SYNTH_A}), frozenset(), SYNTH_B)
+
+
+def test_select_redirects_flirt_lines_both_ways() -> None:
+    redirect_key = next(str(k) for k in range(200) if queering.redirected("Made-up-ns", str(k)))
+    hold_key = next(str(k) for k in range(200) if not queering.redirected("Made-up-ns", str(k)))
+
+    assert queering.select("Made-up-ns", redirect_key, SYNTH_A, frozenset(), frozenset(), SYNTH_A) == "redirect"
+    assert queering.select("Made-up-ns", hold_key, SYNTH_A, frozenset(), frozenset(), SYNTH_A) == "not-redirected"
+
+
+def test_select_redirects_core_cast_flirt_lines() -> None:
+    redirect_key = next(str(k) for k in range(200) if queering.redirected("Made-up-ns", str(k)))
+    hold_key = next(str(k) for k in range(200) if not queering.redirected("Made-up-ns", str(k)))
+
+    assert queering.select("Made-up-ns", redirect_key, SYNTH_A, frozenset({SYNTH_A}), frozenset(), SYNTH_A) == "redirect"
+    assert queering.select("Made-up-ns", hold_key, SYNTH_A, frozenset(), frozenset({SYNTH_A}), SYNTH_A) == "not-redirected"
+
+
+def test_select_gives_other_lines_their_bucket() -> None:
+    for i in range(200):
+        speaker = f"Synth-{i}"
+        assert queering.select("Made-up-ns", str(i), speaker, frozenset(), frozenset(), SYNTH_A) == queering.bucket(
+            "Made-up-ns", str(i), speaker, frozenset(), frozenset()
+        )
+        assert queering.select("Made-up-ns", str(i), None, frozenset(), frozenset(), SYNTH_A) == queering.bucket(
+            "Made-up-ns", str(i), None, frozenset(), frozenset()
+        )
+
+
+def test_select_leaves_core_and_antagonist_lines_untouched() -> None:
+    assert queering.select("Made-up-ns", "1", SYNTH_B, frozenset({SYNTH_B}), frozenset(), SYNTH_A) == "untouched"
+    assert queering.select("Made-up-ns", "1", SYNTH_B, frozenset(), frozenset({SYNTH_B}), SYNTH_A) == "untouched"
+
+
+def test_select_without_flirt_equals_bucket() -> None:
+    for i in range(200):
+        speaker = f"Synth-{i}"
+        assert queering.select("Made-up-ns", str(i), speaker, frozenset(), frozenset(), None) == queering.bucket(
+            "Made-up-ns", str(i), speaker, frozenset(), frozenset()
+        )
+        assert queering.select("Made-up-ns", str(i), None, frozenset(), frozenset(), None) == queering.bucket(
+            "Made-up-ns", str(i), None, frozenset(), frozenset()
+        )
+
+
 def test_haiku_model_name() -> None:
     assert claude.HAIKU == "haiku"

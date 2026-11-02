@@ -4,7 +4,7 @@ import atexit
 import json
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
@@ -273,7 +273,9 @@ SCREEN_SCHEMA: dict[str, Any] = {
 }
 
 
-def _flagged(answer: Mapping[str, Any], lens: Lens, scene: Scene) -> list[dict[str, Any]] | Rejected:
+def _flagged(
+    answer: Mapping[str, Any], lens: Lens, scene: Scene, eligible: Collection[tuple[str, str]] | None
+) -> list[dict[str, Any]] | Rejected:
     known = {(line.namespace, line.key) for line in scene.lines}
     question_ids = [question.id for question in lens.triage]
     reasons_by_line: dict[tuple[str, str], set[str]] = {}
@@ -281,6 +283,8 @@ def _flagged(answer: Mapping[str, Any], lens: Lens, scene: Scene) -> list[dict[s
         ref = (entry["namespace"], entry["key"])
         if ref not in known:
             return Rejected(f"flagged line {ref[0]}/{ref[1]} is not in scene {scene.key}")
+        if eligible is not None and ref not in eligible:
+            return Rejected(f"flagged line {ref[0]}/{ref[1]} is not eligible in scene {scene.key}")
         for reason in entry["reasons"]:
             if reason not in question_ids:
                 return Rejected(f"reason {reason!r} is not a triage id in the lens")
@@ -300,8 +304,16 @@ def _screen_lines(scene: Scene) -> str:
 
 
 def screen(
-    store: Store, lens: Lens, scene: Scene, cast: Sequence[Mapping[str, Any]], ask: Ask
+    store: Store,
+    lens: Lens,
+    scene: Scene,
+    cast: Sequence[Mapping[str, Any]],
+    ask: Ask,
+    *,
+    model: str = claude.OPUS,
+    eligible: Collection[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+    eligible_refs = None if eligible is None else [{"namespace": namespace, "key": key} for namespace, key in sorted(eligible)]
     parts = [
         SCREEN_INSTRUCTIONS,
         f"Screen criteria:\n{lens.stage_text('screen')}",
@@ -309,19 +321,24 @@ def screen(
         f"Scene lines:\n{_screen_lines(scene)}",
         f"Cast:\n{_json(list(cast))}",
     ]
+    if eligible_refs is not None:
+        parts.append(f"Eligible lines, flag only these:\n{_json(eligible_refs)}")
 
     def call() -> list[dict[str, Any]]:
-        answer = ask(claude.OPUS, parts, SCREEN_SCHEMA)
+        answer = ask(model, parts, SCREEN_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
-        flagged = _flagged(answer, lens, scene)
+        flagged = _flagged(answer, lens, scene, eligible)
         if isinstance(flagged, Rejected):
             raise _Unanswered(flagged)
         return flagged
 
+    inputs = {**_inputs(scene), "cast": list(cast), "model": model}
+    if eligible_refs is not None:
+        inputs["eligible"] = eligible_refs
     lens_text = lens.stage_text("screen") + "\n" + lens.stage_text("triage")
     try:
-        flagged = store.run("screen", {**_inputs(scene), "cast": list(cast), "model": claude.OPUS}, lens_text, call).value
+        flagged = store.run("screen", inputs, lens_text, call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["reasons"]) for entry in flagged}
@@ -450,14 +467,18 @@ def intent(
     callbacks: Sequence[Mapping[str, Any]],
     context: Mapping[str, Any],
     ask: Ask,
+    bucket: str | None = None,
 ) -> Intent | Unfinished | Rejected:
+    target = {**_line_ref(line), "reasons": list(reasons)}
+    if bucket is not None:
+        target["bucket"] = bucket
     parts = [
         INTENT_INSTRUCTIONS,
         f"Intent rule:\n{lens.stage_text('intent')}",
         f"Callbacks:\n{_json(list(callbacks))}",
         f"Arc context:\n{_json(context)}",
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
-        f"Target line:\n{_json({**_line_ref(line), 'reasons': list(reasons)})}",
+        f"Target line:\n{_json(target)}",
     ]
 
     def call() -> dict[str, Any]:
@@ -474,6 +495,8 @@ def intent(
         "context": context,
         "schema": INTENT_SCHEMA_VERSION,
     }
+    if bucket is not None:
+        inputs["bucket"] = bucket
     try:
         return Intent(**store.run("intent", inputs, lens.stage_text("intent"), call).value)
     except _Unanswered as unanswered:
@@ -500,6 +523,10 @@ DRAFT_NOTE_INSTRUCTIONS = (
     "A reviewer read the earlier rewrite of this target line and named a problem in the reviewer note. Write candidates "
     "that fix that problem. Where the note says the original line is itself weak, you may rewrite more freely, but keep "
     "the line's point, its plot facts, its speaker and the speaker's voice."
+)
+
+SPEAKER_DRAFT_INSTRUCTIONS = (
+    "The targets are one speaker's lines across these scenes. Write them together so the speaker stays consistent from scene to scene."
 )
 
 DRAFT_SCHEMA: dict[str, Any] = {
@@ -572,6 +599,45 @@ def draft(
         inputs["note"] = note
     try:
         entries = store.run("draft", inputs, lens.stage_text("intent"), call).value
+    except _Unanswered as unanswered:
+        return unanswered.failure
+    return {(entry["namespace"], entry["key"]): tuple(entry["drafts"]) for entry in entries}
+
+
+def draft_speaker(
+    store: Store,
+    lens: Lens,
+    groups: Sequence[tuple[Scene, Sequence[Target]]],
+    ask: Ask,
+) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+    expected = sorted((target.line.namespace, target.line.key) for _scene, targets in groups for target in targets)
+    parts = [
+        DRAFT_INSTRUCTIONS,
+        SPEAKER_DRAFT_INSTRUCTIONS,
+        f"Intent rule:\n{lens.stage_text('intent')}",
+        "Scenes:\n"
+        + _json(
+            [
+                {"scene": scene.key, "lines": _line_dicts(scene.lines), "targets": [_target_dict(target) for target in targets]}
+                for scene, targets in groups
+            ]
+        ),
+    ]
+
+    def call() -> list[dict[str, Any]]:
+        answer = ask(claude.OPUS, parts, DRAFT_SCHEMA)
+        if isinstance(answer, Unfinished | Rejected):
+            raise _Unanswered(answer)
+        entries = answer["drafts"]
+        if sorted((entry["namespace"], entry["key"]) for entry in entries) != expected:
+            raise _Unanswered(Rejected("draft entries do not name each target of the speaker's scenes once"))
+        return entries
+
+    inputs = {
+        "scenes": [{**_inputs(scene), "targets": [_target_dict(target) for target in targets]} for scene, targets in groups],
+    }
+    try:
+        entries = store.run("speaker_draft", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["drafts"]) for entry in entries}

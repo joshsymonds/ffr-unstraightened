@@ -18,6 +18,7 @@ from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
+    DRAFT_INSTRUCTIONS,
     DRAFT_SCHEMA,
     INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
@@ -25,6 +26,7 @@ from ffrd.pipeline.stages import (
     RESCREEN_INSTRUCTIONS,
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
+    SPEAKER_DRAFT_INSTRUCTIONS,
     Batch,
     Intent,
     Scene,
@@ -34,6 +36,7 @@ from ffrd.pipeline.stages import (
     _table_scenes,
     cross_judge,
     draft,
+    draft_speaker,
     intent,
     judge,
     render,
@@ -407,6 +410,73 @@ def test_fresh_store_on_same_root_returns_stored_screen_without_asking(tmp_path:
     assert ask.calls == []
 
 
+def test_default_screen_store_key_is_pinned_to_the_base_hex(tmp_path: Path) -> None:
+    screen(Store(tmp_path), LENS, SCENE, CAST, Fake({"flagged": []}))
+
+    [record] = (tmp_path / "results").glob("*.json")
+    assert record.stem == "6f1c6ec9cce3650dd3b85196d9b120873bd2e1174701293fee4b894f557377d2"
+
+
+def test_screen_with_haiku_asks_haiku_and_stores_under_the_haiku_model(tmp_path: Path) -> None:
+    ask = Fake({"flagged": []})
+
+    screen(Store(tmp_path), LENS, SCENE, CAST, ask, model=claude.HAIKU)
+
+    model, _parts, _schema = ask.calls[0]
+    assert model == claude.HAIKU
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    lens_text = LENS.stage_text("screen") + "\n" + LENS.stage_text("triage")
+    assert record.stem == store_key("screen", {**inputs, "model": "haiku"}, lens_text)
+    assert record.stem != store_key("screen", {**inputs, "model": "opus"}, lens_text)
+
+
+def test_screen_with_eligible_still_sends_every_line_and_names_only_the_eligible_refs(tmp_path: Path) -> None:
+    ask = Fake({"flagged": []})
+
+    screen(Store(tmp_path), LENS, SCENE, CAST, ask, eligible=[(LINE_ONE.namespace, LINE_ONE.key)])
+
+    parts = ask.calls[0][1]
+    lines_part = _part(parts, "Scene lines:\n")
+    assert '"english": "Made-up first line. Not game text."' in lines_part
+    assert '"english": "Made-up narration. Not game text."' in lines_part
+    eligible_part = _part(parts, "Eligible lines, flag only these:\n")
+    assert json.loads(eligible_part) == [{"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}]
+
+
+def test_screen_rejects_a_flag_outside_eligible_and_stores_nothing(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    answer = {"flagged": [{"namespace": LINE_TWO.namespace, "key": LINE_TWO.key, "reasons": ["made-up-alpha"]}]}
+
+    result = screen(store, LENS, SCENE, CAST, Fake(answer), eligible=[(LINE_ONE.namespace, LINE_ONE.key)])
+
+    assert isinstance(result, Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+def test_screen_with_eligible_returns_flags_on_eligible_lines_as_today(tmp_path: Path) -> None:
+    result = screen(Store(tmp_path), LENS, SCENE, CAST, Fake(FLAGGED_ONE), eligible=[(LINE_ONE.namespace, LINE_ONE.key)])
+
+    assert result == {(LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",)}
+
+
+def test_screen_store_key_carries_the_eligible_refs_sorted(tmp_path: Path) -> None:
+    eligible = [(LINE_TWO.namespace, LINE_TWO.key), (LINE_ONE.namespace, LINE_ONE.key)]
+
+    screen(Store(tmp_path), LENS, SCENE, CAST, Fake({"flagged": []}), eligible=eligible)
+
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "cast": CAST,
+        "eligible": [{"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}, {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}],
+    }
+    lens_text = LENS.stage_text("screen") + "\n" + LENS.stage_text("triage")
+    assert record.stem == store_key("screen", {**inputs, "model": "opus"}, lens_text)
+
+
 TABLE_ROWS = [
     scene_file.SceneLine("made-up-table-scene", 1, "ST_C01_001_01", "1", "Ash", None),
     scene_file.SceneLine("made-up-table-scene", 2, "ST_C01_001_01", "2", None, None),
@@ -610,6 +680,31 @@ def test_intent_store_key_carries_its_schema_version(tmp_path: Path) -> None:
     assert store_key("intent", {k: v for k, v in inputs.items() if k != "schema"}, text) != record.stem
 
 
+def test_default_intent_store_key_is_pinned_to_the_base_hex(tmp_path: Path) -> None:
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, Fake(INTENT_ANSWER))
+    [record] = (tmp_path / "results").glob("*.json")
+
+    assert record.stem == "76f0011e1e506a5b4df0fa28f7a2bda527660c53ef3d3889d83e0e72686d5b23"
+
+
+def test_intent_with_bucket_stores_under_a_key_that_carries_the_bucket(tmp_path: Path) -> None:
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, Fake(INTENT_ANSWER), bucket="trans")
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "line": {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key},
+        "reasons": list(REASONS),
+        "callbacks": [CALLBACK],
+        "context": CONTEXT,
+        "schema": 2,
+    }
+    text = LENS.stage_text("intent")
+
+    assert record.stem == store_key("intent", {**inputs, "bucket": "trans"}, text)
+    assert record.stem != store_key("intent", inputs, text)
+
+
 def test_draft_store_key_does_not_carry_the_intent_schema_version(tmp_path: Path) -> None:
     draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, Fake(DRAFT_ANSWER))
     [record] = (tmp_path / "results").glob("*.json")
@@ -664,6 +759,24 @@ def test_intent_prompt_carries_rule_callbacks_japanese_lines_and_target_reasons(
     assert '"chapter": 1' in prompt
     assert '"japanese": "Made-up Japanese one. Not game text."' in prompt
     assert '"reasons": ["made-up-alpha"]' in prompt
+
+
+def test_intent_default_target_line_has_no_bucket(tmp_path: Path) -> None:
+    ask = Fake(INTENT_ANSWER)
+
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
+
+    target = _part(ask.calls[0][1], "Target line:\n")
+    assert target == '{"key": "1", "namespace": "ST_C01_001_01", "reasons": ["made-up-alpha"]}'
+
+
+def test_intent_with_bucket_puts_it_on_the_target_line(tmp_path: Path) -> None:
+    ask = Fake(INTENT_ANSWER)
+
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask, bucket="trans")
+
+    target = _part(ask.calls[0][1], "Target line:\n")
+    assert json.loads(target) == {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key, "reasons": ["made-up-alpha"], "bucket": "trans"}
 
 
 def test_fresh_store_on_same_root_returns_stored_intent_without_asking(tmp_path: Path) -> None:
@@ -819,6 +932,125 @@ def test_draft_retry_is_part_of_its_key(tmp_path: Path) -> None:
     draft(store, LENS, SCENE, [TARGET_ONE], "classifier", ask)
 
     assert len(ask.calls) == 2
+
+
+# Made-up speaker-draft fixtures: one speaker's targets across two scenes. Not game text.
+SCENE_TWO = Scene("made-up-scene-two", (LINE_THREE, LINE_FOUR))
+TARGET_THREE = Target(LINE_THREE, "Made-up intent three. Not game text.", (), CHANGED_CONTEXT)
+DRAFT_THREE = ("Made-up draft of line three. Not game text.",)
+ENTRY_THREE = {"namespace": LINE_THREE.namespace, "key": LINE_THREE.key, "drafts": list(DRAFT_THREE)}
+SPEAKER_GROUPS = [(SCENE, [TARGET_ONE, TARGET_TWO]), (SCENE_TWO, [TARGET_THREE])]
+SPEAKER_ANSWER = {"drafts": [ENTRY_ONE, ENTRY_TWO, ENTRY_THREE]}
+SPEAKER_RESULT = {
+    (LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE,
+    (LINE_TWO.namespace, LINE_TWO.key): DRAFT_TWO,
+    (LINE_THREE.namespace, LINE_THREE.key): DRAFT_THREE,
+}
+
+
+def test_speaker_draft_sends_every_scene_in_one_opus_call_with_draft_schema_and_returns_drafts_per_line(tmp_path: Path) -> None:
+    ask = Fake(SPEAKER_ANSWER)
+
+    result = draft_speaker(Store(tmp_path), LENS, SPEAKER_GROUPS, ask)
+
+    assert result == SPEAKER_RESULT
+    assert len(ask.calls) == 1
+    model, _parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == DRAFT_SCHEMA
+
+
+def test_speaker_draft_prompt_groups_each_scenes_lines_and_targets_and_says_one_speaker(tmp_path: Path) -> None:
+    ask = Fake(SPEAKER_ANSWER)
+
+    draft_speaker(Store(tmp_path), LENS, SPEAKER_GROUPS, ask)
+
+    parts = ask.calls[0][1]
+    assert DRAFT_INSTRUCTIONS in parts
+    assert SPEAKER_DRAFT_INSTRUCTIONS in parts
+    assert "Made-up intent rule. Not game text." in "\n".join(parts)
+    scenes = json.loads(_part(parts, "Scenes:\n"))
+    assert [scene["scene"] for scene in scenes] == [SCENE.key, SCENE_TWO.key]
+    assert [[line["key"] for line in scene["lines"]] for scene in scenes] == [["1", "2"], ["3", "4"]]
+    assert [[target["key"] for target in scene["targets"]] for scene in scenes] == [["1", "2"], ["3"]]
+    assert scenes[1]["targets"] == [
+        {
+            "namespace": LINE_THREE.namespace,
+            "key": LINE_THREE.key,
+            "intent": "Made-up intent three. Not game text.",
+            "callbacks": [],
+            "context": CHANGED_CONTEXT,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"drafts": [ENTRY_ONE, ENTRY_TWO]}, id="missing"),
+        pytest.param({"drafts": [ENTRY_ONE, ENTRY_TWO, ENTRY_THREE, ENTRY_UNKNOWN]}, id="unknown"),
+        pytest.param({"drafts": [ENTRY_ONE, ENTRY_ONE, ENTRY_TWO, ENTRY_THREE]}, id="duplicate"),
+    ],
+)
+def test_speaker_draft_entries_that_do_not_name_each_target_once_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(answer, SPEAKER_ANSWER)
+
+    assert isinstance(draft_speaker(store, LENS, SPEAKER_GROUPS, ask), Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert draft_speaker(store, LENS, SPEAKER_GROUPS, ask) == SPEAKER_RESULT
+    assert len(ask.calls) == 2
+
+
+def test_speaker_draft_is_stored_under_its_speaker_draft_key_and_a_second_call_reuses_it(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(SPEAKER_ANSWER)
+    draft_speaker(store, LENS, SPEAKER_GROUPS, ask)
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scenes": [
+            {
+                "scene": SCENE.key,
+                "lines": [asdict(line) for line in SCENE.lines],
+                "targets": [
+                    {
+                        "namespace": LINE_ONE.namespace,
+                        "key": LINE_ONE.key,
+                        "intent": TARGET_ONE.intent,
+                        "callbacks": [CALLBACK],
+                        "context": CONTEXT,
+                    },
+                    {
+                        "namespace": LINE_TWO.namespace,
+                        "key": LINE_TWO.key,
+                        "intent": TARGET_TWO.intent,
+                        "callbacks": [],
+                        "context": CHANGED_CONTEXT,
+                    },
+                ],
+            },
+            {
+                "scene": SCENE_TWO.key,
+                "lines": [asdict(line) for line in SCENE_TWO.lines],
+                "targets": [
+                    {
+                        "namespace": LINE_THREE.namespace,
+                        "key": LINE_THREE.key,
+                        "intent": TARGET_THREE.intent,
+                        "callbacks": [],
+                        "context": CHANGED_CONTEXT,
+                    }
+                ],
+            },
+        ]
+    }
+
+    assert record.stem == store_key("speaker_draft", inputs, LENS.stage_text("intent"))
+    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "speaker_draft"
+    assert draft_speaker(Store(tmp_path), LENS, SPEAKER_GROUPS, ask) == SPEAKER_RESULT
+    assert len(ask.calls) == 1
 
 
 REVIEWER_NOTE = "Made-up reviewer note. Not game text."
