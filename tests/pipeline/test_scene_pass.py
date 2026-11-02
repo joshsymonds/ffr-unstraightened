@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -8,7 +9,19 @@ import pytest
 from ffrd.pipeline import claude
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
-from ffrd.pipeline.scene_pass import SCREEN_INSTRUCTIONS, SCREEN_SCHEMA, SCREEN_STAGE, screen
+from ffrd.pipeline.scene_pass import (
+    PLAN_INSTRUCTIONS,
+    PLAN_SCHEMA,
+    PLAN_STAGE,
+    SCREEN_INSTRUCTIONS,
+    SCREEN_SCHEMA,
+    SCREEN_STAGE,
+    Plan,
+    PlannedLine,
+    plan,
+    plan_id,
+    screen,
+)
 from ffrd.pipeline.stages import Scene, SceneLine
 from ffrd.pipeline.store import Store
 from ffrd.pipeline.store import key as store_key
@@ -191,4 +204,231 @@ def test_editing_lens_scene_text_asks_again(tmp_path: Path) -> None:
     ask = Fake(_answer())
 
     assert screen(Store(tmp_path), edited, SCENE, CAST, ask) == {}
+    assert len(ask.calls) == 1
+
+
+# Made-up plan inputs. Not game text.
+HITS = {
+    "made-up-beta": ((LINE_TWO.namespace, LINE_TWO.key),),
+    "made-up-alpha": ((LINE_ONE.namespace, LINE_ONE.key),),
+}
+HIT_LIST = [
+    {"id": "made-up-beta", "carriers": [_ref(LINE_TWO)]},
+    {"id": "made-up-alpha", "carriers": [_ref(LINE_ONE)]},
+]
+FINAL = ((LINE_ONE.namespace, LINE_ONE.key),)
+EXCLUDED = ((LINE_THREE.namespace, LINE_THREE.key),)
+PLAN_INTENT = "Made-up intent. Not game text."
+PLAN_LINE_ONE = PlannedLine(LINE_ONE.namespace, LINE_ONE.key, "Made-up intent one. Not game text.", True)
+PLAN_LINE_TWO = PlannedLine(LINE_TWO.namespace, LINE_TWO.key, "Made-up intent two. Not game text.", False)
+
+
+def _dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _pair(line: SceneLine) -> tuple[str, str]:
+    return (line.namespace, line.key)
+
+
+def _entry(ref: tuple[str, str], required: bool = True, intent: str = PLAN_INTENT) -> dict[str, Any]:
+    namespace, key = ref
+    return {"namespace": namespace, "key": key, "intent": intent, "required": required}
+
+
+def _planned(*entries: dict[str, Any]) -> dict[str, Any]:
+    return {"keep": False, "keep_reason": "none", "lines": list(entries)}
+
+
+def _kept(reason: str = "protection") -> dict[str, Any]:
+    return {"keep": True, "keep_reason": reason, "lines": []}
+
+
+def test_plan_asks_opus_once_with_schema_and_seven_parts_in_order(tmp_path: Path) -> None:
+    ask = Fake(_planned(_entry(_pair(LINE_TWO))))
+
+    plan(Store(tmp_path), LENS, SCENE, CAST, HITS, FINAL, EXCLUDED, ask)
+
+    assert len(ask.calls) == 1
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == PLAN_SCHEMA
+    assert len(parts) == 7
+    assert parts[0] == PLAN_INSTRUCTIONS
+    assert parts[1] == "Scene rules:\n" + LENS.stage_text("scene")
+    assert parts[2].startswith("Scene lines:\n")
+    assert '"japanese"' in parts[2]
+    assert parts[3] == "Cast:\n" + _dump(CAST)
+    assert parts[4] == "Patterns hit:\n" + _dump(HIT_LIST)
+    assert parts[5] == "Final lines:\n" + _dump([_ref(LINE_ONE)])
+    assert parts[6] == "Excluded lines:\n" + _dump([_ref(LINE_THREE)])
+
+
+def test_kept_scene_returns_its_reason_with_no_id_and_no_lines(tmp_path: Path) -> None:
+    result = plan(Store(tmp_path), LENS, SCENE, CAST, HITS, FINAL, EXCLUDED, Fake(_kept("protection")))
+
+    assert result == Plan(id=None, keep_reason="protection", lines=())
+
+
+def test_planned_scene_returns_lines_in_answer_order_with_intents_required_and_plan_id(tmp_path: Path) -> None:
+    answer = _planned(
+        _entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text."),
+        _entry(_pair(LINE_ONE), required=True, intent="Made-up intent one. Not game text."),
+    )
+
+    result = plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), (), Fake(answer))
+
+    expected_id = plan_id(SCENE.key, [_pair(LINE_TWO), _pair(LINE_ONE)])
+    assert result == Plan(id=expected_id, keep_reason=None, lines=(PLAN_LINE_TWO, PLAN_LINE_ONE))
+
+
+def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
+    refs = [_pair(LINE_TWO), _pair(LINE_ONE)]
+    canonical = json.dumps(
+        {"scene": "made-up-scene", "lines": [["ST_C01_001_01", "1"], ["ST_C01_001_01", "2"]]},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    assert plan_id(SCENE.key, refs) == expected
+    assert plan_id(SCENE.key, list(reversed(refs))) == expected
+    assert plan_id(SCENE.key, [_pair(LINE_ONE)]) != expected
+    assert plan_id("other-made-up-scene", refs) != expected
+
+
+@pytest.mark.parametrize(
+    ("answer", "final", "excluded", "detail"),
+    [
+        (
+            {"keep": True, "keep_reason": "none", "lines": []},
+            (),
+            (),
+            "a kept scene must name a keep reason",
+        ),
+        (
+            {"keep": True, "keep_reason": "plot", "lines": [_entry(_pair(LINE_ONE))]},
+            (),
+            (),
+            "a kept scene must plan no lines",
+        ),
+        (
+            {"keep": False, "keep_reason": "plot", "lines": [_entry(_pair(LINE_ONE))]},
+            (),
+            (),
+            "a planned scene must set keep_reason to none",
+        ),
+        (
+            _planned(),
+            (),
+            (),
+            "a planned scene must plan at least one line",
+        ),
+        (
+            _planned(*[_entry(_pair(LINE_ONE))] * 5),
+            (),
+            (),
+            "plan names 5 lines, more than 4",
+        ),
+        (
+            _planned(_entry((OUT_OF_SCENE["namespace"], OUT_OF_SCENE["key"]))),
+            (),
+            (),
+            "planned line ST_C09_001_01/9 is not in scene made-up-scene",
+        ),
+        (
+            _planned(_entry(_pair(LINE_ONE))),
+            FINAL,
+            (),
+            "planned line ST_C01_001_01/1 is a line-pass line",
+        ),
+        (
+            _planned(_entry(_pair(LINE_TWO))),
+            (),
+            (_pair(LINE_TWO),),
+            "planned line ST_C01_001_01/2 is excluded",
+        ),
+        (
+            _planned(_entry(_pair(LINE_ONE)), _entry(_pair(LINE_ONE))),
+            (),
+            (),
+            "planned line ST_C01_001_01/1 is planned twice",
+        ),
+    ],
+    ids=[
+        "kept-without-reason",
+        "kept-with-lines",
+        "planned-with-reason",
+        "planned-without-lines",
+        "over-cap",
+        "out-of-scene",
+        "line-pass",
+        "excluded",
+        "twice",
+    ],
+)
+def test_plan_rejects_invalid_answer_and_stores_nothing(
+    tmp_path: Path, answer: dict[str, Any], final: Any, excluded: Any, detail: str
+) -> None:
+    store = Store(tmp_path)
+
+    result = plan(store, LENS, SCENE, CAST, HITS, final, excluded, Fake(answer))
+
+    assert result == Rejected(detail)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_plan_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, _planned(_entry(_pair(LINE_TWO))))
+
+    assert plan(store, LENS, SCENE, CAST, HITS, (), (), ask) == failure
+    assert store.finished() == []
+
+    result = plan(store, LENS, SCENE, CAST, HITS, (), (), ask)
+
+    assert result == Plan(
+        id=plan_id(SCENE.key, [_pair(LINE_TWO)]),
+        keep_reason=None,
+        lines=(PlannedLine(LINE_TWO.namespace, LINE_TWO.key, PLAN_INTENT, True),),
+    )
+    assert len(ask.calls) == 2
+
+
+def test_plan_is_stored_under_scene_plan_stage_with_lens_scene_text_and_inputs(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    plan(store, LENS, SCENE, CAST, HITS, FINAL, EXCLUDED, Fake(_kept()))
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "cast": CAST,
+        "hits": HIT_LIST,
+        "final": [_ref(LINE_ONE)],
+        "excluded": [_ref(LINE_THREE)],
+    }
+
+    assert PLAN_STAGE == "scene_plan"
+    assert store.read(store_key(PLAN_STAGE, inputs, LENS.stage_text("scene"))) is not None
+
+
+def test_fresh_store_on_same_root_returns_stored_plan_without_asking(tmp_path: Path) -> None:
+    answer = _planned(_entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text."))
+    first = plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), (), Fake(answer))
+    ask = Fake()
+
+    assert plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), (), ask) == first
+    assert ask.calls == []
+
+
+def test_different_excluded_lines_ask_again(tmp_path: Path) -> None:
+    plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), (), Fake(_kept()))
+    ask = Fake(_kept("plot"))
+
+    assert plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), EXCLUDED, ask) == Plan(id=None, keep_reason="plot", lines=())
     assert len(ask.calls) == 1
