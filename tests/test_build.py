@@ -47,8 +47,39 @@ def write_edits(repo: Path, name: str, body: str) -> None:
     path.write_text(body)
 
 
-def edit(namespace: str, key: str, vanilla_line: str, text: str) -> str:
-    return f'["{namespace}".{key}]\nvanilla = "{vanilla_hash(vanilla_line)}"\ntext = "{text}"\n\n'
+def edit(namespace: str, key: str, vanilla_line: str, text: str, base_text: str | None = None) -> str:
+    base = "" if base_text is None else f'base = "{vanilla_hash(base_text)}"\n'
+    return f'["{namespace}".{key}]\nvanilla = "{vanilla_hash(vanilla_line)}"\ntext = "{text}"\n{base}\n'
+
+
+# A made-up lens, the example in lenses/README.md with a base line before the first table. Not game text.
+LENS = """\
+# Made-up example lens. Not game text.
+{base_line}
+[[triage]]
+id = "made-up-first-id"
+question = "Made-up question one. Does the line mention a made-up thing?"
+
+[[triage]]
+id = "made-up-second-id"
+question = "Made-up question two. Is the line a made-up greeting?"
+
+[screen]
+criteria = ["Made-up criterion one.", "Made-up criterion two."]
+
+[intent]
+rule = "Made-up intent rule."
+
+[judge]
+rubric = "Made-up judge rubric."
+"""
+
+
+def write_lens(repo: Path, name: str, base: str | None = None) -> None:
+    path = repo / "lenses" / f"{name}.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base_line = "" if base is None else f'base = "{base}"'
+    path.write_text(LENS.format(base_line=base_line))
 
 
 def write_english(vanilla: Path, lines: tuple[tuple[str, str, str], ...]) -> None:
@@ -293,6 +324,98 @@ def test_build_rejects_the_same_key_edited_in_two_files_naming_both(
         cli.main(["build"])
     assert exit_info.value.code == 1
     assert capsys.readouterr().err == "ffrd: dialog/b/b.toml: ST_C01_001_01,10 is also edited in dialog/a.toml\n"
+
+
+@pytest.mark.parametrize(
+    ("base_dir", "child_dir"),
+    [("alpha-base", "zeta-child"), ("zeta-base", "alpha-child")],
+    ids=["base-sorts-first", "child-sorts-first"],
+)
+def test_chained_lens_wins_its_shared_key_whichever_directory_sorts_first(
+    base_dir: str, child_dir: str, fake_vanilla: Path, fake_game: Path, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_edits(repo, f"{base_dir}/base.toml", edit("ST_C01_001_01", "10", TEN, "Base ten."))
+    write_lens(repo, child_dir, base=base_dir)
+    write_edits(repo, f"{child_dir}/child.toml", edit("ST_C01_001_01", "10", TEN, "Child ten.", base_text="Base ten."))
+    cli.main(["build"])
+    assert packed_locres(repo, TARGET_LOCRES, tmp_path)["ST_C01_001_01"]["10"].translation == "Child ten."
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("child_edit", "message"),
+    [
+        (
+            edit("ST_C01_001_01", "10", TEN, "Child ten.", base_text="Other base."),
+            "dialog/alpha-child/child.toml: ST_C01_001_01,10 does not match its base in dialog/zeta-base/base.toml",
+        ),
+        (
+            edit("ST_C01_001_01", "10", TEN, "Child ten."),
+            "dialog/alpha-child/child.toml: ST_C01_001_01,10 does not match its base in dialog/zeta-base/base.toml",
+        ),
+    ],
+    ids=["hash-differs", "base-missing"],
+)
+def test_chained_lens_with_a_base_that_does_not_match_fails_naming_the_key(
+    child_edit: str, message: str, fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_edits(repo, "zeta-base/base.toml", edit("ST_C01_001_01", "10", TEN, "Base ten."))
+    write_lens(repo, "alpha-child", base="zeta-base")
+    write_edits(repo, "alpha-child/child.toml", child_edit)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == f"ffrd: {message}\n"
+
+
+def test_unchained_lens_editing_a_key_another_lens_set_still_fails_naming_both(
+    fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_edits(repo, "alpha-base/base.toml", edit("ST_C01_001_01", "10", TEN, "Base ten."))
+    write_lens(repo, "zeta-child", base="gamma-other")
+    write_edits(repo, "zeta-child/child.toml", edit("ST_C01_001_01", "10", TEN, "Child ten.", base_text="Base ten."))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: dialog/zeta-child/child.toml: ST_C01_001_01,10 is also edited in dialog/alpha-base/base.toml\n"
+
+
+def test_edit_with_a_base_and_no_earlier_lens_editing_the_key_fails(
+    fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_lens(repo, "alpha-child", base="zeta-base")
+    write_edits(repo, "alpha-child/child.toml", edit("ST_C01_001_01", "10", TEN, "Child ten.", base_text="Base ten."))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: dialog/alpha-child/child.toml: ST_C01_001_01,10 has a base but no earlier lens edits it\n"
+
+
+def test_edit_with_a_non_string_base_fails_naming_the_key(
+    fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_edits(
+        repo,
+        "a.toml",
+        f'["ST_C01_001_01".10]\nvanilla = "{vanilla_hash(TEN)}"\ntext = "Child ten."\nbase = 7\n',
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == 'ffrd: dialog/a.toml: ST_C01_001_01,10 needs a string "base"\n'
+
+
+def test_base_cycle_between_two_lens_files_fails_naming_both_lenses(
+    fake_vanilla: Path, fake_game: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_lens(repo, "alpha-lens", base="beta-lens")
+    write_lens(repo, "beta-lens", base="alpha-lens")
+    write_edits(repo, "alpha-lens/a.toml", edit("ST_C01_001_01", "10", TEN, "Alpha ten."))
+    write_edits(repo, "beta-lens/b.toml", edit("ST_C01_001_01", "2", TWO, "Beta two."))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["build"])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "ffrd: base cycle between lenses: alpha-lens -> beta-lens -> alpha-lens\n"
 
 
 def test_build_rejects_a_file_that_is_not_valid_toml_and_names_it(
