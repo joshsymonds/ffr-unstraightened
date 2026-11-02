@@ -154,16 +154,13 @@ class _Refused(Exception):
         self.failure = failure
 
 
-def _refs(bible: Mapping[str, Any]) -> list[tuple[str, str]]:
-    refs = [(ref["namespace"], ref["key"]) for fact in bible["facts"] for ref in fact["lines"]]
-    refs.extend((callback["line"]["namespace"], callback["line"]["key"]) for callback in bible["callbacks"])
-    refs.extend((beat["line"]["namespace"], beat["line"]["key"]) for arc in bible["arcs"] for beat in arc["beats"])
-    return refs
+def _line_in_scope(ref: Mapping[str, Any], scope: Set[tuple[str, str]]) -> bool:
+    return (ref["namespace"], ref["key"]) in scope
 
 
-def _in_scope(depends: Sequence[Mapping[str, Any]], scope: Set[tuple[str, str]]) -> list[Mapping[str, Any]]:
-    # A depends ref naming no line passed to the story bible is dropped, not rejected; in-scope refs keep their order.
-    return [ref for ref in depends if (ref["namespace"], ref["key"]) in scope]
+def _in_scope(refs: Sequence[Mapping[str, Any]], scope: Set[tuple[str, str]]) -> list[Mapping[str, Any]]:
+    # A ref naming no line passed to the story bible is dropped, not rejected; in-scope refs keep their order.
+    return [ref for ref in refs if _line_in_scope(ref, scope)]
 
 
 def _label(number: int | None) -> str:
@@ -186,9 +183,7 @@ def _setups_inputs(number: int | None, lines: Sequence[Line], later: Sequence[Ma
     return {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
 
 
-def _check(
-    output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]], speakers: Set[str]
-) -> Rejected | None:
+def _check(output: Mapping[str, Any], number: int | None, lines: Sequence[Line], speakers: Set[str]) -> Rejected | None:
     chapter_speakers = {line.speaker for line in lines}
     for character in output["characters"]:
         if character["speaker"] not in chapter_speakers:
@@ -197,9 +192,6 @@ def _check(
         for speaker in arc["characters"]:
             if speaker and speaker not in speakers:
                 return Rejected(f"{_label(number)} arc {arc['id']!r} character speaker {speaker!r} speaks no in-scope line")
-    for namespace, key in _refs(output):
-        if (namespace, key) not in scope:
-            return Rejected(f"{_label(number)} ref {namespace}/{key} names no line passed to the story bible")
     return None
 
 
@@ -219,12 +211,27 @@ def chapter(
         output = ask(parts, SCHEMA)
         if isinstance(output, Unfinished | Rejected):
             raise _Refused(output)
-        problem = _check(output, number, lines, scope, speakers)
+        problem = _check(output, number, lines, speakers)
         if problem is not None:
             raise _Refused(problem)
-        arcs = [{**arc, "characters": [speaker for speaker in arc["characters"] if speaker]} for arc in output["arcs"]]
-        callbacks = [{**callback, "depends": _in_scope(callback["depends"], scope)} for callback in output["callbacks"]]
-        return {**output, "arcs": arcs, "callbacks": callbacks, "chapter": number}
+        # Out-of-scope refs are dropped before storing: a fact left with no line, a callback on an out-of-scope line
+        # and a beat on an out-of-scope line go; arcs stay even when no beat is left.
+        facts = [{**fact, "lines": _in_scope(fact["lines"], scope)} for fact in output["facts"]]
+        facts = [fact for fact in facts if fact["lines"]]
+        arcs = [
+            {
+                **arc,
+                "characters": [speaker for speaker in arc["characters"] if speaker],
+                "beats": [beat for beat in arc["beats"] if _line_in_scope(beat["line"], scope)],
+            }
+            for arc in output["arcs"]
+        ]
+        callbacks = [
+            {**callback, "depends": _in_scope(callback["depends"], scope)}
+            for callback in output["callbacks"]
+            if _line_in_scope(callback["line"], scope)
+        ]
+        return {**output, "facts": facts, "arcs": arcs, "callbacks": callbacks, "chapter": number}
 
     try:
         return store.run(STAGE, _forward_inputs(number, lines, earlier), None, call).value

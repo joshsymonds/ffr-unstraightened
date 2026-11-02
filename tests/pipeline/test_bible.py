@@ -231,39 +231,7 @@ def test_build_drops_empty_speaker_from_arc_characters_and_stores_the_drop(tmp_p
             Rejected,
         ),
         (
-            {
-                "characters": [],
-                "facts": [
-                    {
-                        "fact": "Made-up fact with an unknown ref. Not game text.",
-                        "lines": [{"namespace": "ST_C09_001_01", "key": "1"}],
-                    }
-                ],
-                "callbacks": [],
-                "arcs": [],
-            },
-            Rejected,
-        ),
-        (
             {**BIBLE_ONE, "arcs": [{**MADE_UP_ARC, "characters": ["Nobody"]}]},
-            Rejected,
-        ),
-        (
-            {
-                **BIBLE_ONE,
-                "arcs": [
-                    {**MADE_UP_ARC, "beats": [{"line": {"namespace": "ST_C09_001_01", "key": "1"}, "kind": "setup", "earned": False}]}
-                ],
-            },
-            Rejected,
-        ),
-        (
-            {
-                **BIBLE_ONE,
-                "callbacks": [
-                    {"line": {"namespace": "ST_C09_001_01", "key": "1"}, "depends": [], "meaning": "Made-up callback line. Not game text."}
-                ],
-            },
             Rejected,
         ),
     ],
@@ -271,10 +239,7 @@ def test_build_drops_empty_speaker_from_arc_characters_and_stores_the_drop(tmp_p
         "unfinished",
         "rejected",
         "unknown-speaker",
-        "unknown-ref",
         "arc-unknown-character",
-        "arc-unknown-beat-ref",
-        "callback-unknown-line",
     ],
 )
 def test_failed_chapter_is_returned_stores_nothing_and_stays_unfinished(
@@ -378,17 +343,55 @@ def test_build_accepts_ref_to_a_line_of_a_later_passed_chapter(tmp_path: Path) -
     assert built == [{**BIBLE_LATER_REF, "chapter": 1}, {**BIBLE_TWO, "chapter": 2}]
 
 
-def test_build_rejects_ref_to_no_passed_line_and_stores_nothing(tmp_path: Path) -> None:
-    store = Store(tmp_path)
-    unknown = {
-        **BIBLE_ONE,
-        "facts": [{"fact": "Made-up fact with an unknown ref. Not game text.", "lines": [{"namespace": "ST_C09_001_01", "key": "1"}]}],
+def test_build_drops_out_of_scope_fact_callback_and_beat_refs_and_stores_the_drop(tmp_path: Path) -> None:
+    # Made-up refs: an in-scope line of chapter one and a line naming no passed line. Not game text.
+    in_scope_one = {"namespace": "ST_C01_001_01", "key": "1"}
+    in_scope_two = {"namespace": "ST_C01_001_01", "key": "2"}
+    unknown = {"namespace": "ST_C09_001_01", "key": "1"}
+    beatless_arc = {
+        "id": "made-up-beatless-arc",
+        "characters": ["Ash"],
+        "state": "Made-up arc state with no beat left. Not game text.",
+        "beats": [{"line": unknown, "kind": "payoff", "earned": True}],
+    }
+    answer = {
+        "characters": BIBLE_ONE["characters"],
+        "facts": [
+            {"fact": "Made-up fact beside an out-of-scope line. Not game text.", "lines": [unknown, in_scope_one]},
+            {"fact": "Made-up fact whose only line is out of scope. Not game text.", "lines": [unknown]},
+        ],
+        "callbacks": [
+            {"line": in_scope_two, "depends": [], "meaning": "Made-up callback meaning in scope. Not game text."},
+            {"line": unknown, "depends": [], "meaning": "Made-up callback meaning out of scope. Not game text."},
+        ],
+        "arcs": [
+            {
+                **MADE_UP_ARC,
+                "beats": [
+                    {"line": unknown, "kind": "escalation", "earned": False},
+                    {"line": in_scope_one, "kind": "setup", "earned": False},
+                ],
+            },
+            beatless_arc,
+        ],
+    }
+    dropped = {
+        "characters": BIBLE_ONE["characters"],
+        "facts": [{"fact": "Made-up fact beside an out-of-scope line. Not game text.", "lines": [in_scope_one]}],
+        "callbacks": [{"line": in_scope_two, "depends": [], "meaning": "Made-up callback meaning in scope. Not game text."}],
+        "arcs": [
+            {**MADE_UP_ARC, "beats": [{"line": in_scope_one, "kind": "setup", "earned": False}]},
+            {**beatless_arc, "beats": []},
+        ],
     }
 
-    failed = build(store, [(1, C1_LINES), (None, UNPLACED_LINES)], FakeAsk(unknown))
+    built = build(Store(tmp_path), [(1, C1_LINES)], FakeAsk(answer, NO_SETUPS))
 
-    assert isinstance(failed, Rejected)
-    assert store.finished() == []
+    assert built == [{**dropped, "chapter": 1}]
+    rereads = FakeAsk()
+    reread = chapter(Store(tmp_path), 1, C1_LINES, [], C1_SCOPE, C1_SPEAKERS, rereads)
+    assert reread == {**dropped, "chapter": 1}
+    assert rereads.calls == []
 
 
 def test_setup_schema_requires_line_depends_and_meaning_with_no_extra_properties() -> None:
