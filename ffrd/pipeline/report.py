@@ -7,6 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from ffrd import scenes as scene_file
 from ffrd.game import Fail, natural, repo_root
 from ffrd.pipeline.lens import load_lens
 from ffrd.pipeline.stages import KEEP_REASONS
@@ -24,6 +25,7 @@ OUTCOME_LABELS = {
     "untouched": "untouched",
 }
 GATE = re.compile(r"[a-z0-9]+([-_][a-z0-9]+)*")
+Key = tuple[str, str]  # (namespace, key)
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,15 @@ def _records(path: Path, triage: frozenset[str]) -> list[Record]:
     return records
 
 
+def _keys(path: Path) -> set[Key]:
+    # Runs after _records has validated every line, so each line holds a string namespace and key.
+    try:
+        with path.open("rb") as handle:
+            return {(obj["namespace"], obj["key"]) for obj in (json.loads(raw) for raw in handle)}
+    except OSError as e:
+        raise Fail(f"cannot read outcomes {path}: {e.strerror}") from e
+
+
 def _count(obj: dict[str, object], name: str, where: str) -> int:
     value = _require(obj, name, where)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -244,15 +255,26 @@ def render(records: list[Record], triage_ids: list[str]) -> list[str]:
     return lines
 
 
+def _scene_line(table: list[scene_file.SceneLine], keys: set[Key]) -> str:
+    scenes = {line.scene for line in table}
+    table_keys = {(line.namespace, line.key) for line in table}
+    covered = {line.scene for line in table if (line.namespace, line.key) in keys}
+    family = {namespace for namespace, key in keys if (namespace, key) not in table_keys}
+    return f"scenes: {len(covered)} of {len(scenes)} from the scene table, {len(family)} outside it"
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     lens_dir = work_dir(args.lens)
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
     triage_ids = [q.id for q in lens.triage]
     records = _records(lens_dir / OUTCOMES, frozenset(triage_ids))
+    keys = _keys(lens_dir / OUTCOMES)
     arcs, with_changes = _arcs(lens_dir / ARCS)
     recall = _recall(lens_dir / RECALL, triage_ids)
+    table = scene_file.load()
     for line in render(records, triage_ids):
         print(line)
+    print(_scene_line(table, keys))
     print(f"arcs: {arcs}, {with_changes} with changes")
     for rid in triage_ids:
         disagreements, confirmed = recall[rid]
