@@ -1,24 +1,25 @@
-"""smoke: run one in-scope scene through every pipeline stage under work/smoke/, call each data-conditional stage the run left without a result once, print the DL38 prefix report and each required stage's result count, and fail when a required stage produced no result. Prints opaque scene labels, prefix and stage labels and counts, never scene keys or text."""
+"""smoke: run one in-scope scene through every pipeline stage under work/smoke/, call each data-conditional stage the run left without a result once, print the DL38 prefix report, each required stage's result count and the scene stage counts, and fail when a required stage produced no result. Prints opaque scene labels, prefix and stage labels and counts, never scene keys or text."""
 
 import argparse
 import re
 import threading
 from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ffrd.game import Fail
-from ffrd.pipeline import arcs, bible, claude, coherence, stages
+from ffrd.pipeline import arcs, bible, claude, coherence, scene_pass, stages
 from ffrd.pipeline import jev as jev_client
-from ffrd.pipeline.lens import Lens, TriageQuestion
+from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.run import Outcome, _chapters, opaque_label, run
 from ffrd.pipeline.scope import in_scope, scoped
 from ffrd.pipeline.stages import Ask, Classifier, Scene
 from ffrd.pipeline.store import Result, Store, work_dir
 
-# Made-up lens: its questions and criteria hold no game text. Screen flags the first two spoken lines with a reason a rewrite can fix.
+# Made-up lens: its questions, criteria and scene text hold no game text. Screen flags the first two spoken lines with a reason a rewrite can fix; the scene pass looks for one made-up pattern.
 SMOKE = Lens(
     name="smoke",
     triage=(
@@ -28,6 +29,12 @@ SMOKE = Lens(
     screen_criteria=("Flag the first two lines of the scene that have a speaker, with the reason smoke-fixable.",),
     intent_rule="Say in one sentence what the rewritten line must do for the player in this scene.",
     judge_rubric="The candidate keeps the meaning, the plot facts and the speaker's character of the target line, and changes no more than the problem needs.",
+    scene=SceneSection(
+        patterns=(ScenePattern(id="smoke-scene-hit", question="Does the scene carry a made-up smoke pattern on some of its lines?"),),
+        criteria=("Name the smoke-scene-hit pattern and the lines that carry it.",),
+        plan="Keep the scene for a listed reason, or plan at most four line rewrites that remove the pattern.",
+        rubric="The candidate keeps the meaning of the target line and the scene around it.",
+    ),
 )
 
 CLASSIFIER = "classifier"
@@ -51,6 +58,8 @@ REQUIRED_STAGES: tuple[str, ...] = (
     arcs.STAGE,
     SELECTION,
 )
+# Printed after the required stages. Only the screen is required, and only when the picked scene came from the scene table.
+SCENE_STAGES: tuple[str, ...] = (scene_pass.SCREEN_STAGE, scene_pass.PLAN_STAGE, scene_pass.JUDGE_STAGE)
 
 # Guards the shared counts and returned lists: stage calls run concurrently, and each update is a read-modify-write.
 _COUNTS_LOCK = threading.Lock()
@@ -212,6 +221,8 @@ def cmd_smoke(args: argparse.Namespace) -> None:
     scenes = bound.scenes.scenes()
     _prefix_report(scenes)
     picked = _pick(scoped(scenes, scene_table=bound.scenes.scene_table), args.scene)
+    # scoped() rebuilds each scene without its table flag, which the run needs to decide the scene pass.
+    picked = replace(picked, table=next(scene.table for scene in scenes if scene.key == picked.key))
     root = work_dir(SMOKE.name)
     counts: Counter[str] = Counter()
     store = _CountingStore(root, counts)
@@ -237,6 +248,10 @@ def cmd_smoke(args: argparse.Namespace) -> None:
         print(f"stage {stage}: {counts[stage]}{mark}")
         if counts[stage] == 0:
             missing.append(stage)
+    for stage in SCENE_STAGES:
+        print(f"stage {stage}: {counts[stage]}")
+    if picked.table and counts[scene_pass.SCREEN_STAGE] == 0:
+        missing.append(scene_pass.SCREEN_STAGE)
     if missing:
         raise Fail(f"smoke: no result from {', '.join(missing)}")
 
