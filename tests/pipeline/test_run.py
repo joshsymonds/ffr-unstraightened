@@ -451,6 +451,11 @@ def _is_scene_judge(parts: Sequence[str]) -> bool:
     return f"Judge rubric:\n{SCENE_LENS.stage_text('scene')}" in parts
 
 
+def _is_scene_arc(parts: Sequence[str]) -> bool:
+    """True for an arc judge call under the scene rubric, the second arc pass."""
+    return any(part.startswith("Scene rubric:\n") for part in parts)
+
+
 def _target(parts: Sequence[str]) -> tuple[str, str]:
     ref = json.loads(_part(parts, "Target line:\n"))
     return ref["namespace"], ref["key"]
@@ -500,6 +505,8 @@ class FakeClaude:
         self.coherence: list[dict[str, Any] | Unfinished | Rejected] = []
         # Answers for arc judge calls in order, first pass then recheck; an empty queue answers holds with no reverts. Not game text.
         self.arc: list[dict[str, Any] | Unfinished | Rejected] = []
+        # Answers for arc judge calls under the scene rubric, the second pass, in order; an empty queue answers holds with no reverts. Not game text.
+        self.scene_arc: list[dict[str, Any] | Unfinished | Rejected] = []
         # Answers for the scene pass's screen and plan calls. The re-plan, the plan call that names excluded lines, has its own answer. Not game text.
         self.scene_screen: dict[str, Any] | Unfinished | Rejected = {"patterns": []}
         self.scene_plan: dict[str, Any] | Unfinished | Rejected = {"keep": True, "keep_reason": "plot", "lines": []}
@@ -553,6 +560,8 @@ class FakeClaude:
                 return self.scene_judge.pop(0) if self.scene_judge else {"coherent": True, "revert": []}
             return self.coherence.pop(0) if self.coherence else {"coherent": True, "revert": []}
         if schema is arcs.SCHEMA:
+            if _is_scene_arc(parts):
+                return self.scene_arc.pop(0) if self.scene_arc else {"holds": True, "revert": []}
             return self.arc.pop(0) if self.arc else {"holds": True, "revert": []}
         if schema is scene_pass.SCREEN_SCHEMA:
             return self.scene_screen
@@ -1561,6 +1570,14 @@ def _arc_calls(claude: FakeClaude) -> list[list[str]]:
     return [parts for _, parts, schema in claude.calls if schema is arcs.SCHEMA]
 
 
+def _first_pass_arc_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for parts in _arc_calls(claude) if not _is_scene_arc(parts)]
+
+
+def _scene_arc_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for parts in _arc_calls(claude) if _is_scene_arc(parts)]
+
+
 def _arc_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
     return [(line["namespace"], line["key"]) for line in json.loads(_part(parts, "Arc lines:\n"))]
 
@@ -2245,9 +2262,9 @@ PLAN_SCENE = Scene(
 )
 
 
-def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = ()) -> _Context:
+def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = (), lens: Lens = LENS_OBJ) -> _Context:
     return _Context(
-        lens=LENS_OBJ,
+        lens=lens,
         store=Store(tmp_path / "work" / LENS),
         classifier=FakeClassifier(),
         renderer=FakeRenderer({}),
@@ -2324,7 +2341,7 @@ def test_arc_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan(tmp
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
         Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
     ]
-    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS)
     kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
     assert kept_outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
@@ -2342,7 +2359,7 @@ def test_arc_revert_of_one_plan_leaves_the_other_plan_to_ship(tmp_path: Path) ->
         Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
         Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
     ]
-    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS)
     kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
     assert kept_outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
@@ -2361,7 +2378,7 @@ def test_arc_unfinished_plan_line_leaves_every_changed_line_of_that_plan_unfinis
         Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
         Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
     ]
-    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS)
     kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
     assert kept_outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None, plan=PLAN_ID),
@@ -2369,6 +2386,133 @@ def test_arc_unfinished_plan_line_leaves_every_changed_line_of_that_plan_unfinis
         Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
     ]
     assert kept_changes == [changes[2]]
+
+
+# Made-up line-pass and scene-pass changes for the two arc passes, in arc a and arc c. Not game text.
+TWO_PASS_BASE = [
+    Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+]
+TWO_PASS_PLAN = Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_ID)
+TWO_PASS_LINE_PASS = [_change(NS_A, "1", 1), _change(NS_B, "1", 2)]
+
+
+def _arc_judge_keys(root: Path) -> list[str]:
+    store = Store(root / "work" / LENS)
+    return sorted(key for key in store.finished() if (saved := store.read(key)) is not None and saved.stage == arcs.STAGE)
+
+
+def test_first_pass_prompts_and_arc_judge_keys_match_with_and_without_scene_pass_rewrites(tmp_path: Path) -> None:
+    without_claude = FakeClaude()
+    without_root = tmp_path / "without"
+    without = _arc_judged(
+        _plan_context(without_root, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS),
+        ARC_SCENES,
+        TWO_PASS_BASE,
+        TWO_PASS_LINE_PASS,
+        without_claude.start_batch(),
+    )
+    with_claude = FakeClaude()
+    with_root = tmp_path / "with"
+    with_pass = _arc_judged(
+        _plan_context(with_root, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS),
+        ARC_SCENES,
+        [*TWO_PASS_BASE, TWO_PASS_PLAN],
+        [*TWO_PASS_LINE_PASS, _change(NS_A, "2", 1, plan=PLAN_ID)],
+        with_claude.start_batch(),
+    )
+    assert _first_pass_arc_calls(without_claude)
+    assert _first_pass_arc_calls(with_claude) == _first_pass_arc_calls(without_claude)
+    assert _arc_judge_keys(with_root) == _arc_judge_keys(without_root)
+    assert _arc_judge_keys(with_root)
+    assert _scene_arc_calls(without_claude) == []
+    assert _scene_arc_calls(with_claude)
+    assert without[0] == TWO_PASS_BASE
+    assert [o for o in with_pass[0] if o.plan is None] == without[0]
+
+
+def test_rerun_that_adds_the_scene_pass_on_the_same_store_makes_no_first_pass_call(tmp_path: Path) -> None:
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS)
+    _arc_judged(context, ARC_SCENES, TWO_PASS_BASE, TWO_PASS_LINE_PASS, FakeClaude().start_batch())
+    rerun = FakeClaude()
+    _arc_judged(
+        context,
+        ARC_SCENES,
+        [*TWO_PASS_BASE, TWO_PASS_PLAN],
+        [*TWO_PASS_LINE_PASS, _change(NS_A, "2", 1, plan=PLAN_ID)],
+        rerun.start_batch(),
+    )
+    assert _first_pass_arc_calls(rerun) == []
+    assert _scene_arc_calls(rerun)
+
+
+def test_second_pass_revert_of_one_plan_line_reverts_the_whole_plan_to_gate_failed_arc(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.scene_arc = [_arc_verdict(False, (NS_A, "1")), _arc_verdict(False, (NS_A, "1"))]
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_B, "1", 2, plan=PLAN_ID)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+    ]
+    kept_outcomes, kept_changes = _arc_judged(
+        _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS), ARC_SCENES, outcomes, changes, claude.start_batch()
+    )
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+    ]
+    assert kept_changes == []
+    assert _first_pass_arc_calls(claude) == []
+
+
+def test_second_pass_answer_naming_a_line_pass_line_never_reverts_it(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.scene_arc = [_arc_verdict(False, (NS_B, "1"))]
+    changes = [_change(NS_B, "1", 2), _change(NS_A, "1", 1, plan=PLAN_ID)]
+    outcomes = [
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+    ]
+    kept_outcomes, kept_changes = _arc_judged(
+        _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS), ARC_SCENES, outcomes, changes, claude.start_batch()
+    )
+    assert kept_outcomes == [
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None, plan=PLAN_ID),
+    ]
+    assert kept_changes == [changes[0]]
+
+
+def test_line_pass_line_its_first_pass_reverted_has_no_rewrite_in_the_second_pass(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.arc = [_arc_verdict(False, (NS_B, "1")), _arc_verdict(False, (NS_B, "1"))]
+    changes = [_change(NS_B, "1", 2), _change(NS_A, "1", 1, plan=PLAN_ID)]
+    outcomes = [
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+    ]
+    kept_outcomes, kept_changes = _arc_judged(
+        _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}], SCENE_LENS), ARC_SCENES, outcomes, changes, claude.start_batch()
+    )
+    assert _outcome_of(kept_outcomes, (NS_B, "1")) == Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None)
+    [second] = _scene_arc_calls(claude)
+    assert _arc_refs(second) == [(NS_A, "1")]
+    assert kept_changes == [changes[1]]
+
+
+def test_a_lens_without_a_scene_section_makes_no_second_pass_call(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_B, "1", 2, plan=PLAN_ID)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+    ]
+    kept_outcomes, kept_changes = _arc_judged(
+        _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}]), ARC_SCENES, outcomes, changes, claude.start_batch()
+    )
+    assert _arc_calls(claude) == []
+    assert kept_outcomes == outcomes
+    assert kept_changes == changes
 
 
 # Made-up scene-pass lens, scene and answers. Not game text.
@@ -2922,7 +3066,7 @@ def test_provisional_file_shows_the_chapter_one_scene_lines_of_a_shipped_scene_p
 def test_provisional_scene_lines_are_taken_before_an_arc_revert_of_a_scene_pass_line(tmp_path: Path) -> None:
     claude = _scene_claude()
     claude.bible = {1: ARC_BIBLE}
-    claude.arc = [_arc_verdict(False, (NS_A, "2")), _arc_verdict(False, (NS_A, "2"))]
+    claude.scene_arc = [_arc_verdict(False, (NS_A, "2")), _arc_verdict(False, (NS_A, "2"))]
     outcomes = _scene_run(tmp_path, claude, scene=ARC_TABLE_SCENE)
     plan = scene_pass.plan_id(ARC_TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
     assert _outcome_of(outcomes, (NS_A, "2")).gate == "arc"
