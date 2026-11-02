@@ -426,6 +426,12 @@ def _join(
     return joined
 
 
+def _with_plans(refs: frozenset[tuple[str, str]], changes: Sequence[Change]) -> frozenset[tuple[str, str]]:
+    """Widens refs to every changed line that shares a plan with one of them, so a plan reverts or stays unfinished as a whole."""
+    plans = {change.plan for change in changes if change.plan is not None and (change.namespace, change.key) in refs}
+    return refs | {(change.namespace, change.key) for change in changes if change.plan in plans}
+
+
 def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: list[Change], ask: Ask) -> tuple[list[Outcome], list[Change]]:
     if len(changes) < 2:
         return outcomes, changes
@@ -434,9 +440,10 @@ def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: lis
     verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, scene_arcs, ask)
     if isinstance(verdict, Unfinished | Rejected):
         return [replace(o, outcome="unfinished", writer=None) if (o.namespace, o.key) in rewrites else o for o in outcomes], []
+    reverted = _with_plans(verdict, changes)
     return (
-        [replace(o, outcome="gate_failed", gate="scene", writer=None) if (o.namespace, o.key) in verdict else o for o in outcomes],
-        [change for change in changes if (change.namespace, change.key) not in verdict],
+        [replace(o, outcome="gate_failed", gate="scene", writer=None) if (o.namespace, o.key) in reverted else o for o in outcomes],
+        [change for change in changes if (change.namespace, change.key) not in reverted],
     )
 
 
@@ -456,9 +463,10 @@ def _arc_judged(
 ) -> tuple[list[Outcome], list[Change]]:
     rewrites = {(change.namespace, change.key): change.text for change in changes}
     verdicts = arcs.judge(ctx.store, ctx.lens, ctx.arcs, scenes, rewrites, ask)
-    dropped = verdicts.reverted | verdicts.unfinished
+    planned = arcs.Verdicts(_with_plans(verdicts.reverted, changes), _with_plans(verdicts.unfinished, changes))
+    dropped = planned.reverted | planned.unfinished
     return (
-        [_arc_outcome(outcome, verdicts) for outcome in outcomes],
+        [_arc_outcome(outcome, planned) for outcome in outcomes],
         [change for change in changes if (change.namespace, change.key) not in dropped],
     )
 

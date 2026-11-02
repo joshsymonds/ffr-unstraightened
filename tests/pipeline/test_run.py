@@ -16,7 +16,19 @@ from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.run import Change, Outcome, _record, cmd_run, register, run, write_dialog, write_outcomes
+from ffrd.pipeline.run import (
+    Change,
+    Outcome,
+    _arc_judged,
+    _coherent,
+    _Context,
+    _record,
+    cmd_run,
+    register,
+    run,
+    write_dialog,
+    write_outcomes,
+)
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
@@ -2141,3 +2153,141 @@ def test_run_command_passes_through_to_the_run(lens_repo: Path, monkeypatch: pyt
     assert _dialog_files(lens_repo / "dialog" / LENS) == ["chapter-01.toml"]
     assert len(jev.calls) == 1
     assert (lens_repo / "reports" / f"{LENS}-c01.txt").read_text(encoding="utf-8") == EXPECTED_PROVISIONAL
+
+
+# Made-up plan lines, scenes and answers for the revert of a whole plan. Not game text.
+PLAN_TWO_ID = "made-up-plan-two"
+PLAN_SCENE = Scene(
+    "made-up-scene-e",
+    (
+        _line(NS_C, "2", None, EN_ONE, 3),
+        _line(NS_C, "3", None, EN_TWO, 3),
+        _line(NS_C, "4", None, EN_A3, 3),
+        _line(NS_C, "5", None, EN_B2, 3),
+    ),
+)
+
+
+def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = ()) -> _Context:
+    return _Context(
+        lens=LENS_OBJ,
+        store=Store(tmp_path / "work" / LENS),
+        classifier=FakeClassifier(),
+        renderer=FakeRenderer({}),
+        run_id=RUN,
+        jev=None,
+        bibles=list(bibles),
+        arcs=arcs.consolidate(bibles),
+        lines={},
+    )
+
+
+def _arc_answers(claude: FakeClaude, answers: Mapping[str, dict[str, Any] | Unfinished | Rejected]) -> Ask:
+    """Answers the arc judge of each named arc by its id and every other call from the FakeClaude. Not game text."""
+
+    def ask(model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
+        if schema is arcs.SCHEMA:
+            arc_id = json.loads(_part(parts, "Arc:\n"))["id"]
+            if arc_id in answers:
+                return answers[arc_id]
+        return claude.ask(model, parts, schema)
+
+    return ask
+
+
+def test_coherence_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan_and_the_unplanned_line_ships(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.coherence = [_verdict(False, (NS_C, "2")), _verdict(False, (NS_C, "2"))]
+    changes = [_change(NS_C, "2", 3, plan=PLAN_ID), _change(NS_C, "3", 3, plan=PLAN_ID), _change(NS_C, "4", 3)]
+    outcomes = [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice"),
+    ]
+    kept_outcomes, kept_changes = _coherent(_plan_context(tmp_path), PLAN_SCENE, outcomes, changes, claude.start_batch())
+    assert kept_outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice"),
+    ]
+    assert kept_changes == [_change(NS_C, "4", 3)]
+
+
+def test_coherence_revert_of_one_plan_leaves_the_other_plan_to_ship(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.coherence = [_verdict(False, (NS_C, "2")), _verdict(False, (NS_C, "2"))]
+    changes = [
+        _change(NS_C, "2", 3, plan=PLAN_ID),
+        _change(NS_C, "3", 3, plan=PLAN_ID),
+        _change(NS_C, "4", 3, plan=PLAN_TWO_ID),
+        _change(NS_C, "5", 3, plan=PLAN_TWO_ID),
+    ]
+    outcomes = [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+        Outcome(NS_C, "5", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    kept_outcomes, kept_changes = _coherent(_plan_context(tmp_path), PLAN_SCENE, outcomes, changes, claude.start_batch())
+    assert kept_outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
+        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+        Outcome(NS_C, "5", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    assert kept_changes == changes[2:]
+
+
+def test_arc_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    answers = {ARC_A: _arc_verdict(False, (NS_A, "1"))}
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_B, "1", 2, plan=PLAN_ID)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+    ]
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+    ]
+    assert kept_changes == []
+
+
+def test_arc_revert_of_one_plan_leaves_the_other_plan_to_ship(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    answers = {ARC_A: _arc_verdict(False, (NS_A, "1")), ARC_C: _arc_verdict(True)}
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_B, "1", 2, plan=PLAN_ID), _change(NS_A, "2", 1, plan=PLAN_TWO_ID)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "gate_failed", "arc", None, plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
+    ]
+    assert kept_changes == [changes[2]]
+
+
+def test_arc_unfinished_plan_line_leaves_every_changed_line_of_that_plan_unfinished(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    answers = {ARC_C: Unfinished("Made-up arc failure. Not game text.")}
+    changes = [_change(NS_A, "1", 1, plan=PLAN_ID), _change(NS_A, "2", 1, plan=PLAN_ID), _change(NS_B, "1", 2)]
+    outcomes = [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    ]
+    context = _plan_context(tmp_path, [{**ARC_BIBLE, "chapter": 1}])
+    kept_outcomes, kept_changes = _arc_judged(context, ARC_SCENES, outcomes, changes, _arc_answers(claude, answers))
+    assert kept_outcomes == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "unfinished", None, None, plan=PLAN_ID),
+        Outcome(NS_A, "2", 1, "made-up-speaker-c", (ALPHA,), "unfinished", None, None, plan=PLAN_ID),
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    ]
+    assert kept_changes == [changes[2]]
