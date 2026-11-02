@@ -267,7 +267,7 @@ def test_named_keep_names_every_keep_reason(scene: SceneSection, reason: str) ->
 
 def test_named_keep_never_keeps_a_minor_flirt_hit_as_not_recurring(scene: SceneSection) -> None:
     text = scene_paragraph(scene.plan, "named-keep")
-    assert "Never name not-recurring for a minor-flirt hit" in text
+    assert "For a minor-flirt hit, not-recurring never keeps it" in text
     assert "counts even once" in text
 
 
@@ -309,6 +309,14 @@ SCENE_PHRASES: tuple[tuple[str, str, str], ...] = (
     ("plan", "no-invented-topic", "Every fix"),
     ("rubric", "keep-flirt-beat", "flirt beat"),
     ("rubric", "no-wiser-women", "Women Are Wiser"),
+    ("criteria", "minor-flirt", "wins over trait-density"),
+    ("criteria", "minor-flirt", "over every flirt-trait or characterization carve-out"),
+    ("criteria", "minor-flirt", "a recorded flirting trait never exempts it"),
+    ("plan", "trait-density", "never applies to a minor-flirt hit"),
+    ("plan", "named-keep", "For a minor-flirt hit, not-recurring never keeps it"),
+    ("plan", "named-keep", "that hit counts even once"),
+    ("plan", "named-keep", "trait never keeps it either"),
+    ("rubric", "keep-flirt-beat", "never counts as the kept flirt beat"),
 )
 
 
@@ -324,3 +332,11 @@ def test_doc_has_a_scene_pass_section() -> None:
 @pytest.mark.parametrize("label", sorted(SCENE_LABELS))
 def test_scene_label_appears_in_doc_in_backticks(label: str) -> None:
     assert f"`{label}`" in DOC.read_text(encoding="utf-8")
+
+
+MINOR_FLIRT_DOC_SENTENCE = "A minor-flirt hit counts even once and wins over every flirt-trait or characterization carve-out."
+
+
+def test_doc_minor_flirt_bullet_carries_the_even_once_sentence() -> None:
+    (bullet,) = re.findall(r"^- `minor-flirt`:.*(?:\n  .*)*", DOC.read_text(encoding="utf-8"), re.M)
+    assert MINOR_FLIRT_DOC_SENTENCE in " ".join(bullet.split())
