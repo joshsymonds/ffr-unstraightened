@@ -1,4 +1,4 @@
-"""Pipeline stages: Jev triage and the Sonnet screen per scene, then Opus intent, draft, scene judge and cross-scene judge and the voice render per line, each stored by its inputs and the lens text it reads; plus the per-batch Claude account and the injected scene, classifier and renderer interfaces."""
+"""Pipeline stages: Jev triage and the Opus screen per scene, then Opus intent, draft, scene judge and cross-scene judge and the voice render per line, each stored by its inputs and the lens text it reads; plus the per-batch Claude account and the injected scene, classifier and renderer interfaces."""
 
 import atexit
 import json
@@ -311,7 +311,7 @@ def screen(
     ]
 
     def call() -> list[dict[str, Any]]:
-        answer = ask(claude.SONNET, parts, SCREEN_SCHEMA)
+        answer = ask(claude.OPUS, parts, SCREEN_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
         flagged = _flagged(answer, lens, scene)
@@ -321,7 +321,7 @@ def screen(
 
     lens_text = lens.stage_text("screen") + "\n" + lens.stage_text("triage")
     try:
-        flagged = store.run("screen", {**_inputs(scene), "cast": list(cast)}, lens_text, call).value
+        flagged = store.run("screen", {**_inputs(scene), "cast": list(cast), "model": claude.OPUS}, lens_text, call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["reasons"]) for entry in flagged}

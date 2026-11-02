@@ -312,7 +312,7 @@ def _heading_part(heading: str, value: Any) -> str:
     return f"{heading}:\n" + json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def test_screen_asks_sonnet_with_schema_and_returns_reasons_in_lens_order(tmp_path: Path) -> None:
+def test_screen_asks_opus_with_schema_and_returns_reasons_in_lens_order(tmp_path: Path) -> None:
     answer = {
         "flagged": [
             {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key, "reasons": ["made-up-beta", "made-up-alpha"]},
@@ -328,12 +328,22 @@ def test_screen_asks_sonnet_with_schema_and_returns_reasons_in_lens_order(tmp_pa
         (LINE_TWO.namespace, LINE_TWO.key): ("made-up-beta",),
     }
     model, parts, schema = ask.calls[0]
-    assert model == claude.SONNET
+    assert model == claude.OPUS
     assert schema == SCREEN_SCHEMA
     prompt = "\n".join(parts)
     assert "Made-up criterion one. Not game text." in prompt
     assert "made-up-alpha" in prompt
     assert "Made-up first line. Not game text." in prompt
+
+
+def test_screen_store_key_carries_the_model_so_sonnet_era_answers_are_not_reused(tmp_path: Path) -> None:
+    screen(Store(tmp_path), LENS, SCENE, CAST, Fake({"flagged": []}))
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    lens_text = LENS.stage_text("screen") + "\n" + LENS.stage_text("triage")
+
+    assert record.stem == store_key("screen", {**inputs, "model": "opus"}, lens_text)
+    assert store_key("screen", inputs, lens_text) != record.stem
 
 
 def test_screen_prompt_lines_carry_namespace_key_speaker_and_english_only(tmp_path: Path) -> None:
@@ -613,6 +623,35 @@ def test_draft_store_key_does_not_carry_the_intent_schema_version(tmp_path: Path
     inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "targets": [target], "retry": None}
 
     assert record.stem == store_key("draft", inputs, LENS.stage_text("intent"))
+
+
+def test_judge_store_key_does_not_carry_a_model_field(tmp_path: Path) -> None:
+    judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(JUDGE_ANSWER),
+    )
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "line": {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key},
+        "text": "Made-up candidate. Not game text.",
+        "callbacks": [CALLBACK],
+        "reasons": list(REASONS),
+        "intent": INTENT_TEXT,
+        "context": CONTEXT,
+    }
+    lens_text = LENS.stage_text("judge") + "\n" + LENS.stage_text("triage")
+
+    assert record.stem == store_key("judge", inputs, lens_text)
 
 
 def test_intent_prompt_carries_rule_callbacks_japanese_lines_and_target_reasons(tmp_path: Path) -> None:
