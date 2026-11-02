@@ -333,6 +333,56 @@ def test_base_problem_reported_with_other_problems_in_one_fail(tmp_path: Path) -
     assert f"{path}: intent.rule is missing" in message
 
 
+SELECTION_LINE = 'selection = "queering"\n'
+
+
+def test_declared_selection_loads_into_selection_field(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, SELECTION_LINE + VALID))
+    assert lens.selection == "queering"
+    assert lens == replace(EXPECTED_LENS, selection="queering")
+
+
+def test_lens_without_selection_has_none(tmp_path: Path) -> None:
+    assert load_lens(write_lens(tmp_path, VALID)).selection is None
+
+
+def test_selection_does_not_change_stage_text(tmp_path: Path) -> None:
+    plain = load_lens(write_lens(tmp_path, VALID_WITH_SCENE, name="plain"))
+    selected = load_lens(write_lens(tmp_path, SELECTION_LINE + VALID_WITH_SCENE, name="selected"))
+    for stage in ("triage", "screen", "intent", "judge", "scene"):
+        assert selected.stage_text(stage) == plain.stage_text(stage)
+
+
+# Each case declares a selection that is not the queering mode.
+SELECTION_INVALID_VALUES: list[tuple[str, str]] = [
+    ("other string", '"other"'),
+    ("empty", '""'),
+    ("integer", "5"),
+    ("table", '{ mode = "queering" }'),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    SELECTION_INVALID_VALUES,
+    ids=[case[0] for case in SELECTION_INVALID_VALUES],
+)
+def test_malformed_selection_raises_fail_naming_file_and_field(tmp_path: Path, label: str, value: str) -> None:
+    path = write_lens(tmp_path, f"selection = {value}\n" + VALID)
+    with pytest.raises(Fail, match=re.escape(f'{path}: selection must be "queering"')):
+        load_lens(path)
+
+
+def test_selection_problem_reported_with_other_problems_in_one_fail(tmp_path: Path) -> None:
+    text = 'selection = "other"\n' + VALID.replace('rule = "Made-up intent rule, café."', "")
+    path = write_lens(tmp_path, text)
+    with pytest.raises(Fail) as raised:
+        load_lens(path)
+    message = str(raised.value)
+    assert f'{path}: selection must be "queering"' in message
+    assert f"{path}: intent.rule is missing" in message
+
+
 README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
 FENCED_TOML = re.compile(r"^```toml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 
@@ -343,3 +393,4 @@ def test_readme_example_is_a_valid_lens(tmp_path: Path) -> None:
     lens = load_lens(write_lens(tmp_path, blocks[0], name="readme-example"))
     assert [question.id for question in lens.triage] == ["made-up-first-id", "made-up-second-id"]
     assert lens.base is None
+    assert lens.selection is None

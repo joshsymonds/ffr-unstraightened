@@ -13,7 +13,7 @@ Stage = Literal["triage", "screen", "intent", "judge", "scene"]
 
 ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge", "scene"})
-TOP_LEVEL_KEYS = SECTIONS | frozenset({"base"})
+TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection"})
 SCENE_KEYS = frozenset({"patterns", "criteria", "plan", "rubric"})
 
 
@@ -46,6 +46,7 @@ class Lens:
     judge_rubric: str
     scene: SceneSection | None = None
     base: str | None = None
+    selection: Literal["queering"] | None = None
 
     def stage_text(self, stage: Stage) -> str:
         section: object
@@ -216,6 +217,16 @@ def _base(data: dict[str, object], name: str, report: _Report) -> str | None:
     return value
 
 
+def _selection(data: dict[str, object], report: _Report) -> Literal["queering"] | None:
+    if "selection" not in data:
+        return None
+    value = data["selection"]
+    if isinstance(value, str) and value == "queering":
+        return "queering"
+    report.add("selection", 'must be "queering"')
+    return None
+
+
 def load_lens(path: Path) -> Lens:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -226,6 +237,7 @@ def load_lens(path: Path) -> Lens:
     name = path.stem
     _unknown_keys(data, TOP_LEVEL_KEYS, "", report)
     base = _base(data, name, report)
+    selection = _selection(data, report)
     triage, triage_index = _triage(data, report)
     screen = _section(data, "screen", frozenset({"criteria"}), report)
     criteria = _criteria(screen, "screen", report) if screen is not None else ()
@@ -245,4 +257,5 @@ def load_lens(path: Path) -> Lens:
         judge_rubric=rubric,
         scene=scene,
         base=base,
+        selection=selection,
     )
