@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from ffrd.find import BARE_KEY, toml_string
 from ffrd.game import Fail, natural, repo_root, vanilla_hash
-from ffrd.pipeline import arcs, bible, claude, coherence, queering, scene_pass, stages
+from ffrd.pipeline import arcs, bible, claude, coherence, ledger, queering, scene_pass, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
@@ -1119,6 +1119,7 @@ def run(
     game_scenes = scoped(scenes, scene_table=scene_table)
     scenes = _chained(game_scenes, base_texts)
     redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
+    ledger.read(root, lens.name)
     in_scope = sorted(scenes, key=_chapter_order)
     scenes = in_scope if through is None else _limited(in_scope, through)
     selecting = lens.selection == "queering"
@@ -1203,7 +1204,24 @@ def run(
     _write_arcs(store.root / ARCS, ctx.arcs, scenes, changes)
     _write_recall(store.root / RECALL, lens, recall)
     write_dialog(root / "dialog" / lens.name, changes)
+    ledger.append(root, lens.name, [_ledger_entry(lens, run_id, c) for c in sorted(changes, key=_order)])
     return outcomes
+
+
+def _ledger_entry(lens: Lens, run_id: str, c: Change) -> ledger.Entry:
+    return ledger.Entry(
+        run=run_id,
+        lens=lens.name,
+        base=lens.base,
+        namespace=c.namespace,
+        key=c.key,
+        vanilla_hash=c.vanilla,
+        base_hash=c.base,
+        text_hash=vanilla_hash(c.text),
+        reasons=c.reasons,
+        writer=c.writer,
+        plan=c.plan,
+    )
 
 
 def _batch() -> Ask:

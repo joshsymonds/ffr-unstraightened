@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import subprocess
 import threading
 import time
 import tomllib
@@ -12,7 +13,7 @@ from typing import Any, Literal
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import arcs, bible, coherence, queering, report, scene_pass, scene_record, stages
+from ffrd.pipeline import arcs, bible, coherence, ledger, queering, report, scene_pass, scene_record, stages
 from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
@@ -702,6 +703,7 @@ def _run(
     batch: Callable[[], Ask] | None = None,
     through: int | None = None,
     lens: Lens = LENS_OBJ,
+    run_id: str = RUN,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
@@ -710,7 +712,7 @@ def _run(
         scenes,
         classifier=FakeClassifier() if classifier is None else classifier,
         renderer=FakeRenderer({OPUS_A1: VOICE_A1}) if renderer is None else renderer,
-        run_id=RUN,
+        run_id=run_id,
         jev=jev,
         batch=claude.start_batch if batch is None else batch,
         scene_table=scene_table,
@@ -1147,6 +1149,11 @@ def test_scene_pass_change_started_from_a_base_rewrite_records_the_game_hash_and
     chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
     assert chapter_one[NS_A]["2"]["vanilla"] == vanilla_hash(EN_A2)
     assert chapter_one[NS_A]["2"]["base"] == vanilla_hash(BASE_A2)
+    # The ledger entry names the base lens, the base hash and the scene-pass plan.
+    entry = ledger.latest(ledger.read(tmp_path / "repo", LENS))[(NS_A, "2")]
+    assert (entry.base, entry.base_hash, entry.vanilla_hash) == (BASE, vanilla_hash(BASE_A2), vanilla_hash(EN_A2))
+    assert entry.plan is not None
+    assert entry.plan == _outcome_of(outcomes, (NS_A, "2")).plan
 
 
 def test_base_rewrite_draft_equal_to_the_game_line_is_never_judged_or_written_and_the_run_completes(tmp_path: Path) -> None:
@@ -1595,6 +1602,93 @@ def test_printed_lines_are_scene_keys_and_counts_only(tmp_path: Path) -> None:
     _assert_printed(printed)
     assert all(COUNT_LINE.fullmatch(line) for line in printed)
     assert not any(text in line for line in printed for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_B1))
+
+
+RERUN = "made-up-run-id-again"
+
+
+def _default_ledger() -> list[ledger.Entry]:
+    return [
+        ledger.Entry(
+            run=RUN,
+            lens=LENS,
+            base=None,
+            namespace=NS_A,
+            key="1",
+            vanilla_hash=vanilla_hash(EN_A1),
+            base_hash=None,
+            text_hash=vanilla_hash(VOICE_A1),
+            reasons=(ALPHA,),
+            writer="voice",
+            plan=None,
+        ),
+        ledger.Entry(
+            run=RUN,
+            lens=LENS,
+            base=None,
+            namespace=NS_B,
+            key="1",
+            vanilla_hash=vanilla_hash(EN_B1),
+            base_hash=None,
+            text_hash=vanilla_hash(OPUS_B1),
+            reasons=(ALPHA,),
+            writer="opus",
+            plan=None,
+        ),
+        ledger.Entry(
+            run=RUN,
+            lens=LENS,
+            base=None,
+            namespace=NS_C,
+            key="1",
+            vanilla_hash=vanilla_hash(EN_C1),
+            base_hash=None,
+            text_hash=vanilla_hash(OPUS_C1),
+            reasons=(ALPHA,),
+            writer="opus",
+            plan=None,
+        ),
+    ]
+
+
+def test_run_appends_one_ledger_entry_per_changed_line_with_hashes_and_ids_only(tmp_path: Path) -> None:
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert ledger.read(tmp_path / "repo", LENS) == _default_ledger()
+    raw = ledger.path(tmp_path / "repo", LENS).read_text(encoding="utf-8")
+    assert not any(text in raw for text in (*ENGLISH, OPUS_A1, OPUS_B1, OPUS_C1, VOICE_A1))
+
+
+def test_second_identical_run_with_a_new_run_id_appends_nothing(tmp_path: Path) -> None:
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), run_id=RERUN)
+    assert ledger.read(tmp_path / "repo", LENS) == _default_ledger()
+
+
+def test_ledger_with_a_committed_line_then_edited_fails_the_run_before_any_claude_call(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    ledger.append(root, LENS, _default_ledger())
+    git = ["git", "-C", str(root), "-c", "user.name=Made-up Author", "-c", "user.email=made-up@example.invalid"]
+    subprocess.run([*git, "init", "-q"], check=True, capture_output=True)
+    subprocess.run([*git, "add", "ledger"], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-q", "-m", "Made-up ledger commit"], check=True, capture_output=True)
+    file = ledger.path(root, LENS)
+    file.write_text(file.read_text(encoding="utf-8").replace('"writer": "voice"', '"writer": "opus"', 1), encoding="utf-8")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(f"ledger/{LENS}.jsonl: an existing line was changed or removed; the ledger is append-only")):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_malformed_ledger_fails_the_run_before_any_claude_call(tmp_path: Path) -> None:
+    file = ledger.path(tmp_path / "repo", LENS)
+    file.parent.mkdir(parents=True)
+    file.write_text("not a ledger entry\n", encoding="utf-8")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(f"ledger/{LENS}.jsonl:1: not a ledger entry")):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert claude.calls == []
+    assert claude.batches == 0
 
 
 # Made-up scene key holding a sentinel name. Not game text.
