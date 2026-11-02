@@ -1,6 +1,8 @@
 """run: take a lens's scenes through the pipeline, then write its outcome records to work/<lens>/ and its changed lines to dialog/<lens>/. Progress prints opaque scene labels and counts, and writes keys, counts and edits, never vanilla text."""
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -9,7 +11,7 @@ import tempfile
 import threading
 import tomllib
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -75,6 +77,24 @@ def _mkdir(directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise Fail(f"cannot create {directory}: {e.strerror}") from e
+
+
+@contextlib.contextmanager
+def _run_lock(directory: Path, lens: str) -> Iterator[None]:
+    _mkdir(directory)
+    path = directory / ".run.lock"
+    try:
+        handle = path.open("a")
+    except OSError as e:
+        raise Fail(f"cannot open {path}: {e.strerror}") from e
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise Fail(f"another ffrd run holds work/{lens}/; stop it first") from e
+        except OSError as e:
+            raise Fail(f"cannot lock {path}: {e.strerror}") from e
+        yield
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -1260,20 +1280,22 @@ def cmd_run(args: argparse.Namespace) -> None:
     lens = load_lens(root / "lenses" / f"{args.lens}.toml")
     directory = work_dir(args.lens)
     bound = stages.bindings()
+    scenes = bound.scenes.scenes()
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run(
-        root,
-        lens,
-        Store(directory),
-        bound.scenes.scenes(),
-        classifier=bound.classifier,
-        renderer=bound.renderer,
-        jev=None if args.no_jev else jev_client.triage,
-        run_id=run_id,
-        batch=_batch,
-        scene_table=bound.scenes.scene_table,
-        through=args.through,
-    )
+    with _run_lock(directory, args.lens):
+        run(
+            root,
+            lens,
+            Store(directory),
+            scenes,
+            classifier=bound.classifier,
+            renderer=bound.renderer,
+            jev=None if args.no_jev else jev_client.triage,
+            run_id=run_id,
+            batch=_batch,
+            scene_table=bound.scenes.scene_table,
+            through=args.through,
+        )
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
