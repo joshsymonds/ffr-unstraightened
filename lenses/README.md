@@ -90,8 +90,9 @@ without it loads with no selection. `selection` is not a section. It does not
 change any stage text.
 
 The only value is `"queering"`. With it, `ffrd run` runs the queering selection
-instead of the default one. The queering selection runs a Haiku screen over the
-lines of speakers who are neither core cast nor antagonists, plus the flirt's lines.
+instead of the default one. The queering selection runs an Opus screen over the
+lines of speakers who are neither core cast nor antagonists, plus the flirt's lines;
+the flirt is the one core-cast speaker the screen may flag, for his running-gag flirts.
 It buckets the marked lines per speaker and makes one draft call per speaker. It
 does not call Jev.
 
