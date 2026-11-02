@@ -44,6 +44,10 @@ SUMMARY = (
 DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
+QUEERING_LINE = (
+    r"queering (marked: [0-9]+|bucket (queer|trans|untouched): [0-9]+|flirt marked: [0-9]+, redirect half: [0-9]+"
+    r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
+)
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
 SCENE_DETAIL = (
     r"  scene (eligible: [0-9]+|plans: [0-9]+|replanned: [0-9]+|reverted lines: [0-9]+|changed lines: [0-9]+"
@@ -52,7 +56,7 @@ SCENE_DETAIL = (
     r"|gate [a-z0-9]+(?:[-_][a-z0-9]+)*: [0-9]+|character [0-9]+: [0-9]+)"
 )
 SCENE_LINE = r"scenes: [0-9]+ of [0-9]+ from the scene table, [0-9]+ outside it"
-LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{REDO_LINE}|{RECALL_LINE}")
+LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{REDO_LINE}|{QUEERING_LINE}|{RECALL_LINE}")
 
 # Made-up scene table build. Not game text.
 BUILD = "424242"
@@ -341,6 +345,77 @@ def test_absent_redo_reads_as_false(tmp_path: Path) -> None:
     path.write_bytes(_without("redo"))
     (record,) = report._records(path, frozenset({FIRST, SECOND}))
     assert record.redo is False
+
+
+@pytest.mark.parametrize("value", ["queer", "trans", "untouched", "redirect", "not-redirected", None])
+def test_bucket_null_or_listed_selection_parses_into_the_record(tmp_path: Path, value: str | None) -> None:
+    path = tmp_path / "outcomes.jsonl"
+    path.write_bytes(_lines(_record(bucket=value)))
+    (record,) = report._records(path, frozenset({FIRST, SECOND}))
+    assert record.bucket == value
+
+
+def test_absent_bucket_reads_as_none(tmp_path: Path) -> None:
+    path = tmp_path / "outcomes.jsonl"
+    path.write_bytes(_without("bucket"))
+    (record,) = report._records(path, frozenset({FIRST, SECOND}))
+    assert record.bucket is None
+
+
+# Made-up queering lens: the queering selection declared above the lens tables. Not game text.
+QUEERING_LENS_TOML = 'selection = "queering"\n' + LENS_TOML
+
+# Made-up outcomes for the queering block: eight records, the last one unmarked. Not game text.
+QUEERING_RECORDS = (
+    _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="queer"),
+    _record(chapter=1, speaker=SPEAKER_TEN, reasons=[FIRST], outcome="changed", bucket="trans"),
+    _record(chapter=1, speaker=SPEAKER_TWO, outcome="untouched", bucket="untouched"),
+    _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="redirect"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="queer"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="redirect"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched", bucket="not-redirected"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched"),
+)
+
+EXPECTED_QUEERING = [
+    "queering marked: 7",
+    "queering bucket queer: 2",
+    "queering bucket trans: 1",
+    "queering bucket untouched: 1",
+    "queering flirt marked: 3, redirect half: 2",
+    "queering changed queer: 1",
+    "queering changed trans: 1",
+    "queering changed redirect: 1",
+    "queering gate failed queer: 1",
+    "queering gate failed trans: 0",
+    "queering gate failed redirect: 1",
+]
+
+
+def test_queering_block_prints_exact_counts_after_redo_and_before_recall(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
+    _write(repo, _lines(*QUEERING_RECORDS))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    out = capsys.readouterr().out
+    for line in out.splitlines():
+        assert LINE.fullmatch(line), line
+    lines = out.splitlines()
+    redo = lines.index("redo: 0 listed, 0 changed, 0 gate failed")
+    assert lines[redo + 1 :] == [
+        *EXPECTED_QUEERING,
+        "recall made-up-first-id: 4 disagreements, 1 confirmed",
+        "recall made-up-second-id: 0 disagreements, 0 confirmed",
+    ]
+
+
+def test_lens_without_selection_prints_no_queering_line(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, _lines(*QUEERING_RECORDS))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    assert not any(line.startswith("queering ") for line in capsys.readouterr().out.splitlines())
 
 
 # Made-up outcomes for the redo line: four listed (one changed, two gate failed, one untouched),
@@ -686,6 +761,12 @@ BAD_LINES = [
     pytest.param(_lines(_record(redo="SENTINEL-REDO")), "field redo must be true or false", id="redo-type"),
     pytest.param(_lines(_record(redo=1)), "field redo must be true or false", id="redo-number"),
     pytest.param(_lines(_record(redo=None)), "field redo must be true or false", id="redo-null"),
+    pytest.param(
+        _lines(_record(bucket="SENTINEL-BUCKET")),
+        "field bucket is not a queering bucket or null",
+        id="bucket-unknown",
+    ),
+    pytest.param(_lines(_record(bucket=3)), "field bucket is not a queering bucket or null", id="bucket-number"),
 ]
 
 
