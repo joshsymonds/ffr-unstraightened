@@ -2,6 +2,9 @@
 # Keeps the core cast's sexuality and romances as written, and keeps the sincere threads.
 # Each screen criterion and each intent/judge paragraph starts with its [label].
 
+base = "unstraightening"
+selection = "queering"
+
 [[triage]]
 id = "minor-partner"
 question = "A minor character in this scene talks about their own romantic partner, and the pairing reads as a cisgender man and a cisgender woman."

@@ -10,6 +10,8 @@ lens test.
 
 ## Aims
 
+The lens chains onto the unstraightening rewrites: it starts from their output in `dialog/unstraightening/`, and the build applies the lenses in order.
+
 - Keep the story: its plot, relationships and stakes.
 - Keep every line the lens does not flag exactly as written.
 - Make a minor character's romance queer only in the two shapes the triage names.
@@ -106,6 +108,8 @@ The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 - It never adds a new romance.
 
 ## How it is checked
+
+The lens runs under the queering selection: a Haiku marker, per-speaker buckets, one draft call per speaker, and no Jev.
 
 The triage questions are used only for counts, with no Jev recheck. The marker reads only
 minor characters' lines. The lens test, `tests/lenses/test_queering.py`, pins the triage

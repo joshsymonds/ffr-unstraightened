@@ -1,4 +1,5 @@
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,8 @@ DOC_SENTENCES: tuple[str, ...] = (
     "The queerness is never the joke or the threat.",
     'The trans bucket never adds a "she\'s trans" aside.',
     "The core cast's sexuality and romances stay as written, except the flirt's split.",
+    "The lens chains onto the unstraightening rewrites: it starts from their output in `dialog/unstraightening/`, and the build applies the lenses in order.",
+    "The lens runs under the queering selection: a Haiku marker, per-speaker buckets, one draft call per speaker, and no Jev.",
 )
 HOW_IT_IS_CHECKED: tuple[str, ...] = (
     "used only for counts",
@@ -165,6 +168,25 @@ def doc_text() -> str:
 def test_lens_loads_without_a_scene_section(lens: Lens) -> None:
     assert lens.name == "queering"
     assert lens.scene is None
+
+
+def test_lens_declares_its_base_and_selection(lens: Lens) -> None:
+    assert lens.base == "unstraightening"
+    assert lens.selection == "queering"
+
+
+def test_declarations_are_the_only_top_level_keys_before_the_first_table() -> None:
+    head = LENS.read_text(encoding="utf-8").split("[[triage]]", 1)[0]
+    assert tomllib.loads(head) == {"base": "unstraightening", "selection": "queering"}
+
+
+def test_stage_texts_are_unchanged_by_the_declarations(lens: Lens, tmp_path: Path) -> None:
+    lines = LENS.read_text(encoding="utf-8").splitlines(keepends=True)
+    bare = tmp_path / "queering.toml"
+    bare.write_text("".join(line for line in lines if not line.startswith(("base = ", "selection = "))), encoding="utf-8")
+    without = load_lens(bare)
+    for stage in ("triage", "screen", "intent", "judge"):
+        assert lens.stage_text(stage) == without.stage_text(stage)
 
 
 def test_triage_is_the_three_questions_in_order(lens: Lens) -> None:
