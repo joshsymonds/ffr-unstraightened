@@ -29,7 +29,8 @@ edit needs only `vanilla` and `text`.
 Edits are keyed by namespace and key, and matched by `vanilla` hash. A stub from
 `ffrd find` sets `text` to the vanilla line, so replace it with your line before
 building. `ffrd build` rejects an unedited stub, and `ffrd leak-check` fails if a
-vanilla line of 20 or more characters is committed.
+vanilla line of 20 or more characters is committed. Lens directories under `dialog/` are
+ignored by git for that reason: their rewrites keep stretches of vanilla lines.
 
 ## Example
 

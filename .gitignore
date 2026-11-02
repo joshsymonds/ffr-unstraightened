@@ -14,3 +14,5 @@ devenv.local.nix
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+# Lens run output carries rewritten game lines; it stays local and ships only inside the built paks.
+/dialog/*/

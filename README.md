@@ -235,8 +235,8 @@ is the source when there is one. Then the arc judge reads each arc that has a ch
 its lines in story order, with the rewrites applied. The arcs are judged at the same time. Each
 check works the same way. Opus names the lines it would revert. If it finds a problem, a
 recheck sees those proposals and names only the ones that must revert. A line reverts
-only when both passes name it. The arc judge reads only the line-pass rewrites, so adding a scene pass never
-changes what it is given. Then a second arc judge reads each arc that holds a surviving
+only when both passes name it. The arc judge reads the line-pass rewrites, plus any
+scene-pass rewrite copied onto an identical line-pass line when repeated lines are unified. Then a second arc judge reads each arc that holds a surviving
 scene-pass rewrite, with the line-pass rewrites that survived, against both the judge
 rubric and the lens's scene rubric, the scene rubric winning for scene-pass lines. It
 may revert only scene-pass lines, and each revert takes the whole plan.
@@ -450,9 +450,11 @@ after a game update to re-check.
 The tag defaults to `v1.0.0`. The recipe runs `ffrd build`, then `ffrd probe`, then
 `python3 -m ffrd.release <tag>`. A failing step stops the recipe.
 
-Commit `dialog/<lens>/` and the reports before you run it. The dirty-tree check comes
-after the build and the probe, so an uncommitted run output costs a full build and probe
-before the release refuses.
+Commit the reports before you run it. The dirty-tree check comes after the build and the
+probe, so an uncommitted report costs a full build and probe before the release refuses.
+`dialog/<lens>/` is ignored by git: a rewrite keeps stretches of the vanilla line, which
+`ffrd leak-check` forbids in history. It stays in the working tree that runs the release,
+and ships only inside the built paks.
 
 `ffrd.release` refuses a dirty working tree, an invalid tag name, or a tag that already
 exists, before it writes anything. It then writes `dist/FFRS-Unstraightened-<tag>.zip`
