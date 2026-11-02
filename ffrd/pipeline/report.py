@@ -36,6 +36,7 @@ class Record:
     outcome: str
     gate: str | None
     keep_reason: str | None
+    plan: str | None = None
 
 
 def _require(obj: dict[str, object], name: str, where: str) -> object:
@@ -65,13 +66,13 @@ def _speaker(obj: dict[str, object], where: str) -> str | None:
     raise Fail(f"{where}: field speaker must be a string or null")
 
 
-def _reasons(obj: dict[str, object], where: str, triage: frozenset[str]) -> frozenset[str]:
+def _reasons(obj: dict[str, object], where: str, accepted: frozenset[str]) -> frozenset[str]:
     value = _require(obj, "reasons", where)
     if not isinstance(value, list) or not all(isinstance(r, str) for r in value):
         raise Fail(f"{where}: field reasons must be a list of strings")
     for reason in value:
-        if reason not in triage:
-            raise Fail(f"{where}: field reasons has an id that is not a triage id of the lens")
+        if reason not in accepted:
+            raise Fail(f"{where}: field reasons has an id that is not a triage or scene pattern id of the lens")
     return frozenset(value)
 
 
@@ -104,7 +105,16 @@ def _keep_reason(obj: dict[str, object], where: str) -> str | None:
     raise Fail(f"{where}: field keep_reason is not a listed keep reason or null")
 
 
-def _parse(text: str, where: str, triage: frozenset[str]) -> Record:
+def _plan(obj: dict[str, object], where: str) -> str | None:
+    if "plan" not in obj:
+        return None
+    value = obj["plan"]
+    if value is None or isinstance(value, str):
+        return value
+    raise Fail(f"{where}: field plan must be a string or null")
+
+
+def _parse(text: str, where: str, accepted: frozenset[str]) -> Record:
     try:
         obj = json.loads(text)
     except ValueError as e:
@@ -117,14 +127,15 @@ def _parse(text: str, where: str, triage: frozenset[str]) -> Record:
     return Record(
         chapter=_chapter(obj, where),
         speaker=_speaker(obj, where),
-        reasons=_reasons(obj, where, triage),
+        reasons=_reasons(obj, where, accepted),
         outcome=outcome,
         gate=_gate(obj, outcome, where),
         keep_reason=_keep_reason(obj, where),
+        plan=_plan(obj, where),
     )
 
 
-def _records(path: Path, triage: frozenset[str]) -> list[Record]:
+def _records(path: Path, accepted: frozenset[str]) -> list[Record]:
     try:
         handle = path.open("rb")
     except FileNotFoundError as e:
@@ -140,7 +151,7 @@ def _records(path: Path, triage: frozenset[str]) -> list[Record]:
                     text = raw.decode("utf-8")
                 except UnicodeDecodeError as e:
                     raise Fail(f"{where}: is not valid UTF-8") from e
-                records.append(_parse(text, where, triage))
+                records.append(_parse(text, where, accepted))
         except OSError as e:
             raise Fail(f"cannot read outcomes {path}: {e.strerror}") from e
     return records
@@ -267,7 +278,8 @@ def cmd_report(args: argparse.Namespace) -> None:
     lens_dir = work_dir(args.lens)
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
     triage_ids = [q.id for q in lens.triage]
-    records = _records(lens_dir / OUTCOMES, frozenset(triage_ids))
+    scene_ids = [] if lens.scene is None else [p.id for p in lens.scene.patterns]
+    records = _records(lens_dir / OUTCOMES, frozenset(triage_ids + scene_ids))
     keys = _keys(lens_dir / OUTCOMES)
     arcs, with_changes = _arcs(lens_dir / ARCS)
     recall = _recall(lens_dir / RECALL, triage_ids)

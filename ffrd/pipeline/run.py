@@ -47,6 +47,7 @@ class Outcome:
     gate: str | None
     writer: WriterName | None
     keep_reason: str | None = None
+    plan: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class Change:
     reasons: tuple[str, ...]
     writer: WriterName
     run: str
+    plan: str | None = None
 
 
 def _mkdir(directory: Path) -> None:
@@ -95,6 +97,7 @@ def _outcome_line(o: Outcome) -> str:
         "gate": o.gate,
         "writer": o.writer,
         "keep_reason": o.keep_reason,
+        "plan": o.plan,
     }
     return json.dumps(record, ensure_ascii=False) + "\n"
 
@@ -537,6 +540,7 @@ def _record(outcome: Outcome) -> Record:
         outcome=outcome.outcome,
         gate=outcome.gate,
         keep_reason=outcome.keep_reason,
+        plan=outcome.plan,
     )
 
 

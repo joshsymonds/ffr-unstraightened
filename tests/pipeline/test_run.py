@@ -16,7 +16,7 @@ from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, TriageQuestion
-from ffrd.pipeline.run import Change, Outcome, cmd_run, register, run, write_dialog, write_outcomes
+from ffrd.pipeline.run import Change, Outcome, _record, cmd_run, register, run, write_dialog, write_outcomes
 from ffrd.pipeline.stages import (
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
@@ -35,8 +35,9 @@ LENS = "made-up-lens"
 RUN = "made-up-run-id"
 TRIAGE_ORDER = ["made-up-first-id", "made-up-second-id"]
 TRIAGE = frozenset(TRIAGE_ORDER)
-OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason"}
+OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason", "plan"}
 FIELD_ORDER = ["vanilla", "text", "lens", "reason", "writer", "verdict", "run"]
+PLAN_ID = "made-up-plan-one"
 
 # Made-up lines. Not game text.
 EN_ONE = "Made-up English one. Not game text."
@@ -81,6 +82,7 @@ def _change(
     text: str = TEXT_ONE,
     reasons: tuple[str, ...] = ("made-up-first-id",),
     writer: Literal["voice", "opus"] = "voice",
+    plan: str | None = None,
 ) -> Change:
     # Made-up change. Not game text.
     return Change(
@@ -93,6 +95,7 @@ def _change(
         reasons=reasons,
         writer=writer,
         run=RUN,
+        plan=plan,
     )
 
 
@@ -129,6 +132,25 @@ def test_outcome_records_carry_keep_reason_only_for_a_line_the_intent_kept(tmp_p
     kept_record, other_record = (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
     assert kept_record["keep_reason"] == "earned"
     assert other_record["keep_reason"] is None
+
+
+def test_outcome_with_a_plan_id_writes_it_and_a_line_pass_outcome_writes_null(tmp_path: Path) -> None:
+    path = tmp_path / "work" / LENS / "outcomes.jsonl"
+    planned = Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID)
+    write_outcomes(path, [planned, OUTCOMES[0]])
+    planned_record, line_pass_record = (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+    assert planned_record["plan"] == PLAN_ID
+    assert line_pass_record["plan"] is None
+
+
+def test_outcome_plan_reaches_the_report_record_and_the_run_record(tmp_path: Path) -> None:
+    path = tmp_path / "work" / LENS / "outcomes.jsonl"
+    planned = Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice", plan=PLAN_ID)
+    write_outcomes(path, [planned, OUTCOMES[0]])
+    planned_record, line_pass_record = report._records(path, TRIAGE)
+    assert planned_record.plan == PLAN_ID
+    assert line_pass_record.plan is None
+    assert _record(planned).plan == PLAN_ID
 
 
 def test_outcomes_are_written_in_the_given_order_and_no_temp_file_remains(tmp_path: Path) -> None:
@@ -196,6 +218,15 @@ def test_dialog_never_contains_the_vanilla_line(tmp_path: Path) -> None:
     content = (directory / "chapter-01.toml").read_text(encoding="utf-8")
     assert EN_ONE not in content
     assert TEXT_ONE in content
+
+
+def test_change_plan_leaves_the_dialog_toml_byte_identical(tmp_path: Path) -> None:
+    without_plan = tmp_path / "without"
+    with_plan = tmp_path / "with"
+    write_dialog(without_plan, [_change()])
+    write_dialog(with_plan, [_change(plan=PLAN_ID)])
+    assert (with_plan / "chapter-01.toml").read_bytes() == (without_plan / "chapter-01.toml").read_bytes()
+    assert "plan" not in (with_plan / "chapter-01.toml").read_text(encoding="utf-8")
 
 
 def test_chapter_and_unattributed_placement_and_table_order(tmp_path: Path) -> None:

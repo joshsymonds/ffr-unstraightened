@@ -1,11 +1,14 @@
+import hashlib
 import re
 from pathlib import Path
 
 import pytest
 
-from ffrd.pipeline.lens import Lens, Stage, TriageQuestion, load_lens
+from ffrd.pipeline.lens import Lens, SceneSection, Stage, TriageQuestion, load_lens
+from ffrd.pipeline.scene_record import SCENE_KEEP_REASONS
 
 LENS = Path(__file__).resolve().parents[2] / "lenses" / "unstraightening.toml"
+DOC = Path(__file__).resolve().parents[2] / "docs" / "lenses" / "unstraightening.md"
 LABEL = re.compile(r"\[([a-z0-9]+(?:-[a-z0-9]+)*)\]")
 U4 = "u4-stake-through-other"
 
@@ -157,3 +160,96 @@ U7_LABELS: tuple[tuple[Stage, str], ...] = tuple(
 def test_u7_covers_a_plainly_implied_gender_rule(lens: Lens, stage: Stage, label: str) -> None:
     (text,) = labelled(lens, stage, label)
     assert "plainly implies" in text
+
+
+# The scene pass: the [scene] section, its labels, and the doc page that describes it.
+SCENE_PATTERNS: tuple[str, ...] = ("s1-manhood-performance", "s2-conquest-fixation", "s3-bechdel-fail")
+SCENE_CRITERIA: frozenset[str] = frozenset({*SCENE_PATTERNS, "recurring", "own-stance", "presence-not-hit", "plot-actor-exempt"})
+SCENE_PLAN: frozenset[str] = frozenset(
+    {"plan-budget", "required-optional", "line-pass-final", "keep-facts", "no-invented-topic", "named-keep"}
+)
+SCENE_RUBRIC: frozenset[str] = frozenset({"reduce-pattern", "keep-flirt-beat", "protections-hold"})
+SCENE_LABELS: frozenset[str] = SCENE_CRITERIA | SCENE_PLAN | SCENE_RUBRIC
+# SHA-256 of each existing stage_text at the base commit. The scene pass must not change them.
+PINNED_SHA256: dict[Stage, str] = {
+    "triage": "881bf79ed55b88ee4321b7950b9f9d8bbd95c3779dcbf8469a8e5f4ef30de2e4",
+    "screen": "d26bdd84896a642b871557a0178afabaf827502d5b9285cdfccace590842f036",
+    "intent": "e7133724bd7fbca5bdc8cd47e64fb3f07e61ab5fb42ab31177830b5b7b721fab",
+    "judge": "8ace1d38978261cd4757a01c4b7f25dd229224c8e47da0e3a2b9786a86a93e84",
+}
+
+
+@pytest.fixture
+def scene(lens: Lens) -> SceneSection:
+    assert lens.scene is not None, "the lens has no [scene] section"
+    return lens.scene
+
+
+def leading_label(paragraph: str) -> str:
+    match = re.match(r"\[([a-z0-9]+(?:-[a-z0-9]+)*)\]", paragraph)
+    assert match is not None, "paragraph must start with a [label]"
+    return match.group(1)
+
+
+def paragraphs(text: str) -> list[str]:
+    return [p.strip() for p in text.split("\n\n") if p.strip()]
+
+
+def scene_paragraph(text: str, label: str) -> str:
+    (found,) = [p for p in paragraphs(text) if p.startswith(f"[{label}]")]
+    return found
+
+
+@pytest.mark.parametrize("stage", tuple(PINNED_SHA256))
+def test_existing_stage_texts_are_unchanged(lens: Lens, stage: Stage) -> None:
+    digest = hashlib.sha256(lens.stage_text(stage).encode("utf-8")).hexdigest()
+    assert digest == PINNED_SHA256[stage]
+
+
+def test_scene_patterns_are_the_three_in_order(scene: SceneSection) -> None:
+    assert tuple(p.id for p in scene.patterns) == SCENE_PATTERNS
+
+
+def test_scene_pattern_questions_are_phrased_like_triage(scene: SceneSection) -> None:
+    for pattern in scene.patterns:
+        assert "in this scene" in pattern.question
+
+
+def test_scene_criteria_carry_exactly_their_labels(scene: SceneSection) -> None:
+    assert sorted(leading_label(c) for c in scene.criteria) == sorted(SCENE_CRITERIA)
+    assert labels("\n".join(scene.criteria)) == SCENE_CRITERIA
+
+
+def test_scene_plan_carries_exactly_its_labels(scene: SceneSection) -> None:
+    assert sorted(leading_label(p) for p in paragraphs(scene.plan)) == sorted(SCENE_PLAN)
+    assert labels(scene.plan) == SCENE_PLAN
+
+
+def test_scene_rubric_carries_exactly_its_labels(scene: SceneSection) -> None:
+    assert sorted(leading_label(p) for p in paragraphs(scene.rubric)) == sorted(SCENE_RUBRIC)
+    assert labels(scene.rubric) == SCENE_RUBRIC
+
+
+def test_plan_budget_says_four(scene: SceneSection) -> None:
+    assert re.search(r"\b4\b", scene_paragraph(scene.plan, "plan-budget"))
+
+
+@pytest.mark.parametrize("reason", SCENE_KEEP_REASONS)
+def test_named_keep_names_every_keep_reason(scene: SceneSection, reason: str) -> None:
+    text = scene_paragraph(scene.plan, "named-keep")
+    assert re.search(rf"(?<![\w-]){re.escape(reason)}(?![\w-])", text)
+
+
+@pytest.mark.parametrize("protection", (*PROTECTIONS, *EXCLUSIONS))
+def test_protections_hold_names_each_protection_unbracketed(scene: SceneSection, protection: str) -> None:
+    text = scene_paragraph(scene.rubric, "protections-hold")
+    assert re.search(rf"(?<![\[\w-]){re.escape(protection)}(?![\]\w-])", text)
+
+
+def test_doc_has_a_scene_pass_section() -> None:
+    assert "\n## Scene pass\n" in DOC.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("label", sorted(SCENE_LABELS))
+def test_scene_label_appears_in_doc_in_backticks(label: str) -> None:
+    assert f"`{label}`" in DOC.read_text(encoding="utf-8")

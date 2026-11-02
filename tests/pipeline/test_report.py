@@ -64,6 +64,7 @@ def _record(**fields: object) -> dict[str, object]:
         "outcome": "untouched",
         "gate": None,
         "keep_reason": None,
+        "plan": None,
         "writer": "made-up-writer",
         "text": "SENTINEL-TEXT Made-up line text. Not game text.",
     }
@@ -302,6 +303,21 @@ def test_keep_reason_accepts_null_and_every_listed_reason(repo: Path, value: str
     _invoke()
 
 
+@pytest.mark.parametrize("value", ["made-up-plan-one", None])
+def test_plan_string_or_null_parses_into_the_record(tmp_path: Path, value: str | None) -> None:
+    path = tmp_path / "outcomes.jsonl"
+    path.write_bytes(_lines(_record(plan=value)))
+    (record,) = report._records(path, frozenset({FIRST, SECOND}))
+    assert record.plan == value
+
+
+def test_absent_plan_reads_as_none(tmp_path: Path) -> None:
+    path = tmp_path / "outcomes.jsonl"
+    path.write_bytes(_without("plan"))
+    (record,) = report._records(path, frozenset({FIRST, SECOND}))
+    assert record.plan is None
+
+
 @pytest.mark.parametrize("value", ["made-up-reason", "Plot", 3])
 def test_keep_reason_outside_the_listed_reasons_fails_naming_the_field(repo: Path, value: object) -> None:
     _write(repo, _lines(_record(outcome="untouched", keep_reason=value)))
@@ -311,6 +327,50 @@ def test_keep_reason_outside_the_listed_reasons_fails_naming_the_field(repo: Pat
         _invoke()
     message = str(raised.value)
     assert "keep_reason" in message
+    assert "SENTINEL" not in message
+
+
+SCENE_PATTERN = "made-up-scene-pattern"
+# Made-up lens with a scene section. Not game text.
+SCENE_LENS_TOML = (
+    LENS_TOML
+    + f"""
+[scene]
+patterns = [{{ id = "{SCENE_PATTERN}", question = "Made-up scene question. Not game text." }}]
+criteria = ["Made-up scene criterion. Not game text."]
+plan = "Made-up scene plan. Not game text."
+rubric = "Made-up scene rubric. Not game text."
+"""
+)
+
+
+def test_scene_pattern_id_is_an_accepted_reason_when_the_lens_has_a_scene(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(SCENE_LENS_TOML)
+    _write(repo, _lines(_record(outcome="changed", reasons=[SCENE_PATTERN])))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    assert "total: 1 changed" in capsys.readouterr().out
+
+
+def test_scene_pattern_id_is_rejected_when_the_lens_has_no_scene(repo: Path) -> None:
+    _write(repo, _lines(_record(outcome="changed", reasons=[SCENE_PATTERN])))
+    _write_arcs(repo)
+    _write_recall(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    assert "field reasons has an id that is not a triage or scene pattern id of the lens" in str(raised.value)
+
+
+def test_unknown_reason_still_fails_when_the_lens_has_a_scene(repo: Path) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(SCENE_LENS_TOML)
+    _write(repo, _lines(_record(outcome="changed", reasons=["SENTINEL-REASON"])))
+    _write_arcs(repo)
+    _write_recall(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert "field reasons has an id that is not a triage or scene pattern id of the lens" in message
     assert "SENTINEL" not in message
 
 
@@ -557,7 +617,13 @@ BAD_LINES = [
     pytest.param(_lines(_record(chapter=0)), "field chapter", id="chapter-zero"),
     pytest.param(_lines(_record(speaker=["SENTINEL-SPEAKER"])), "field speaker", id="speaker-type"),
     pytest.param(_lines(_record(reasons="SENTINEL-REASONS")), "field reasons", id="reasons-type"),
-    pytest.param(_lines(_record(reasons=["SENTINEL-REASON"])), "field reasons", id="reason-not-in-lens"),
+    pytest.param(
+        _lines(_record(reasons=["SENTINEL-REASON"])),
+        "field reasons has an id that is not a triage or scene pattern id of the lens",
+        id="reason-not-in-lens",
+    ),
+    pytest.param(_lines(_record(plan=["SENTINEL-PLAN"])), "field plan must be a string or null", id="plan-type"),
+    pytest.param(_lines(_record(plan=3)), "field plan must be a string or null", id="plan-number"),
     pytest.param(_lines(_record(outcome="SENTINEL-OUTCOME")), "field outcome", id="outcome-unknown"),
     pytest.param(_lines(_record(outcome="gate_failed", gate=None)), "field gate", id="gate-missing"),
     pytest.param(_lines(_record(outcome="gate_failed", gate=3)), "field gate", id="gate-type"),
