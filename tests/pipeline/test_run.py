@@ -3157,6 +3157,84 @@ def test_gate_failures_count_both_plans_and_the_record_names_the_replan(tmp_path
     ]
 
 
+GATE_SCENE = "scene"
+
+
+def _scene_texts(tmp_path: Path) -> list[str]:
+    """The dialog tables and scene records a run wrote, for checking that no carrier text reached them."""
+    dialog = [path.read_text(encoding="utf-8") for path in (tmp_path / "repo" / "dialog" / LENS).iterdir()]
+    return [*dialog, (tmp_path / "work" / LENS / scene_record.SCENES).read_text(encoding="utf-8")]
+
+
+@pytest.mark.parametrize("draft", [EN_A3.upper(), EN_A3.lower()], ids=["upper", "lower"])
+def test_optional_planned_line_whose_only_candidate_keeps_its_carrier_in_another_case_ships_nothing_and_counts_a_scene_gate_failure(
+    tmp_path: Path, draft: str
+) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "3")] = [draft]
+    printed: list[str] = []
+    outcomes = _run(
+        tmp_path,
+        claude,
+        printed,
+        jev=None,
+        scenes=(TABLE_SCENE,),
+        lens=SCENE_LENS,
+        renderer=FakeRenderer({OPUS_S2: VOICE_FAR}),
+    )
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+    assert _records(tmp_path) == [
+        _expected_record(patterns=reasons, plan=plan, planned=2, required=1, changed=1, gate_failures={GATE_SCENE: 1}),
+    ]
+    assert not any(EN_A3.casefold() in text.casefold() for text in [*printed, *_scene_texts(tmp_path)])
+
+
+def test_required_planned_line_whose_only_candidate_keeps_its_carrier_triggers_one_replan_counting_a_scene_gate_failure(
+    tmp_path: Path,
+) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [EN_A2.upper()]
+    claude.scene_replan = _plan_answer((NS_A, "3", True))
+    outcomes = _scene_run(tmp_path, claude)
+    _, replan = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(replan, "Excluded lines:\n")) == [{"namespace": NS_A, "key": "2"}]
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "3")])
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(
+        NS_A, "3", 1, None, (PATTERN_ONE, PATTERN_TWO), "changed", None, "opus", None, plan
+    )
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            changed=1,
+            replanned=1,
+            gate_failures={GATE_SCENE: 1},
+        ),
+    ]
+    assert not any(EN_A2.casefold() in text.casefold() for text in _scene_texts(tmp_path))
+
+
+def test_free_candidate_ships_over_a_nearer_candidate_that_keeps_its_carrier(tmp_path: Path) -> None:
+    keeper = f"{EN_A2} Yes."
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [keeper, VOICE_FAR]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(
+        NS_A, "2", 1, None, (PATTERN_ONE, PATTERN_TWO), "changed", None, "opus", None, plan
+    )
+    assert _dialog_tables(tmp_path)[(NS_A, "2")]["text"] == VOICE_FAR
+    assert not any(keeper.casefold() in text.casefold() for text in _scene_texts(tmp_path))
+
+
 def test_scene_judge_revert_of_an_optional_line_counts_as_reverted(tmp_path: Path) -> None:
     claude = _scene_claude()
     claude.scene_judge = [_verdict(False, (NS_A, "3")), _verdict(False, (NS_A, "3"))]

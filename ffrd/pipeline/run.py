@@ -522,11 +522,12 @@ def _both[A, B](first: Callable[[], A], second: Callable[[], B]) -> tuple[A, B]:
 def _scene_gate(
     ctx: _Context,
     scene: Scene,
+    entry: scene_pass.PlannedLine,
     target: stages.Target,
     first: tuple[str, ...] | Unfinished | Rejected,
     ask: Ask,
 ) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
-    """Gates one planned line with the mechanical gates only, then returns its passing candidate nearest the English line with that candidate's writer."""
+    """Gates one planned line with the mechanical gates, drops the candidates that keep its carrier, then returns the passing candidate nearest the English line with that candidate's writer. A line left with none fails the scene gate."""
     line = target.line
     origin: dict[str, WriterName] = {}
     scores: dict[str, float] = {}
@@ -545,7 +546,10 @@ def _scene_gate(
     verdict = gate_mechanical(write, classify=classify, threshold=ctx.classifier.threshold)
     if isinstance(verdict, Kept | Unfinished | RateLimited):
         return verdict
-    best = min(verdict, key=lambda candidate: (distance(candidate.text, line.english), candidate.text))
+    free = [candidate for candidate in verdict if not scene_pass.keeps_carrier(entry, candidate.text)]
+    if not free:
+        return Kept("scene")
+    best = min(free, key=lambda candidate: (distance(candidate.text, line.english), candidate.text))
     return best, origin[best.text]
 
 
@@ -584,8 +588,8 @@ def _gate_plan(
     first = _first_drafts(ctx, scene, [target for _, target in planned], ask)
 
     def gate(item: tuple[scene_pass.PlannedLine, stages.Target]) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
-        _, target = item
-        return _scene_gate(ctx, scene, target, first[(target.line.namespace, target.line.key)], ask)
+        entry, target = item
+        return _scene_gate(ctx, scene, entry, target, first[(target.line.namespace, target.line.key)], ask)
 
     gated = claude.fan_out(gate, planned)
     settled: dict[tuple[str, str], tuple[Candidate, WriterName] | Kept] = {}
