@@ -7,6 +7,7 @@ import pytest
 
 from ffrd.game import Fail
 from ffrd.pipeline import report
+from ffrd.pipeline.scene_record import SCENES, SceneRecord, write_scenes
 
 LENS = "made-up-lens"
 FIRST = "made-up-first-id"
@@ -43,8 +44,14 @@ SUMMARY = (
 DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
+SCENE_DETAIL = (
+    r"  scene (eligible: [0-9]+|plans: [0-9]+|replanned: [0-9]+|reverted lines: [0-9]+|changed lines: [0-9]+"
+    r"|planned lines: [0-9]+ \(required [0-9]+\)|changed per scene: max [0-9]+, median [0-9]+(?:\.[0-9])?"
+    r"|flagged [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+|kept [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+"
+    r"|gate [a-z0-9]+(?:[-_][a-z0-9]+)*: [0-9]+|character [0-9]+: [0-9]+)"
+)
 SCENE_LINE = r"scenes: [0-9]+ of [0-9]+ from the scene table, [0-9]+ outside it"
-LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{RECALL_LINE}")
+LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{RECALL_LINE}")
 
 # Made-up scene table build. Not game text.
 BUILD = "424242"
@@ -653,3 +660,308 @@ def test_lens_is_required_and_has_help(capsys: pytest.CaptureFixture[str]) -> No
         _parser().parse_args(["report", "--help"])
     assert helped.value.code == 0
     assert "--lens" in capsys.readouterr().out
+
+
+OTHER_PATTERN = "made-up-other-pattern"
+TRIAGE_IDS = [FIRST, SECOND]
+PLAN = "made-up-plan"
+SCENE_NAMES = ("made-up-scene-a", "made-up-scene-b", "made-up-scene-c", "made-up-scene-d", "made-up-scene-e")
+
+# Made-up lens with two scene patterns. Not game text.
+SCENE_TWO_LENS_TOML = (
+    LENS_TOML
+    + f"""
+[scene]
+patterns = [{{ id = "{SCENE_PATTERN}", question = "Made-up scene question. Not game text." }}, {{ id = "{OTHER_PATTERN}", question = "Made-up other question. Not game text." }}]
+criteria = ["Made-up scene criterion. Not game text."]
+plan = "Made-up scene plan. Not game text."
+rubric = "Made-up scene rubric. Not game text."
+"""
+)
+
+
+def _outcome(speaker: str | None, outcome: str, chapter: int | None = 1, plan: str | None = None) -> report.Record:
+    # Made-up outcome record. Not game text.
+    return report.Record(chapter=chapter, speaker=speaker, reasons=frozenset(), outcome=outcome, gate=None, keep_reason=None, plan=plan)
+
+
+def _scene(
+    scene: str,
+    chapter: int | None,
+    *,
+    eligible: bool = True,
+    patterns: tuple[str, ...] = (),
+    plan: str | None = None,
+    keep_reason: str | None = None,
+    planned: int = 0,
+    required: int = 0,
+    changed: int = 0,
+    reverted: int = 0,
+    replanned: int = 0,
+    gate_failures: dict[str, int] | None = None,
+) -> SceneRecord:
+    # Made-up scene record. Not game text.
+    return SceneRecord(
+        scene=scene,
+        chapter=chapter,
+        eligible=eligible,
+        patterns=patterns,
+        plan=plan,
+        keep_reason=keep_reason,
+        planned=planned,
+        required=required,
+        changed=changed,
+        reverted=reverted,
+        replanned=replanned,
+        gate_failures=gate_failures or {},
+    )
+
+
+SCENE_OUTCOMES = (
+    _record(chapter=1, speaker=SPEAKER_TWO, outcome="changed", plan="made-up-plan-one"),
+    _record(chapter=1, speaker=SPEAKER_TEN, outcome="changed", plan="made-up-plan-two"),
+    _record(chapter=1, speaker=SPEAKER_TWO, outcome="untouched"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="changed", plan=None),
+    _record(chapter=None, speaker=None, outcome="untouched"),
+)
+
+SCENE_FIXTURES = (
+    _scene(
+        "made-up-scene-a",
+        1,
+        patterns=(SCENE_PATTERN,),
+        plan="made-up-plan-one",
+        planned=3,
+        required=2,
+        changed=2,
+        reverted=1,
+        replanned=1,
+        gate_failures={"made-up-gate": 1},
+    ),
+    _scene(
+        "made-up-scene-b",
+        1,
+        patterns=(SCENE_PATTERN, OTHER_PATTERN),
+        plan="made-up-plan-two",
+        keep_reason="plot",
+        planned=2,
+        required=2,
+        changed=1,
+    ),
+    _scene("made-up-scene-c", 1, eligible=False, keep_reason="trait"),
+    _scene(
+        "made-up-scene-d",
+        2,
+        patterns=(OTHER_PATTERN,),
+        plan="made-up-plan-three",
+        planned=1,
+        changed=1,
+        gate_failures={"made-up-gate": 2},
+    ),
+    _scene("made-up-scene-e", None),
+)
+
+# Made-up counts. Not game text.
+CHAPTER_ONE_SCENE_LINES = (
+    "  scene eligible: 2",
+    "  scene flagged made-up-scene-pattern: 2",
+    "  scene flagged made-up-other-pattern: 1",
+    "  scene plans: 2",
+    "  scene kept plot: 1",
+    "  scene kept trait: 1",
+    "  scene planned lines: 5 (required 4)",
+    "  scene changed lines: 3",
+    "  scene replanned: 1",
+    "  scene reverted lines: 1",
+    "  scene gate made-up-gate: 1",
+    "  scene changed per scene: max 2, median 1.5",
+    "  scene character 1: 1",
+    "  scene character 2: 1",
+)
+
+EXPECTED_SCENE_REPORT = """\
+chapter 1: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched
+  character 1: 1
+  character 2: 1
+  scene eligible: 2
+  scene flagged made-up-scene-pattern: 2
+  scene flagged made-up-other-pattern: 1
+  scene plans: 2
+  scene kept plot: 1
+  scene kept trait: 1
+  scene planned lines: 5 (required 4)
+  scene changed lines: 3
+  scene replanned: 1
+  scene reverted lines: 1
+  scene gate made-up-gate: 1
+  scene changed per scene: max 2, median 1.5
+  scene character 1: 1
+  scene character 2: 1
+chapter 2: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched
+  character 2: 1
+  scene eligible: 1
+  scene flagged made-up-scene-pattern: 0
+  scene flagged made-up-other-pattern: 1
+  scene plans: 1
+  scene planned lines: 1 (required 0)
+  scene changed lines: 1
+  scene replanned: 0
+  scene reverted lines: 0
+  scene gate made-up-gate: 2
+  scene changed per scene: max 1, median 1
+unattributed: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched
+  scene eligible: 1
+  scene flagged made-up-scene-pattern: 0
+  scene flagged made-up-other-pattern: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+total: 3 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 2 untouched
+  character 1: 1
+  character 2: 2
+  scene eligible: 4
+  scene flagged made-up-scene-pattern: 2
+  scene flagged made-up-other-pattern: 2
+  scene plans: 3
+  scene kept plot: 1
+  scene kept trait: 1
+  scene planned lines: 6 (required 4)
+  scene changed lines: 4
+  scene replanned: 1
+  scene reverted lines: 1
+  scene gate made-up-gate: 3
+  scene changed per scene: max 2, median 1
+  scene character 1: 1
+  scene character 2: 1
+scenes: 1 of 1 from the scene table, 0 outside it
+arcs: 3, 2 with changes
+recall made-up-first-id: 4 disagreements, 1 confirmed
+recall made-up-second-id: 0 disagreements, 0 confirmed
+"""
+
+
+def _write_scenes(repo: Path, scenes: list[SceneRecord]) -> Path:
+    path = repo / "work" / LENS / SCENES
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_scenes(path, scenes)
+    return path.resolve()
+
+
+def _scene_report(repo: Path) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(SCENE_TWO_LENS_TOML)
+    _write(repo, _lines(*SCENE_OUTCOMES))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _write_scenes(repo, list(SCENE_FIXTURES))
+
+
+def test_scene_counts_per_chapter_unattributed_and_total(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _scene_report(repo)
+    _invoke()
+    assert capsys.readouterr().out == EXPECTED_SCENE_REPORT
+
+
+def test_scene_report_lines_match_grammar_and_show_no_text_keys_speakers_or_scene_ids(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _scene_report(repo)
+    _invoke()
+    out = capsys.readouterr().out
+    assert any(line.startswith("  scene ") for line in out.splitlines())
+    for line in out.splitlines():
+        assert LINE.fullmatch(line), line
+    for leaked in (*SENTINELS, SPEAKER_TWO, SPEAKER_TEN, *SCENE_NAMES):
+        assert leaked not in out
+
+
+def test_scene_pattern_id_outside_the_lens_fails_naming_file_line_and_field(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(SCENE_TWO_LENS_TOML)
+    _write(repo, _lines(*SCENE_OUTCOMES))
+    _write_arcs(repo)
+    _write_recall(repo)
+    path = _write_scenes(
+        repo,
+        [_scene("made-up-scene-a", 1), _scene("made-up-scene-b", 1, patterns=("made-up-unknown-pattern",))],
+    )
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert f"{path}:2: field patterns has an id that is not a scene pattern id of the lens" in message
+    assert "made-up-unknown-pattern" not in message
+    assert capsys.readouterr().out == ""
+
+
+def test_render_without_scenes_is_the_outcome_report_alone() -> None:
+    records = [_outcome(SPEAKER_TWO, "changed")]
+    lines = report.render(records, TRIAGE_IDS)
+    assert lines == [
+        "chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+        "  character 1: 1",
+        "total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+        "  character 1: 1",
+    ]
+    assert report.render(records, TRIAGE_IDS, scene_ids=(SCENE_PATTERN,)) == lines
+
+
+def test_render_with_chapter_one_scenes_gives_the_provisional_block() -> None:
+    records = [
+        _outcome(SPEAKER_TWO, "changed", plan="made-up-plan-one"),
+        _outcome(SPEAKER_TEN, "changed", plan="made-up-plan-two"),
+        _outcome(SPEAKER_TWO, "untouched"),
+    ]
+    lines = report.render(records, TRIAGE_IDS, scenes=list(SCENE_FIXTURES[:3]), scene_ids=(SCENE_PATTERN, OTHER_PATTERN))
+    summary = "2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched"
+    assert lines == [
+        f"chapter 1: {summary}",
+        "  character 1: 1",
+        "  character 2: 1",
+        *CHAPTER_ONE_SCENE_LINES,
+        f"total: {summary}",
+        "  character 1: 1",
+        "  character 2: 1",
+        *CHAPTER_ONE_SCENE_LINES,
+    ]
+
+
+def test_scene_only_chapters_and_unattributed_get_blocks() -> None:
+    lines = report.render([], TRIAGE_IDS, scenes=[_scene("made-up-scene-x", 3), _scene("made-up-scene-y", None)])
+    assert [line for line in lines if not line.startswith("  ")] == [
+        "chapter 3: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+        "unattributed: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+        "total: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched",
+    ]
+
+
+def _planned(*changed: int) -> list[SceneRecord]:
+    return [_scene(f"made-up-scene-{index}", 1, plan=PLAN, changed=value) for index, value in enumerate(changed)]
+
+
+MEDIAN_CASES = [
+    pytest.param([], "max 0, median 0", id="no-scenes"),
+    pytest.param([_scene("made-up-scene-a", 1, changed=5)], "max 0, median 0", id="no-plan-not-counted"),
+    pytest.param(_planned(3), "max 3, median 3", id="whole-one-scene"),
+    pytest.param(_planned(1, 2), "max 2, median 1.5", id="half"),
+    pytest.param(_planned(4, 1, 2), "max 4, median 2", id="whole-odd-count"),
+]
+
+
+@pytest.mark.parametrize(("scenes", "expected"), MEDIAN_CASES)
+def test_changed_per_scene_median_prints_whole_or_one_decimal(scenes: list[SceneRecord], expected: str) -> None:
+    lines = report.render([], TRIAGE_IDS, scenes=scenes)
+    assert f"  scene changed per scene: {expected}" in lines
+
+
+def test_scene_character_numbers_are_the_outcome_numbers() -> None:
+    # SPEAKER_TWO's only changed line has no plan, so it is numbered 1 and printed for outcomes but not for scenes.
+    records = [
+        _outcome(SPEAKER_TWO, "untouched"),
+        _outcome(SPEAKER_TWO, "changed"),
+        _outcome(SPEAKER_TEN, "changed", plan=PLAN),
+    ]
+    lines = report.render(records, TRIAGE_IDS, scenes=[_scene("made-up-scene-a", 1, plan=PLAN, changed=1)])
+    assert "  character 1: 1" in lines
+    assert "  scene character 2: 1" in lines
+    assert not any(line.startswith("  scene character 1:") for line in lines)
