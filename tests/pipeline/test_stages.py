@@ -407,6 +407,73 @@ def test_fresh_store_on_same_root_returns_stored_screen_without_asking(tmp_path:
     assert ask.calls == []
 
 
+def test_default_screen_store_key_is_pinned_to_the_base_hex(tmp_path: Path) -> None:
+    screen(Store(tmp_path), LENS, SCENE, CAST, Fake({"flagged": []}))
+
+    [record] = (tmp_path / "results").glob("*.json")
+    assert record.stem == "6f1c6ec9cce3650dd3b85196d9b120873bd2e1174701293fee4b894f557377d2"
+
+
+def test_screen_with_haiku_asks_haiku_and_stores_under_the_haiku_model(tmp_path: Path) -> None:
+    ask = Fake({"flagged": []})
+
+    screen(Store(tmp_path), LENS, SCENE, CAST, ask, model=claude.HAIKU)
+
+    model, _parts, _schema = ask.calls[0]
+    assert model == claude.HAIKU
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    lens_text = LENS.stage_text("screen") + "\n" + LENS.stage_text("triage")
+    assert record.stem == store_key("screen", {**inputs, "model": "haiku"}, lens_text)
+    assert record.stem != store_key("screen", {**inputs, "model": "opus"}, lens_text)
+
+
+def test_screen_with_eligible_still_sends_every_line_and_names_only_the_eligible_refs(tmp_path: Path) -> None:
+    ask = Fake({"flagged": []})
+
+    screen(Store(tmp_path), LENS, SCENE, CAST, ask, eligible=[(LINE_ONE.namespace, LINE_ONE.key)])
+
+    parts = ask.calls[0][1]
+    lines_part = _part(parts, "Scene lines:\n")
+    assert '"english": "Made-up first line. Not game text."' in lines_part
+    assert '"english": "Made-up narration. Not game text."' in lines_part
+    eligible_part = _part(parts, "Eligible lines, flag only these:\n")
+    assert json.loads(eligible_part) == [{"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}]
+
+
+def test_screen_rejects_a_flag_outside_eligible_and_stores_nothing(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    answer = {"flagged": [{"namespace": LINE_TWO.namespace, "key": LINE_TWO.key, "reasons": ["made-up-alpha"]}]}
+
+    result = screen(store, LENS, SCENE, CAST, Fake(answer), eligible=[(LINE_ONE.namespace, LINE_ONE.key)])
+
+    assert isinstance(result, Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+def test_screen_with_eligible_returns_flags_on_eligible_lines_as_today(tmp_path: Path) -> None:
+    result = screen(Store(tmp_path), LENS, SCENE, CAST, Fake(FLAGGED_ONE), eligible=[(LINE_ONE.namespace, LINE_ONE.key)])
+
+    assert result == {(LINE_ONE.namespace, LINE_ONE.key): ("made-up-alpha",)}
+
+
+def test_screen_store_key_carries_the_eligible_refs_sorted(tmp_path: Path) -> None:
+    eligible = [(LINE_TWO.namespace, LINE_TWO.key), (LINE_ONE.namespace, LINE_ONE.key)]
+
+    screen(Store(tmp_path), LENS, SCENE, CAST, Fake({"flagged": []}), eligible=eligible)
+
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "cast": CAST,
+        "eligible": [{"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}, {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}],
+    }
+    lens_text = LENS.stage_text("screen") + "\n" + LENS.stage_text("triage")
+    assert record.stem == store_key("screen", {**inputs, "model": "opus"}, lens_text)
+
+
 TABLE_ROWS = [
     scene_file.SceneLine("made-up-table-scene", 1, "ST_C01_001_01", "1", "Ash", None),
     scene_file.SceneLine("made-up-table-scene", 2, "ST_C01_001_01", "2", None, None),
