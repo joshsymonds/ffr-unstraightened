@@ -584,9 +584,10 @@ def _settled(
     hits: Mapping[str, Sequence[tuple[str, str]]],
     flagged: Mapping[tuple[str, str], tuple[str, ...]],
     excluded: frozenset[tuple[str, str]],
+    line_rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
 ) -> _Round | Unfinished | Rejected | RateLimited:
-    """Plans once, gates the planned lines, and runs the scene judge over the passing lines unless a required line failed its gates."""
+    """Plans once, gates the planned lines, and runs the scene judge over the passing lines with the surviving line-pass rewrites as context, unless a required line failed its gates. The judge reverts only passing lines it names."""
     plan = scene_pass.plan(ctx.store, ctx.lens, scene, cast, hits, frozenset(flagged), excluded, ask)
     if not isinstance(plan, scene_pass.Plan):
         return plan
@@ -601,10 +602,11 @@ def _settled(
     gates = Counter(result.gate for result in gated.values() if isinstance(result, Kept))
     reverts = 0
     if picks and not failed & required:
-        rewrites = {ref: candidate.text for ref, (candidate, _) in picks.items()}
-        reverted = scene_pass.judge(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
-        if not isinstance(reverted, frozenset):
-            return reverted
+        rewrites = {**line_rewrites, **{ref: candidate.text for ref, (candidate, _) in picks.items()}}
+        verdict = scene_pass.judge(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
+        if not isinstance(verdict, frozenset):
+            return verdict
+        reverted = frozenset(ref for ref in verdict if ref in picks)
         picks = {ref: pick for ref, pick in picks.items() if ref not in reverted}
         failed |= reverted
         reverts = len(reverted)
@@ -618,9 +620,10 @@ def _scene_pass(
     cast: Sequence[Mapping[str, Any]],
     flagged: Mapping[tuple[str, str], tuple[str, ...]],
     outcomes: list[Outcome],
+    line_rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
 ) -> tuple[list[Outcome], list[Change], _PassRecord]:
-    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped."""
+    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan, with the surviving line-pass rewrites as context. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped."""
 
     def unfinished(hit_ids: tuple[str, ...] = ()) -> tuple[list[Outcome], list[Change], _PassRecord]:
         return (
@@ -635,7 +638,7 @@ def _scene_pass(
     if not hits:
         return outcomes, [], _PassRecord()
     reasons = tuple(pattern.id for pattern in section.patterns if pattern.id in hits)
-    first = _settled(ctx, scene, cast, hits, flagged, frozenset(), ask)
+    first = _settled(ctx, scene, cast, hits, flagged, frozenset(), line_rewrites, ask)
     if not isinstance(first, _Round):
         return unfinished(reasons)
     if first.plan.keep_reason is not None:
@@ -643,7 +646,7 @@ def _scene_pass(
     chosen = first
     gates, reverts = first.gates, first.reverts
     if first.required_failed:
-        second = _settled(ctx, scene, cast, hits, flagged, first.failed, ask)
+        second = _settled(ctx, scene, cast, hits, flagged, first.failed, line_rewrites, ask)
         if not isinstance(second, _Round):
             return unfinished(reasons)
         gates, reverts = gates + second.gates, reverts + second.reverts
@@ -734,7 +737,8 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
     section = ctx.lens.scene
     passed = _PassRecord()
     if section is not None and _from_table(ctx, scene):
-        outcomes, scene_changes, passed = _scene_pass(ctx, scene, section, cast, flagged, outcomes, ask)
+        line_rewrites = {(change.namespace, change.key): change.text for change in changes}
+        outcomes, scene_changes, passed = _scene_pass(ctx, scene, section, cast, flagged, outcomes, line_rewrites, ask)
         changes += scene_changes
     return outcomes, changes, recall, passed
 

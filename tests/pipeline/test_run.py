@@ -2703,7 +2703,54 @@ def test_scene_judge_receives_the_passing_rewrites_under_the_scene_rubric(tmp_pa
     _scene_run(tmp_path, claude)
     [parts] = _scene_judge_prompts(claude)
     rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
-    assert rewrites == {(NS_A, "1"): None, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): None}
+    assert rewrites == {(NS_A, "1"): OPUS_A1, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): None}
+
+
+def test_scene_judge_reads_the_line_pass_rewrites_of_the_changed_line_pass_lines(tmp_path: Path) -> None:
+    claude = _two_line_pass_claude()
+    _scene_run(tmp_path, claude)
+    [parts] = _scene_judge_prompts(claude)
+    rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
+    assert rewrites == {(NS_A, "1"): OPUS_A1, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): OPUS_A4}
+
+
+def test_scene_judge_gets_no_rewrite_for_a_line_pass_line_coherence_reverted(tmp_path: Path) -> None:
+    claude = _two_line_pass_claude()
+    claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    _scene_run(tmp_path, claude)
+    [parts] = _scene_judge_prompts(claude)
+    rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
+    assert rewrites == {(NS_A, "1"): None, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): OPUS_A4}
+
+
+def test_judge_naming_a_line_pass_line_on_both_passes_leaves_it_shipped_and_reverts_no_scene_line(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2"), (NS_A, "3")}
+    assert _records(tmp_path) == [
+        _expected_record(patterns=reasons, plan=plan, planned=2, required=1, changed=2),
+    ]
+
+
+def test_judge_naming_a_line_pass_and_a_scene_pass_line_reverts_only_the_scene_pass_line(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "1"), (NS_A, "3")), _verdict(False, (NS_A, "1"), (NS_A, "3"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+    assert _records(tmp_path) == [
+        _expected_record(patterns=reasons, plan=plan, planned=2, required=1, changed=1, reverted=1),
+    ]
 
 
 def test_judge_reverted_optional_line_is_dropped_and_the_rest_ship(tmp_path: Path) -> None:
@@ -2735,7 +2782,7 @@ def test_judge_reverted_required_line_triggers_one_replan_that_excludes_it_and_s
     assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
     assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "4")}
     [replan_judge] = _scene_judge_prompts(claude)[2:]
-    assert [line["key"] for line in json.loads(_part(replan_judge, "Scene lines:\n")) if line["rewrite"]] == ["4"]
+    assert [line["key"] for line in json.loads(_part(replan_judge, "Scene lines:\n")) if line["rewrite"]] == ["1", "4"]
 
 
 def test_gate_failed_required_line_triggers_one_replan_that_excludes_it_and_ships_the_replan_with_its_id(tmp_path: Path) -> None:
