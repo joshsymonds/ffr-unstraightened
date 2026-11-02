@@ -273,7 +273,7 @@ def test_named_keep_never_keeps_a_minor_flirt_hit_as_not_recurring(scene: SceneS
 
 def test_doc_named_keep_never_keeps_a_minor_flirt_hit_as_not_recurring() -> None:
     doc = DOC.read_text(encoding="utf-8")
-    assert "`not-recurring` is never named for a `minor-flirt` hit" in doc
+    assert "Neither `not-recurring` nor `trait` is ever named for a `minor-flirt` hit" in doc
     assert "counts even once" in doc
 
 
