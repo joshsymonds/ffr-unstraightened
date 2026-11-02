@@ -1,5 +1,5 @@
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -8,9 +8,9 @@ import pytest
 from ffrd.pipeline import claude
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.coherence import INSTRUCTIONS, RECHECK_INSTRUCTIONS, SCHEMA, STAGE, check
-from ffrd.pipeline.lens import Lens, TriageQuestion
+from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.stages import Scene, SceneLine
-from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import Store, key
 
 # Made-up scene, lens, arcs and answers. Not game text.
 LINE_ONE = SceneLine("ST_C01_001_01", "1", "Ash", "Made-up first line. Not game text.", "Made-up Japanese one. Not game text.", 1)
@@ -33,6 +33,16 @@ LENS = Lens(
     intent_rule="Made-up intent rule. Not game text.",
     judge_rubric="Made-up judge rubric. Not game text.",
 )
+SCENE_LENS = replace(
+    LENS,
+    scene=SceneSection(
+        patterns=(ScenePattern("made-up-pattern", "Made-up pattern question. Not game text."),),
+        criteria=("Made-up scene criterion. Not game text.",),
+        plan="Made-up scene plan. Not game text.",
+        rubric="Made-up scene rubric. Not game text.",
+    ),
+)
+MADE_UP_STAGE = "made-up-coherence-stage"
 
 
 def _ref(line: SceneLine) -> tuple[str, str]:
@@ -49,6 +59,15 @@ def _answer(coherent: bool, *lines: SceneLine) -> dict[str, Any]:
 
 def _j(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _base_inputs(arcs: Any = ARCS) -> dict[str, Any]:
+    return {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "rewrites": [{"namespace": ns, "key": key, "text": text} for (ns, key), text in sorted(REWRITES.items())],
+        "arcs": list(arcs),
+    }
 
 
 def _scene_dicts() -> list[dict[str, Any]]:
@@ -201,6 +220,38 @@ def test_changed_arcs_or_rubric_asks_again(tmp_path: Path, changed: dict[str, An
 
     assert _run(Store(tmp_path), ask, **changed) == frozenset()
     assert len(ask.calls) == 1
+
+
+def test_default_call_stores_under_scene_coherence_with_judge_text(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+
+    _run(store, Fake(_answer(True)))
+
+    assert store.finished() == [key(STAGE, _base_inputs(), LENS.stage_text("judge"))]
+
+
+def test_scene_rubric_and_stage_reach_both_passes_and_are_stored_and_reused(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(_answer(False, LINE_ONE, LINE_TWO), _answer(False, LINE_ONE, LINE_THREE))
+
+    result = check(store, SCENE_LENS, SCENE, REWRITES, ARCS, ask, stage=MADE_UP_STAGE, rubric="scene")
+
+    assert result == frozenset({_ref(LINE_ONE)})
+    assert len(ask.calls) == 2
+    scene_text = SCENE_LENS.stage_text("scene")
+    assert ask.calls[0][1][1] == "Judge rubric:\n" + scene_text
+    assert ask.calls[1][1][1] == "Judge rubric:\n" + scene_text
+    assert store.read(key(MADE_UP_STAGE, _base_inputs(), scene_text)) is not None
+    assert len(store.finished()) == 2
+    saved = [store.read(k) for k in store.finished()]
+    assert all(result is not None and result.stage == MADE_UP_STAGE for result in saved)
+
+    replay = Fake()
+
+    assert check(Store(tmp_path), SCENE_LENS, SCENE, REWRITES, ARCS, replay, stage=MADE_UP_STAGE, rubric="scene") == (
+        frozenset({_ref(LINE_ONE)})
+    )
+    assert replay.calls == []
 
 
 def test_stage_name_is_scene_coherence() -> None:
