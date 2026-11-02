@@ -198,9 +198,11 @@ through the placeholder, tag, length and classifier gates, but not the per-line 
 An optional line that fails is dropped. A required line that fails sends the scene back
 for one new plan without that line; if that plan also loses a required line, the scene
 stays vanilla. Opus then judges the plan as a whole against the lens's scene rubric, in
-the same two-pass way as the coherence check. Each scene-pass rewrite carries its plan
-id, and when the coherence check, the scene judge or the arc judge reverts one line of a
-plan, every line of that plan reverts. The pass writes one record per in-scope scene to
+the same two-pass way as the coherence check, reading the scene with the line-pass
+rewrites that survived coherence applied. The coherence check itself runs before the
+scene pass and reads only line-pass rewrites. Each scene-pass rewrite carries its plan
+id. The scene judge reverts only the lines it names; when the arc judge reverts one line
+of a plan, every line of that plan reverts. The pass writes one record per in-scope scene to
 `work/<name>/scenes.jsonl`. No Jev check runs for scene patterns.
 
 Third, after all scenes, the arc judge reads each arc that has a changed line, its lines
