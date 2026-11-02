@@ -257,8 +257,25 @@ def test_build_drops_empty_speaker_from_arc_characters_and_stores_the_drop(tmp_p
             },
             Rejected,
         ),
+        (
+            {
+                **BIBLE_ONE,
+                "callbacks": [
+                    {"line": {"namespace": "ST_C09_001_01", "key": "1"}, "depends": [], "meaning": "Made-up callback line. Not game text."}
+                ],
+            },
+            Rejected,
+        ),
     ],
-    ids=["unfinished", "rejected", "unknown-speaker", "unknown-ref", "arc-unknown-character", "arc-unknown-beat-ref"],
+    ids=[
+        "unfinished",
+        "rejected",
+        "unknown-speaker",
+        "unknown-ref",
+        "arc-unknown-character",
+        "arc-unknown-beat-ref",
+        "callback-unknown-line",
+    ],
 )
 def test_failed_chapter_is_returned_stores_nothing_and_stays_unfinished(
     tmp_path: Path, answer: Any, failure: type[Unfinished] | type[Rejected]
@@ -270,6 +287,23 @@ def test_failed_chapter_is_returned_stores_nothing_and_stays_unfinished(
     assert isinstance(result, failure)
     assert store.finished() == []
     assert len(store.unfinished()) == 1
+
+
+def test_build_drops_out_of_scope_callback_depends_and_stores_the_drop(tmp_path: Path) -> None:
+    in_scope = {"namespace": "ST_C01_001_01", "key": "1"}
+    unknown = {"namespace": "ST_C09_001_01", "key": "1"}
+    callback = {
+        "line": {"namespace": "ST_C01_001_01", "key": "2"},
+        "meaning": "Made-up callback meaning with an unknown dependent. Not game text.",
+    }
+    answer = {**BIBLE_ONE, "callbacks": [{**callback, "depends": [unknown, in_scope]}]}
+    dropped = {**BIBLE_ONE, "callbacks": [{**callback, "depends": [in_scope]}]}
+
+    built = build(Store(tmp_path), [(1, C1_LINES)], FakeAsk(answer, NO_SETUPS))
+
+    assert built == [{**dropped, "chapter": 1}]
+    reread = chapter(Store(tmp_path), 1, C1_LINES, [], C1_SCOPE, C1_SPEAKERS, FakeAsk())
+    assert reread == {**dropped, "chapter": 1}
 
 
 def test_ask_exception_propagates_and_leaves_chapter_unfinished(tmp_path: Path) -> None:
@@ -637,16 +671,6 @@ OUTSIDE_LINE = {
     ]
 }
 
-UNKNOWN_DEPENDENT = {
-    "setups": [
-        {
-            "line": {"namespace": "ST_C01_001_01", "key": "1"},
-            "depends": [{"namespace": "ST_C09_001_01", "key": "1"}],
-            "meaning": "Made-up setup with an unknown dependent. Not game text.",
-        }
-    ]
-}
-
 
 @pytest.mark.parametrize(
     ("answer", "failure"),
@@ -654,9 +678,8 @@ UNKNOWN_DEPENDENT = {
         (Unfinished("Made-up unfinished detail. Not game text."), Unfinished),
         (Rejected("Made-up rejected detail. Not game text."), Rejected),
         (OUTSIDE_LINE, Rejected),
-        (UNKNOWN_DEPENDENT, Rejected),
     ],
-    ids=["unfinished", "rejected", "line-outside-chapter", "unknown-dependent"],
+    ids=["unfinished", "rejected", "line-outside-chapter"],
 )
 def test_failed_setups_are_returned_store_nothing_and_stay_unfinished(
     tmp_path: Path, answer: Any, failure: type[Unfinished] | type[Rejected]
@@ -668,6 +691,42 @@ def test_failed_setups_are_returned_store_nothing_and_stay_unfinished(
     assert isinstance(result, failure)
     assert store.finished() == []
     assert len(store.unfinished()) == 1
+
+
+def test_setups_drop_out_of_scope_depends_and_store_the_drop(tmp_path: Path) -> None:
+    # Made-up setup whose depends mix an in-scope line of chapter two with an unknown line. Not game text.
+    in_scope = {"namespace": "ST_C02_001_01", "key": "1"}
+    unknown = {"namespace": "ST_C09_001_01", "key": "1"}
+    answer = {
+        "setups": [
+            {
+                "line": {"namespace": "ST_C01_001_01", "key": "1"},
+                "depends": [unknown, in_scope],
+                "meaning": "Made-up setup meaning with an unknown dependent. Not game text.",
+            }
+        ]
+    }
+    dropped = [{**answer["setups"][0], "depends": [in_scope]}]
+    later = [{**BIBLE_TWO, "chapter": 2}]
+
+    assert setups(Store(tmp_path), 1, C1_LINES, later, SCOPE_ALL, FakeAsk(answer)) == dropped
+
+    ask = FakeAsk()
+    assert setups(Store(tmp_path), 1, C1_LINES, later, SCOPE_ALL, ask) == dropped
+    assert ask.calls == []
+
+
+def test_setup_whose_depends_are_all_out_of_scope_is_kept_with_empty_depends(tmp_path: Path) -> None:
+    # Made-up setup whose only depends name an unknown line. Not game text.
+    setup = {
+        "line": {"namespace": "ST_C01_001_01", "key": "1"},
+        "depends": [{"namespace": "ST_C09_001_01", "key": "1"}],
+        "meaning": "Made-up setup meaning with only unknown dependents. Not game text.",
+    }
+
+    result = setups(Store(tmp_path), 1, C1_LINES, [{**BIBLE_TWO, "chapter": 2}], SCOPE_ALL, FakeAsk({"setups": [setup]}))
+
+    assert result == [{**setup, "depends": []}]
 
 
 def test_setups_calls_for_two_chapters_overlap_and_never_exceed_the_configured_concurrency(
