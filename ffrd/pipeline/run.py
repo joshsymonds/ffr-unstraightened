@@ -437,12 +437,15 @@ def _with_plans(refs: frozenset[tuple[str, str]], changes: Sequence[Change]) -> 
     return refs | {(change.namespace, change.key) for change in changes if change.plan in plans}
 
 
+def _scene_arcs(ctx: _Context, scene: Scene) -> Sequence[Mapping[str, Any]]:
+    return arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), None)["arcs"]
+
+
 def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: list[Change], ask: Ask) -> tuple[list[Outcome], list[Change]]:
     if len(changes) < 2:
         return outcomes, changes
     rewrites = {(change.namespace, change.key): change.text for change in changes}
-    scene_arcs = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), None)["arcs"]
-    verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, scene_arcs, ask)
+    verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
     if isinstance(verdict, Unfinished | Rejected):
         return [replace(o, outcome="unfinished", writer=None) if (o.namespace, o.key) in rewrites else o for o in outcomes], []
     reverted = _with_plans(verdict, changes)
@@ -520,34 +523,20 @@ def _scene_gate(
     return best, origin[best.text]
 
 
-def _scene_pass(
-    ctx: _Context,
-    scene: Scene,
-    section: SceneSection,
-    cast: Sequence[Mapping[str, Any]],
-    flagged: Mapping[tuple[str, str], tuple[str, ...]],
-    outcomes: list[Outcome],
-    ask: Ask,
-) -> tuple[list[Outcome], list[Change]]:
-    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, and gates the planned lines mechanically. Returns the outcomes and only the scene pass's own changes. A failed required line blocks every scene-pass change of the scene; a failed optional line is dropped."""
+@dataclass(frozen=True)
+class _Round:
+    """One scene-pass plan after its gates and, when no required line failed the gates, the scene judge. Failed lines are gate failures and judge reverts."""
 
-    def unfinished() -> tuple[list[Outcome], list[Change]]:
-        return [
-            outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes
-        ], []
+    plan: scene_pass.Plan
+    picks: dict[tuple[str, str], tuple[Candidate, WriterName]]
+    failed: frozenset[tuple[str, str]]
+    required_failed: bool
 
-    hits = scene_pass.screen(ctx.store, ctx.lens, scene, cast, ask)
-    if not isinstance(hits, dict):
-        return unfinished()
-    if not hits:
-        return outcomes, []
-    plan = scene_pass.plan(ctx.store, ctx.lens, scene, cast, hits, frozenset(flagged), (), ask)
-    if not isinstance(plan, scene_pass.Plan):
-        return unfinished()
-    if plan.keep_reason is not None:
-        return outcomes, []
+
+def _gate_plan(
+    ctx: _Context, scene: Scene, plan: scene_pass.Plan, ask: Ask
+) -> dict[tuple[str, str], tuple[Candidate, WriterName] | Kept] | Unfinished | RateLimited:
     lines = {(line.namespace, line.key): line for line in scene.lines}
-    reasons = tuple(pattern.id for pattern in section.patterns if pattern.id in hits)
     planned: list[tuple[scene_pass.PlannedLine, stages.Target]] = []
     for entry in plan.lines:
         line = lines[(entry.namespace, entry.key)]
@@ -560,21 +549,86 @@ def _scene_pass(
         return _scene_gate(ctx, scene, target, first[(target.line.namespace, target.line.key)], ask)
 
     gated = claude.fan_out(gate, planned)
-    settled: list[tuple[scene_pass.PlannedLine, stages.Target, tuple[Candidate, WriterName] | Kept]] = []
-    for (entry, target), result in zip(planned, gated, strict=True):
+    settled: dict[tuple[str, str], tuple[Candidate, WriterName] | Kept] = {}
+    for (entry, _), result in zip(planned, gated, strict=True):
         if isinstance(result, Unfinished | RateLimited):
-            return unfinished()
-        settled.append((entry, target, result))
-    if any(isinstance(result, Kept) and entry.required for entry, _, result in settled):
+            return result
+        settled[(entry.namespace, entry.key)] = result
+    return settled
+
+
+def _settled(
+    ctx: _Context,
+    scene: Scene,
+    cast: Sequence[Mapping[str, Any]],
+    hits: Mapping[str, Sequence[tuple[str, str]]],
+    flagged: Mapping[tuple[str, str], tuple[str, ...]],
+    excluded: frozenset[tuple[str, str]],
+    ask: Ask,
+) -> _Round | Unfinished | Rejected | RateLimited:
+    """Plans once, gates the planned lines, and runs the scene judge over the passing lines unless a required line failed its gates."""
+    plan = scene_pass.plan(ctx.store, ctx.lens, scene, cast, hits, frozenset(flagged), excluded, ask)
+    if not isinstance(plan, scene_pass.Plan):
+        return plan
+    if plan.keep_reason is not None:
+        return _Round(plan, {}, frozenset(), False)
+    gated = _gate_plan(ctx, scene, plan, ask)
+    if not isinstance(gated, dict):
+        return gated
+    required = {(entry.namespace, entry.key) for entry in plan.lines if entry.required}
+    picks = {ref: result for ref, result in gated.items() if not isinstance(result, Kept)}
+    failed = {ref for ref, result in gated.items() if isinstance(result, Kept)}
+    if picks and not failed & required:
+        rewrites = {ref: candidate.text for ref, (candidate, _) in picks.items()}
+        reverted = scene_pass.judge(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
+        if not isinstance(reverted, frozenset):
+            return reverted
+        picks = {ref: pick for ref, pick in picks.items() if ref not in reverted}
+        failed |= reverted
+    return _Round(plan, picks, frozenset(failed), bool(required & failed))
+
+
+def _scene_pass(
+    ctx: _Context,
+    scene: Scene,
+    section: SceneSection,
+    cast: Sequence[Mapping[str, Any]],
+    flagged: Mapping[tuple[str, str], tuple[str, ...]],
+    outcomes: list[Outcome],
+    ask: Ask,
+) -> tuple[list[Outcome], list[Change]]:
+    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped."""
+
+    def unfinished() -> tuple[list[Outcome], list[Change]]:
+        return [
+            outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes
+        ], []
+
+    hits = scene_pass.screen(ctx.store, ctx.lens, scene, cast, ask)
+    if not isinstance(hits, dict):
+        return unfinished()
+    if not hits:
         return outcomes, []
+    first = _settled(ctx, scene, cast, hits, flagged, frozenset(), ask)
+    if not isinstance(first, _Round):
+        return unfinished()
+    if first.plan.keep_reason is not None:
+        return outcomes, []
+    chosen = first
+    if first.required_failed:
+        second = _settled(ctx, scene, cast, hits, flagged, first.failed, ask)
+        if not isinstance(second, _Round):
+            return unfinished()
+        if second.required_failed:
+            return outcomes, []
+        chosen = second
+    lines = {(line.namespace, line.key): line for line in scene.lines}
+    reasons = tuple(pattern.id for pattern in section.patterns if pattern.id in hits)
     shipped: dict[tuple[str, str], Outcome] = {}
     changes: list[Change] = []
-    for _, target, result in settled:
-        if isinstance(result, Kept):
-            continue
-        candidate, writer = result
-        line = target.line
-        shipped[(line.namespace, line.key)] = replace(_outcome(line, reasons, "changed", writer=writer), plan=plan.id)
+    for ref, (candidate, writer) in chosen.picks.items():
+        line = lines[ref]
+        shipped[ref] = replace(_outcome(line, reasons, "changed", writer=writer), plan=chosen.plan.id)
         changes.append(
             Change(
                 namespace=line.namespace,
@@ -586,7 +640,7 @@ def _scene_pass(
                 reasons=reasons,
                 writer=writer,
                 run=ctx.run_id,
-                plan=plan.id,
+                plan=chosen.plan.id,
             )
         )
     return [shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], changes
