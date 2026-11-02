@@ -142,7 +142,7 @@ A change that touches a protection is rejected by the judge.
 
 ## How it is checked
 
-- The screen is Sonnet. Jev is a recall check on the screen. For each rule that
+- The screen is Opus. Jev is a recall check on the screen. For each rule that
   Jev scores 0.5 or more on, and that the screen flagged on no line, Opus rechecks
   the scene for that rule. Lines the recheck flags join the screen's flags.
 - The judge reads the arc beats for `earned`.
@@ -203,6 +203,9 @@ lens file holds the scene text in its `[scene]` section.
 ### Plan rules
 
 - `plan-budget`: at most 4 changed lines per conversation.
+- `carries-pattern`: never plan a line that does not itself carry the flagged pattern.
+  Do not fill the budget with lines that only sit near the pattern. Each planned line
+  comes with a carrier quote from the line.
 - `required-optional`: each planned line is marked required or optional. Required
   lines are planned first.
 - `line-pass-final`: a line the line pass changed or kept is never planned.
@@ -231,6 +234,11 @@ lens file holds the scene text in its `[scene]` section.
   eye-rolling straight men for the men. That is the Women Are Wiser double standard.
 - `protections-hold`: every line-pass protection and exclusion still holds under the
   plan.
+- `carries-pattern`: a rewrite of a line that does not itself carry the flagged
+  pattern is rejected.
+- `no-added-content`: a rewrite that adds content the scene does not offer is
+  rejected.
+- `grammatical`: a rewrite that leaves a line ungrammatical is rejected.
 
 ## What the lens never does
 

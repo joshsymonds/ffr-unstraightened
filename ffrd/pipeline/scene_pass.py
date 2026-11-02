@@ -1,4 +1,4 @@
-"""Scene pass: a Sonnet screen names each scene pattern a scene hits with the lines that carry it, then an Opus plan keeps the scene for a listed reason or plans at most four line rewrites under the scene plan rule, and an Opus scene judge reverts a rewrite only when both passes of the coherence check name it."""
+"""Scene pass: an Opus screen names each scene pattern a scene hits with the lines that carry it, then an Opus plan keeps the scene for a listed reason or plans at most four line rewrites under the scene plan rule, and an Opus scene judge reverts a rewrite only when both passes of the coherence check name it."""
 
 import hashlib
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -68,7 +68,7 @@ def screen(
     ]
 
     def call() -> dict[str, list[dict[str, str]]]:
-        answer = ask(claude.SONNET, parts, SCREEN_SCHEMA)
+        answer = ask(claude.OPUS, parts, SCREEN_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
         hits = _hits(answer, patterns, scene)
@@ -77,7 +77,7 @@ def screen(
         return hits
 
     try:
-        hits = store.run(SCREEN_STAGE, {**_inputs(scene), "cast": list(cast)}, lens.stage_text("scene"), call).value
+        hits = store.run(SCREEN_STAGE, {**_inputs(scene), "cast": list(cast), "model": claude.OPUS}, lens.stage_text("scene"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {pattern.id: tuple((ref["namespace"], ref["key"]) for ref in hits[pattern.id]) for pattern in patterns if pattern.id in hits}
@@ -111,7 +111,8 @@ PLAN_INSTRUCTIONS = (
     "Plan the scene's fix under the scene plan rule. Either keep the scene: set keep to true, keep_reason to the reason "
     "from the keep list that the scene meets, and lines to an empty list. Or set keep to false, keep_reason to none, and "
     "list the lines to change, at most four, each with namespace, key, intent, one sentence on what its rewrite must do, "
-    "and required, true when the fix fails without that line. Never plan a final line or an excluded line. Return JSON "
+    "carrier, the words of that line that carry the flagged pattern, quoted exactly from that line, and required, true "
+    "when the fix fails without that line. Never plan a final line or an excluded line. Return JSON "
     "with keep, keep_reason and lines. Refer to lines only by namespace and key."
 )
 
@@ -128,9 +129,10 @@ PLAN_SCHEMA: dict[str, Any] = {
                     "namespace": {"type": "string"},
                     "key": {"type": "string"},
                     "intent": {"type": "string"},
+                    "carrier": {"type": "string"},
                     "required": {"type": "boolean"},
                 },
-                "required": ["namespace", "key", "intent", "required"],
+                "required": ["namespace", "key", "intent", "carrier", "required"],
                 "additionalProperties": False,
             },
         },
@@ -236,7 +238,7 @@ def _plan_answer(
         return Rejected("a planned scene must plan at least one line")
     if len(answer["lines"]) > MAX_PLANNED:
         return Rejected(f"plan names {len(answer['lines'])} lines, more than {MAX_PLANNED}")
-    in_scene = {(line.namespace, line.key) for line in scene.lines}
+    in_scene = {(line.namespace, line.key): line.english for line in scene.lines}
     final_refs = set(final)
     excluded_refs = set(excluded)
     seen: set[tuple[str, str]] = set()
@@ -246,6 +248,11 @@ def _plan_answer(
         ref = (namespace, key)
         if ref not in in_scene:
             return Rejected(f"planned line {namespace}/{key} is not in scene {scene.key}")
+        carrier = entry["carrier"]
+        if not carrier.strip():
+            return Rejected(f"planned line {namespace}/{key} has an empty carrier")
+        if carrier not in in_scene[ref]:
+            return Rejected(f"planned line {namespace}/{key} carrier is not in its line")
         if ref in final_refs:
             return Rejected(f"planned line {namespace}/{key} is a line-pass line")
         if ref in excluded_refs:

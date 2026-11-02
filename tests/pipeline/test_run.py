@@ -2522,8 +2522,15 @@ KEEP_ANSWER: dict[str, Any] = {"keep": True, "keep_reason": "plot", "lines": []}
 
 
 def _plan_answer(*lines: tuple[str, str, bool]) -> dict[str, Any]:
+    english = {(line.namespace, line.key): line.english for line in TABLE_SCENE.lines}
     planned = [
-        {"namespace": namespace, "key": key, "intent": "Made-up scene intent. Not game text.", "required": required}
+        {
+            "namespace": namespace,
+            "key": key,
+            "intent": "Made-up scene intent. Not game text.",
+            "carrier": english[(namespace, key)],
+            "required": required,
+        }
         for namespace, key, required in lines
     ]
     return {"keep": False, "keep_reason": "none", "lines": planned}

@@ -85,14 +85,14 @@ class Fake:
         return answer
 
 
-def test_screen_asks_sonnet_once_with_schema_and_four_parts_in_order(tmp_path: Path) -> None:
+def test_screen_asks_opus_once_with_schema_and_four_parts_in_order(tmp_path: Path) -> None:
     ask = Fake(HIT_ONE)
 
     screen(Store(tmp_path), LENS, SCENE, CAST, ask)
 
     assert len(ask.calls) == 1
     model, parts, schema = ask.calls[0]
-    assert model == claude.SONNET
+    assert model == claude.OPUS
     assert schema == SCREEN_SCHEMA
     assert len(parts) == 4
     assert parts[0] == SCREEN_INSTRUCTIONS
@@ -186,10 +186,21 @@ def test_failed_screen_is_returned_unstored_and_asked_again(tmp_path: Path, fail
 def test_screen_is_stored_under_scene_screen_stage_and_scene_lens_text(tmp_path: Path) -> None:
     store = Store(tmp_path)
     screen(store, LENS, SCENE, CAST, Fake(HIT_ONE))
-    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST, "model": "opus"}
 
     assert SCREEN_STAGE == "scene_screen"
     assert store.read(store_key(SCREEN_STAGE, inputs, LENS.stage_text("scene"))) is not None
+
+
+def test_screen_key_carries_model_so_sonnet_era_answers_are_not_reused(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    screen(store, LENS, SCENE, CAST, Fake(HIT_ONE))
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    with_model = {**inputs, "model": "opus"}
+
+    assert store.read(store_key(SCREEN_STAGE, with_model, LENS.stage_text("scene"))) is not None
+    assert store_key(SCREEN_STAGE, with_model, LENS.stage_text("scene")) != store_key(SCREEN_STAGE, inputs, LENS.stage_text("scene"))
+    assert store.read(store_key(SCREEN_STAGE, inputs, LENS.stage_text("scene"))) is None
 
 
 def test_fresh_store_on_same_root_returns_stored_screen_without_asking(tmp_path: Path) -> None:
@@ -234,9 +245,19 @@ def _pair(line: SceneLine) -> tuple[str, str]:
     return (line.namespace, line.key)
 
 
-def _entry(ref: tuple[str, str], required: bool = True, intent: str = PLAN_INTENT) -> dict[str, Any]:
+_ENGLISH = {_pair(line): line.english for line in SCENE.lines}
+
+
+def _entry(
+    ref: tuple[str, str],
+    required: bool = True,
+    intent: str = PLAN_INTENT,
+    carrier: str | None = None,
+) -> dict[str, Any]:
     namespace, key = ref
-    return {"namespace": namespace, "key": key, "intent": intent, "required": required}
+    if carrier is None:
+        carrier = _ENGLISH.get(ref, "")
+    return {"namespace": namespace, "key": key, "intent": intent, "carrier": carrier, "required": required}
 
 
 def _planned(*entries: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +321,30 @@ def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
     assert plan_id("other-made-up-scene", refs) != expected
 
 
+def test_plan_schema_requires_a_string_carrier_per_planned_line() -> None:
+    item = PLAN_SCHEMA["properties"]["lines"]["items"]
+
+    assert item["properties"]["carrier"] == {"type": "string"}
+    assert "carrier" in item["required"]
+
+
+def test_valid_carrier_yields_the_same_plan_and_no_carrier_is_stored(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    carrier = "Made-up narration"
+    answer = _planned(_entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text.", carrier=carrier))
+
+    result = plan(store, LENS, SCENE, CAST, HITS, (), (), Fake(answer))
+
+    assert result == Plan(id=plan_id(SCENE.key, [_pair(LINE_TWO)]), keep_reason=None, lines=(PLAN_LINE_TWO,))
+    keys = store.finished()
+    assert len(keys) == 1
+    saved = store.read(keys[0])
+    assert saved is not None
+    stored = _dump(saved.value)
+    assert "carrier" not in stored
+    assert carrier not in stored
+
+
 @pytest.mark.parametrize(
     ("answer", "final", "excluded", "detail"),
     [
@@ -357,6 +402,24 @@ def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
             (),
             "planned line ST_C01_001_01/1 is planned twice",
         ),
+        (
+            _planned(_entry(_pair(LINE_ONE), carrier="")),
+            (),
+            (),
+            "planned line ST_C01_001_01/1 has an empty carrier",
+        ),
+        (
+            _planned(_entry(_pair(LINE_TWO), carrier=" \t ")),
+            (),
+            (),
+            "planned line ST_C01_001_01/2 has an empty carrier",
+        ),
+        (
+            _planned(_entry(_pair(LINE_THREE), carrier="Made-up carrier absent from its line. Not game text.")),
+            (),
+            (),
+            "planned line ST_C01_001_01/3 carrier is not in its line",
+        ),
     ],
     ids=[
         "kept-without-reason",
@@ -368,6 +431,9 @@ def test_plan_id_is_sha256_prefix_of_scene_and_sorted_refs() -> None:
         "line-pass",
         "excluded",
         "twice",
+        "carrier-empty",
+        "carrier-whitespace",
+        "carrier-not-in-line",
     ],
 )
 def test_plan_rejects_invalid_answer_and_stores_nothing(
