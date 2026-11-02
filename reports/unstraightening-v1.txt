@@ -67,6 +67,7 @@ total: 8 changed, 3 kept for plot, 6 gate failed, 0 unfinished, 15953 untouched
   character 92: 2
   character 194: 2
   gate classifier: 6
+scenes: 819 of 819 from the scene table, 3 outside it
 arcs: 169, 129 with changes
 recall u1-presumed-opposite-sex: 7 disagreements, 0 confirmed
 recall u2-romance-outranks: 13 disagreements, 7 confirmed

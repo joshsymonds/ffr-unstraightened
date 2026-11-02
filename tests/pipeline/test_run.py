@@ -1554,7 +1554,7 @@ def test_arcs_json_counts_the_arcs_and_the_arcs_with_changes_left_after_the_arc_
 
 
 def test_arcs_json_and_the_report_line_show_the_arcs_left_with_changes_after_reverts(
-    lens_repo: Path, capsys: pytest.CaptureFixture[str]
+    lens_repo: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     claude = _arc_claude()
     claude.arc = [_arc_verdict(False, (NS_A, "1"), (NS_B, "1")), _arc_verdict(False, (NS_A, "1"), (NS_B, "1"))]
@@ -1572,6 +1572,12 @@ def test_arcs_json_and_the_report_line_show_the_arcs_left_with_changes_after_rev
         out=lambda _: None,
     )
     assert json.loads((lens_repo / "work" / LENS / report.ARCS).read_text(encoding="utf-8")) == {"arcs": 2, "with_changes": 0}
+    # Made-up empty scene table for ffrd report. Not game text.
+    vanilla = lens_repo / "vanilla"
+    vanilla.mkdir()
+    (vanilla / "BUILDID").write_text("424242\n")
+    (vanilla / "scenes.json").write_text(json.dumps({"build": "424242", "lines": []}), encoding="utf-8")
+    monkeypatch.setenv("FFR_VANILLA", str(vanilla))
     report.cmd_report(argparse.Namespace(lens=LENS))
     assert "arcs: 2, 0 with changes" in capsys.readouterr().out.splitlines()
 

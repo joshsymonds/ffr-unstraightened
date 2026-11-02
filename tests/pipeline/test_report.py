@@ -43,7 +43,11 @@ SUMMARY = (
 DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|character [0-9]+|no speaker|gate [a-z0-9]+(?:[-_][a-z0-9]+)*): [0-9]+"
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
-LINE = re.compile(f"{SUMMARY}|{DETAIL}|{ARCS_LINE}|{RECALL_LINE}")
+SCENE_LINE = r"scenes: [0-9]+ of [0-9]+ from the scene table, [0-9]+ outside it"
+LINE = re.compile(f"{SUMMARY}|{DETAIL}|{SCENE_LINE}|{ARCS_LINE}|{RECALL_LINE}")
+
+# Made-up scene table build. Not game text.
+BUILD = "424242"
 
 # Made-up arcs totals. Not game text.
 ARCS_VALID = b'{"arcs": 3, "with_changes": 2}\n'
@@ -111,6 +115,7 @@ total: 4 changed, 1 kept for plot, 1 gate failed, 1 unfinished, 1 untouched
   character 2: 2
   no speaker: 1
   gate made-up-gate: 1
+scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
@@ -121,6 +126,23 @@ RECALL_VALID = _bytes({FIRST: {"disagreements": 4, "confirmed": 1}, SECOND: {"di
 GOOD_ENTRY = {"disagreements": 1, "confirmed": 0}
 
 
+def _scene_row(scene: str, namespace: str, key: str, order: int = 1) -> dict[str, object]:
+    # Made-up scene table row. Not game text.
+    return {"scene": scene, "order": order, "namespace": namespace, "key": key, "speaker": None, "voice": None}
+
+
+DEFAULT_SCENE_ROWS = [_scene_row("made-up-scene", "SENTINEL-NAMESPACE", "SENTINEL-KEY")]
+
+
+def _write_scene_table(repo: Path, rows: list[dict[str, object]]) -> Path:
+    folder = repo / "vanilla"
+    folder.mkdir(exist_ok=True)
+    (folder / "BUILDID").write_text(f"{BUILD}\n")
+    path = folder / "scenes.json"
+    path.write_text(json.dumps({"build": BUILD, "lines": rows}), encoding="utf-8")
+    return path
+
+
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
@@ -129,6 +151,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / "lenses").mkdir()
     (root / "lenses" / f"{LENS}.toml").write_text(LENS_TOML)
     monkeypatch.chdir(root)
+    monkeypatch.setenv("FFR_VANILLA", str(root / "vanilla"))
+    _write_scene_table(root, DEFAULT_SCENE_ROWS)
     return root
 
 
@@ -232,6 +256,7 @@ total: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 4 untouched
   kept earned: 2
   kept plot: 1
   kept none: 1
+scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
@@ -321,11 +346,65 @@ chapter 2: 0 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 0 untouched
 total: 0 changed, 0 kept for plot, 3 gate failed, 0 unfinished, 0 untouched
   gate arc: 2
   gate scene: 1
+scenes: 1 of 1 from the scene table, 0 outside it
 arcs: 3, 2 with changes
 recall made-up-first-id: 4 disagreements, 1 confirmed
 recall made-up-second-id: 0 disagreements, 0 confirmed
 """
     )
+
+
+# Made-up scene table: alpha (two lines), beta and gamma. Not game text.
+SCENE_ROWS = [
+    _scene_row("made-up-scene-alpha", "ST_ALPHA_001_01", "1", order=1),
+    _scene_row("made-up-scene-alpha", "ST_ALPHA_001_01", "2", order=2),
+    _scene_row("made-up-scene-beta", "ST_BETA_001_01", "1"),
+    _scene_row("made-up-scene-gamma", "ST_GAMMA_001_01", "1"),
+]
+
+# Made-up outcomes: alpha and beta are covered, gamma is not. Two namespaces lie outside the table.
+SCENE_RECORDS = (
+    _record(namespace="ST_ALPHA_001_01", key="2", outcome="untouched"),
+    _record(namespace="ST_BETA_001_01", key="1", outcome="untouched"),
+    _record(namespace="ST_OUT_001_01", key="1", outcome="untouched"),
+    _record(namespace="ST_OUT_001_01", key="2", outcome="untouched"),
+    _record(namespace="ST_OUT_001_01", key="3", speaker=None, reasons=[FIRST], outcome="changed"),
+    _record(namespace="ST_ELSE_003_01", key="1", outcome="untouched"),
+)
+
+EXPECTED_SCENES = """\
+chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 5 untouched
+  reason made-up-first-id: 1
+  no speaker: 1
+total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 5 untouched
+  reason made-up-first-id: 1
+  no speaker: 1
+scenes: 2 of 3 from the scene table, 2 outside it
+arcs: 3, 2 with changes
+recall made-up-first-id: 4 disagreements, 1 confirmed
+recall made-up-second-id: 0 disagreements, 0 confirmed
+"""
+
+
+def test_scene_line_counts_covered_scenes_and_outside_namespaces_after_total(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_scene_table(repo, SCENE_ROWS)
+    _write(repo, _lines(*SCENE_RECORDS))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    assert capsys.readouterr().out == EXPECTED_SCENES
+
+
+def test_missing_scene_table_fails_naming_the_scene_table(repo: Path) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    _write_recall(repo)
+    (repo / "vanilla" / "scenes.json").unlink()
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert "scene table" in message
+    assert "SENTINEL" not in message
 
 
 def test_arcs_line_accepts_zero_totals(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
