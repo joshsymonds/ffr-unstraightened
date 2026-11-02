@@ -331,11 +331,11 @@ def _drafted_for(
 
 
 def _first_drafts(
-    ctx: _Context, scene: Scene, targets: Sequence[stages.Target], ask: Ask
+    ctx: _Context, scene: Scene, targets: Sequence[stages.Target], ask: Ask, note: str | None = None
 ) -> dict[tuple[str, str], tuple[str, ...] | Unfinished | Rejected]:
     if not targets:
         return {}
-    answer = stages.draft(ctx.store, ctx.lens, scene, targets, None, ask)
+    answer = stages.draft(ctx.store, ctx.lens, scene, targets, None, ask, note)
     return {(target.line.namespace, target.line.key): _drafted_for(answer, target.line) for target in targets}
 
 
@@ -368,6 +368,7 @@ def _line(
     reasons: tuple[str, ...],
     first: tuple[str, ...] | Unfinished | Rejected,
     ask: Ask,
+    note: str | None = None,
 ) -> tuple[Outcome, Change | None]:
     line = target.line
     origin: dict[str, WriterName] = {}
@@ -394,7 +395,9 @@ def _line(
         if retry is None:
             produced = _candidates(ctx, line, first, origin)
         else:
-            produced = _candidates(ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line), origin)
+            produced = _candidates(
+                ctx, line, _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask, note), line), origin
+            )
         if not isinstance(produced, Unfinished):
             check_round(produced)
         return produced
@@ -423,6 +426,20 @@ def _line(
         run=ctx.run_id,
     )
     return _outcome(line, reasons, "changed", writer=writer), change
+
+
+def _redraft(
+    ctx: _Context, scene: Scene, target: stages.Target, reasons: tuple[str, ...], note: str, ask: Ask
+) -> tuple[Outcome, Change | None]:
+    """Redrafts a line the redo list names, from its note, and gates the redraft like any line-pass line. A redraft that does not pass is gate_failed under redo, so the first rewrite never ships in its place."""
+    line = target.line
+    first = _first_drafts(ctx, scene, [target], ask, note)[(line.namespace, line.key)]
+    outcome, change = _line(ctx, scene, target, reasons, first, ask, note)
+    if outcome.outcome == "changed":
+        return outcome, change
+    if outcome.outcome == "unfinished":
+        return outcome, None
+    return _outcome(line, reasons, "gate_failed", gate="redo"), None
 
 
 def _join(
@@ -472,11 +489,11 @@ def _arc_outcome(outcome: Outcome, verdicts: arcs.Verdicts) -> Outcome:
 
 
 def _unified(ctx: _Context, outcomes: Sequence[Outcome], changes: Sequence[Change]) -> tuple[list[Outcome], list[Change]]:
-    """Gives every changed line that shares one English text the text and writer of the earliest of them in story order. Each line keeps its own key, plan and outcome, and only the rewrite and writer are copied."""
+    """Gives every changed line that shares one English text the text and writer of the earliest listed one in story order, or of the earliest one when none is listed. Each line keeps its own key, plan and outcome, and only the rewrite and writer are copied."""
     position = {(outcome.namespace, outcome.key): index for index, outcome in enumerate(outcomes) if outcome.outcome == "changed"}
     english = {(change.namespace, change.key): ctx.lines[(change.namespace, change.key)].english for change in changes}
     earliest: dict[str, Change] = {}
-    for change in sorted(changes, key=lambda c: position[(c.namespace, c.key)]):
+    for change in sorted(changes, key=lambda c: ((c.namespace, c.key) not in ctx.redo, position[(c.namespace, c.key)])):
         earliest.setdefault(english[(change.namespace, change.key)], change)
     sources = {ref: earliest[text] for ref, text in english.items()}
     unified_changes = [
@@ -756,7 +773,11 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         plan = planned[ref]
         if isinstance(plan, Outcome):
             return plan, None
-        return _line(ctx, scene, plan, reasons, first[ref], ask)
+        outcome, change = _line(ctx, scene, plan, reasons, first[ref], ask)
+        note = ctx.redo.get(ref)
+        if note is None or outcome.outcome != "changed":
+            return outcome, change
+        return _redraft(ctx, scene, plan, reasons, note, ask)
 
     gated = claude.fan_out(gate, scene.lines)
     outcomes = [outcome for outcome, _ in gated]
