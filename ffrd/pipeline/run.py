@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from ffrd.find import BARE_KEY, toml_string
 from ffrd.game import Fail, natural, repo_root, vanilla_hash
-from ffrd.pipeline import arcs, bible, claude, coherence, ledger, queering, scene_pass, stages
+from ffrd.pipeline import accounts, arcs, bible, claude, coherence, ledger, queering, scene_pass, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
@@ -1316,6 +1316,9 @@ def _batch() -> Ask:
 
 def cmd_run(args: argparse.Namespace) -> None:
     claude.set_concurrency(args.concurrency)
+    if args.account is not None and args.account not in {row.number for row in accounts.read()}:
+        raise Fail(f"cswap account {args.account} is not a usable account")
+    accounts.pin(args.account)
     root = repo_root()
     lens = load_lens(root / "lenses" / f"{args.lens}.toml")
     directory = work_dir(args.lens)
@@ -1351,6 +1354,13 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         default=claude.DEFAULT_CONCURRENCY,
         metavar="N",
         help="Claude calls in flight at once across the bible, the scenes and the arc judges (default 8, at least 1)",
+    )
+    p.add_argument(
+        "--account",
+        type=int,
+        default=None,
+        metavar="N",
+        help="pin every Claude call of the run to cswap account N, skipping the weekly-use filter for it (default none)",
     )
     p.add_argument(
         "--through",

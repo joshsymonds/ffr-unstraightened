@@ -16,9 +16,10 @@ from typing import Any, Literal
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import arcs, bible, coherence, ledger, queering, report, scene_pass, scene_record, stages
+from ffrd.pipeline import accounts, arcs, bible, coherence, ledger, queering, report, scene_pass, scene_record, stages
 from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
+from ffrd.pipeline.accounts import Account
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.run import (
@@ -2613,9 +2614,10 @@ def no_live_claude(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def restore_concurrency() -> Iterator[None]:
-    # cmd_run sets the process-wide Claude limit, so every test in this file puts the default back.
+    # cmd_run sets the process-wide Claude limit and cswap pin, so every test in this file puts both back.
     yield
     claude_module.set_concurrency(claude_module.DEFAULT_CONCURRENCY)
+    accounts.pin(None)
 
 
 def _stage(schema: Mapping[str, Any]) -> str:
@@ -2927,6 +2929,64 @@ def test_readme_documents_the_concurrency_option_in_the_run_row() -> None:
     readme = (Path(__file__).parents[2] / "README.md").read_text(encoding="utf-8")
     row = next(line for line in readme.splitlines() if line.startswith("| `ffrd run --lens"))
     assert "[--concurrency N]" in row
+
+
+def test_readme_documents_the_account_option_in_the_run_row() -> None:
+    readme = (Path(__file__).parents[2] / "README.md").read_text(encoding="utf-8")
+    row = next(line for line in readme.splitlines() if line.startswith("| `ffrd run --lens"))
+    assert "[--account N]" in row
+
+
+def test_account_option_defaults_to_none_and_parses_to_an_int() -> None:
+    assert _parse(["run", "--lens", LENS]).account is None
+    assert _parse(["run", "--lens", LENS, "--account", "3"]).account == 3
+
+
+# Made-up cswap accounts for the pin tests: account 1 is the least used, account 2 is over the weekly limit. Not game text.
+TWO_ACCOUNTS = [Account(number=1, weekly_pct=10.0, resets=()), Account(number=2, weekly_pct=95.0, resets=())]
+
+
+def no_sleep(seconds: float) -> None:
+    raise AssertionError(f"the account choice waited {seconds} seconds")
+
+
+def test_account_option_naming_an_unusable_account_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected() -> Bindings:
+        raise AssertionError("the scenes were read before the account was checked")
+
+    monkeypatch.setattr(stages, "bindings", unexpected)
+    monkeypatch.setattr(accounts, "read", lambda: TWO_ACCOUNTS[:1])
+    args = _parse(["run", "--lens", LENS, "--account", "2"])
+    with pytest.raises(Fail, match="cswap account 2 is not a usable account"):
+        args.fn(args)
+    monkeypatch.setattr(accounts, "read", lambda: TWO_ACCOUNTS)
+    assert accounts.choose(sleep=no_sleep).number == 1
+
+
+def _picks_during_run(lens_repo: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> list[int]:
+    _bind(monkeypatch, _claude(), FakeJev(JEV_HIGH))
+    monkeypatch.setattr(accounts, "read", lambda: TWO_ACCOUNTS)
+    bound = stages.bindings
+    picks: list[int] = []
+
+    def pick_then_bind() -> Bindings:
+        picks.append(accounts.choose(sleep=no_sleep).number)
+        return bound()
+
+    monkeypatch.setattr(stages, "bindings", pick_then_bind)
+    args = _parse(argv)
+    args.fn(args)
+    return picks
+
+
+def test_account_option_pins_every_choice_of_the_run_to_that_account_over_the_weekly_limit(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _picks_during_run(lens_repo, monkeypatch, ["run", "--lens", LENS, "--account", "2"]) == [2]
+
+
+def test_run_without_account_option_chooses_the_least_used_account(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _picks_during_run(lens_repo, monkeypatch, ["run", "--lens", LENS]) == [1]
 
 
 # Made-up chapter-order scene: an unplaced line, a chapter-1 line and a chapter-2 line. Not game text.
