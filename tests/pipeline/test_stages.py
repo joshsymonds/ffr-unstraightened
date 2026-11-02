@@ -677,6 +677,31 @@ def test_intent_store_key_carries_its_schema_version(tmp_path: Path) -> None:
     assert store_key("intent", {k: v for k, v in inputs.items() if k != "schema"}, text) != record.stem
 
 
+def test_default_intent_store_key_is_pinned_to_the_base_hex(tmp_path: Path) -> None:
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, Fake(INTENT_ANSWER))
+    [record] = (tmp_path / "results").glob("*.json")
+
+    assert record.stem == "76f0011e1e506a5b4df0fa28f7a2bda527660c53ef3d3889d83e0e72686d5b23"
+
+
+def test_intent_with_bucket_stores_under_a_key_that_carries_the_bucket(tmp_path: Path) -> None:
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, Fake(INTENT_ANSWER), bucket="trans")
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "line": {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key},
+        "reasons": list(REASONS),
+        "callbacks": [CALLBACK],
+        "context": CONTEXT,
+        "schema": 2,
+    }
+    text = LENS.stage_text("intent")
+
+    assert record.stem == store_key("intent", {**inputs, "bucket": "trans"}, text)
+    assert record.stem != store_key("intent", inputs, text)
+
+
 def test_draft_store_key_does_not_carry_the_intent_schema_version(tmp_path: Path) -> None:
     draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, Fake(DRAFT_ANSWER))
     [record] = (tmp_path / "results").glob("*.json")
@@ -731,6 +756,24 @@ def test_intent_prompt_carries_rule_callbacks_japanese_lines_and_target_reasons(
     assert '"chapter": 1' in prompt
     assert '"japanese": "Made-up Japanese one. Not game text."' in prompt
     assert '"reasons": ["made-up-alpha"]' in prompt
+
+
+def test_intent_default_target_line_has_no_bucket(tmp_path: Path) -> None:
+    ask = Fake(INTENT_ANSWER)
+
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
+
+    target = _part(ask.calls[0][1], "Target line:\n")
+    assert target == '{"key": "1", "namespace": "ST_C01_001_01", "reasons": ["made-up-alpha"]}'
+
+
+def test_intent_with_bucket_puts_it_on_the_target_line(tmp_path: Path) -> None:
+    ask = Fake(INTENT_ANSWER)
+
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask, bucket="trans")
+
+    target = _part(ask.calls[0][1], "Target line:\n")
+    assert json.loads(target) == {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key, "reasons": ["made-up-alpha"], "bucket": "trans"}
 
 
 def test_fresh_store_on_same_root_returns_stored_intent_without_asking(tmp_path: Path) -> None:

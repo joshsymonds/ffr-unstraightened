@@ -467,14 +467,18 @@ def intent(
     callbacks: Sequence[Mapping[str, Any]],
     context: Mapping[str, Any],
     ask: Ask,
+    bucket: str | None = None,
 ) -> Intent | Unfinished | Rejected:
+    target = {**_line_ref(line), "reasons": list(reasons)}
+    if bucket is not None:
+        target["bucket"] = bucket
     parts = [
         INTENT_INSTRUCTIONS,
         f"Intent rule:\n{lens.stage_text('intent')}",
         f"Callbacks:\n{_json(list(callbacks))}",
         f"Arc context:\n{_json(context)}",
         f"Scene lines:\n{_json(_line_dicts(scene.lines))}",
-        f"Target line:\n{_json({**_line_ref(line), 'reasons': list(reasons)})}",
+        f"Target line:\n{_json(target)}",
     ]
 
     def call() -> dict[str, Any]:
@@ -491,6 +495,8 @@ def intent(
         "context": context,
         "schema": INTENT_SCHEMA_VERSION,
     }
+    if bucket is not None:
+        inputs["bucket"] = bucket
     try:
         return Intent(**store.run("intent", inputs, lens.stage_text("intent"), call).value)
     except _Unanswered as unanswered:
