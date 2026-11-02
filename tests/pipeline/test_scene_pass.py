@@ -8,8 +8,10 @@ import pytest
 
 from ffrd.pipeline import claude
 from ffrd.pipeline.claude import Rejected, Unfinished
+from ffrd.pipeline.coherence import SCHEMA as COHERENCE_SCHEMA
 from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.scene_pass import (
+    JUDGE_STAGE,
     PLAN_INSTRUCTIONS,
     PLAN_SCHEMA,
     PLAN_STAGE,
@@ -18,6 +20,7 @@ from ffrd.pipeline.scene_pass import (
     SCREEN_STAGE,
     Plan,
     PlannedLine,
+    judge,
     plan,
     plan_id,
     screen,
@@ -432,3 +435,68 @@ def test_different_excluded_lines_ask_again(tmp_path: Path) -> None:
 
     assert plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), EXCLUDED, ask) == Plan(id=None, keep_reason="plot", lines=())
     assert len(ask.calls) == 1
+
+
+# Made-up judge inputs. Not game text.
+JUDGE_REWRITES = {
+    (LINE_ONE.namespace, LINE_ONE.key): "Made-up rewrite one. Not game text.",
+    (LINE_TWO.namespace, LINE_TWO.key): "Made-up rewrite two. Not game text.",
+}
+JUDGE_ARCS = [{"arc": "Made-up arc. Not game text.", "lines": [_ref(LINE_ONE)]}]
+
+
+def _judge_answer(coherent: bool, *lines: SceneLine) -> dict[str, Any]:
+    return {"coherent": coherent, "revert": [_ref(line) for line in lines]}
+
+
+def test_judge_asks_opus_with_coherence_schema_and_scene_rubric_in_both_passes(tmp_path: Path) -> None:
+    ask = Fake(_judge_answer(False, LINE_ONE), _judge_answer(False, LINE_ONE))
+
+    judge(Store(tmp_path), LENS, SCENE, JUDGE_REWRITES, JUDGE_ARCS, ask)
+
+    assert len(ask.calls) == 2
+    for model, parts, schema in ask.calls:
+        assert model == claude.OPUS
+        assert schema == COHERENCE_SCHEMA
+        assert parts[1] == "Judge rubric:\n" + LENS.stage_text("scene")
+
+
+def test_coherent_first_pass_returns_no_reverts_after_one_call(tmp_path: Path) -> None:
+    ask = Fake(_judge_answer(True))
+
+    assert judge(Store(tmp_path), LENS, SCENE, JUDGE_REWRITES, JUDGE_ARCS, ask) == frozenset()
+    assert len(ask.calls) == 1
+
+
+def test_line_named_on_both_passes_reverts_and_line_named_only_on_first_does_not(tmp_path: Path) -> None:
+    ask = Fake(_judge_answer(False, LINE_ONE, LINE_TWO), _judge_answer(False, LINE_ONE))
+
+    result = judge(Store(tmp_path), LENS, SCENE, JUDGE_REWRITES, JUDGE_ARCS, ask)
+
+    assert result == frozenset({_pair(LINE_ONE)})
+
+
+def test_judge_result_is_stored_under_scene_judge_with_scene_text_and_reused_by_fresh_store(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    judge(store, LENS, SCENE, JUDGE_REWRITES, JUDGE_ARCS, Fake(_judge_answer(True)))
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "rewrites": [{"namespace": ns, "key": key, "text": text} for (ns, key), text in sorted(JUDGE_REWRITES.items())],
+        "arcs": JUDGE_ARCS,
+    }
+
+    assert JUDGE_STAGE == "scene_judge"
+    assert store.read(store_key(JUDGE_STAGE, inputs, LENS.stage_text("scene"))) is not None
+
+    ask = Fake()
+    assert judge(Store(tmp_path), LENS, SCENE, JUDGE_REWRITES, JUDGE_ARCS, ask) == frozenset()
+    assert ask.calls == []
+
+
+def test_unfinished_judge_answer_is_returned_unstored(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    failure = Unfinished("Made-up unfinished detail. Not game text.")
+
+    assert judge(store, LENS, SCENE, JUDGE_REWRITES, JUDGE_ARCS, Fake(failure)) == failure
+    assert store.finished() == []

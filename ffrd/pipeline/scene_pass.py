@@ -1,4 +1,4 @@
-"""Scene pass: a Sonnet screen names each scene pattern a scene hits with the lines that carry it, then an Opus plan keeps the scene for a listed reason or plans at most four line rewrites under the scene plan rule."""
+"""Scene pass: a Sonnet screen names each scene pattern a scene hits with the lines that carry it, then an Opus plan keeps the scene for a listed reason or plans at most four line rewrites under the scene plan rule, and an Opus scene judge reverts a rewrite only when both passes of the coherence check name it."""
 
 import hashlib
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -8,6 +8,7 @@ from typing import Any
 from ffrd.game import Fail
 from ffrd.pipeline import claude
 from ffrd.pipeline.claude import Rejected, Unfinished
+from ffrd.pipeline.coherence import check
 from ffrd.pipeline.lens import Lens, ScenePattern
 from ffrd.pipeline.scene_record import SCENE_KEEP_REASONS
 from ffrd.pipeline.stages import Ask, Scene, _inputs, _json, _line_dicts, _screen_lines, _Unanswered
@@ -15,6 +16,7 @@ from ffrd.pipeline.store import Store
 
 SCREEN_STAGE = "scene_screen"
 PLAN_STAGE = "scene_plan"
+JUDGE_STAGE = "scene_judge"
 MAX_PLANNED = 4
 
 SCREEN_INSTRUCTIONS = (
@@ -253,3 +255,14 @@ def _plan_answer(
         seen.add(ref)
         planned.append(PlannedLine(namespace=namespace, key=key, intent=entry["intent"], required=entry["required"]))
     return Plan(id=plan_id(scene.key, seen), keep_reason=None, lines=tuple(planned))
+
+
+def judge(
+    store: Store,
+    lens: Lens,
+    scene: Scene,
+    rewrites: Mapping[tuple[str, str], str],
+    arcs: Sequence[Mapping[str, Any]],
+    ask: Ask,
+) -> frozenset[tuple[str, str]] | Unfinished | Rejected:
+    return check(store, lens, scene, rewrites, arcs, ask, stage=JUDGE_STAGE, rubric="scene")
