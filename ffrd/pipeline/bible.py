@@ -7,6 +7,7 @@ from typing import Any
 
 from ffrd.pipeline.claude import Rejected, Unfinished, fan_out
 from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import key as store_key
 
 STAGE = "bible"
 
@@ -177,6 +178,14 @@ def _line_json(lines: Sequence[Line]) -> str:
     return json.dumps([asdict(line) for line in lines], sort_keys=True, ensure_ascii=False)
 
 
+def _forward_inputs(number: int | None, lines: Sequence[Line], earlier: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {"chapter": number, "lines": [asdict(line) for line in lines], "earlier": list(earlier)}
+
+
+def _setups_inputs(number: int | None, lines: Sequence[Line], later: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
+
+
 def _check(
     output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]], speakers: Set[str]
 ) -> Rejected | None:
@@ -217,9 +226,8 @@ def chapter(
         callbacks = [{**callback, "depends": _in_scope(callback["depends"], scope)} for callback in output["callbacks"]]
         return {**output, "arcs": arcs, "callbacks": callbacks, "chapter": number}
 
-    inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "earlier": list(earlier)}
     try:
-        return store.run(STAGE, inputs, None, call).value
+        return store.run(STAGE, _forward_inputs(number, lines, earlier), None, call).value
     except _Refused as refused:
         return refused.failure
 
@@ -253,9 +261,8 @@ def setups(
             raise _Refused(problem)
         return [{**setup, "depends": _in_scope(setup["depends"], scope)} for setup in output["setups"]]
 
-    inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
     try:
-        return store.run(SETUP_STAGE, inputs, None, call).value
+        return store.run(SETUP_STAGE, _setups_inputs(number, lines, later), None, call).value
     except _Refused as refused:
         return refused.failure
 
@@ -295,6 +302,40 @@ def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], a
         if not isinstance(result, list):
             return result
         found[index] = result
+    return [{**bible, "callbacks": [*bible["callbacks"], *found[index]]} for index, bible in enumerate(bibles)]
+
+
+def _stored_forward(
+    store: Store, number: int | None, lines: Sequence[Line], earlier: Sequence[Mapping[str, Any]]
+) -> dict[str, Any] | Unfinished:
+    saved = store.read(store_key(STAGE, _forward_inputs(number, lines, earlier), None))
+    return Unfinished(f"{_label(number)} bible is not stored") if saved is None else saved.value
+
+
+def stored(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]]) -> list[dict[str, Any]] | Unfinished:
+    # Reads the records build stored under the same keys, in build's order, and runs no stage: it never asks and writes nothing.
+    placed = [(number, lines) for number, lines in chapters if number is not None]
+    loose = [(number, lines) for number, lines in chapters if number is None]
+    bibles: list[dict[str, Any]] = []
+    for number, lines in placed:
+        result = _stored_forward(store, number, lines, bibles)
+        if isinstance(result, Unfinished):
+            return result
+        bibles.append(result)
+    placed_bibles = list(bibles)
+    for number, lines in loose:
+        result = _stored_forward(store, number, lines, placed_bibles)
+        if isinstance(result, Unfinished):
+            return result
+        bibles.append(result)
+    ordered = [*placed, *loose]
+    found: dict[int, list[dict[str, Any]]] = {}
+    for index in reversed(range(len(bibles))):
+        number, lines = ordered[index]
+        saved = store.read(store_key(SETUP_STAGE, _setups_inputs(number, lines, bibles[index + 1 :]), None))
+        if saved is None:
+            return Unfinished(f"{_label(number)} bible setups are not stored")
+        found[index] = saved.value
     return [{**bible, "callbacks": [*bible["callbacks"], *found[index]]} for index, bible in enumerate(bibles)]
 
 

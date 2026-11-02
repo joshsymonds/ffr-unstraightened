@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from ffrd.pipeline import claude
-from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, SETUP_STAGE, STAGE, Line, build, chapter, setups, touching
+from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, SETUP_STAGE, STAGE, Line, build, chapter, setups, stored, touching
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.store import Store, key
 
@@ -796,3 +796,72 @@ def test_failed_setups_return_the_highest_chapter_failure_whatever_order_they_fi
     built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], ask)
 
     assert built == Rejected("Made-up rejected detail two. Not game text.")
+
+
+STORED_CHAPTERS = [(1, C1_LINES), (2, C2_LINES), (None, UNPLACED_LINES)]
+STORED_BIBLE_ONE = {**BIBLE_ONE, "chapter": 1}
+STORED_BIBLE_TWO = {**BIBLE_TWO, "chapter": 2}
+STORED_BIBLE_UNPLACED = {**BIBLE_UNPLACED, "chapter": None}
+# Record keys written by build for STORED_CHAPTERS, spelled out from the inputs build hashes. Not game text.
+FORWARD_ONE = key(STAGE, {"chapter": 1, "lines": [asdict(line) for line in C1_LINES], "earlier": []}, None)
+FORWARD_TWO = key(STAGE, {"chapter": 2, "lines": [asdict(line) for line in C2_LINES], "earlier": [STORED_BIBLE_ONE]}, None)
+FORWARD_UNPLACED = key(
+    STAGE,
+    {"chapter": None, "lines": [asdict(line) for line in UNPLACED_LINES], "earlier": [STORED_BIBLE_ONE, STORED_BIBLE_TWO]},
+    None,
+)
+SETUPS_ONE = key(
+    SETUP_STAGE,
+    {"chapter": 1, "lines": [asdict(line) for line in C1_LINES], "later": [STORED_BIBLE_TWO, STORED_BIBLE_UNPLACED]},
+    None,
+)
+SETUPS_TWO = key(SETUP_STAGE, {"chapter": 2, "lines": [asdict(line) for line in C2_LINES], "later": [STORED_BIBLE_UNPLACED]}, None)
+
+
+def _stored_by_build(root: Path) -> Any:
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO, UNPLACED_LINES[0].text: BIBLE_UNPLACED},
+        {C1_LINES[0].text: SETUP_ONE, C2_LINES[0].text: SETUP_TWO},
+    )
+    return build(Store(root), STORED_CHAPTERS, ask)
+
+
+def test_stored_returns_what_build_returned_from_its_records_without_running_a_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _stored_by_build(tmp_path)
+    assert isinstance(built, list)
+    monkeypatch.setattr(Store, "run", lambda *_args, **_kwargs: pytest.fail("stored must not run a stage"))
+    store = Store(tmp_path)
+    before = (store.finished(), store.unfinished())
+
+    assert stored(store, STORED_CHAPTERS) == built
+    assert (store.finished(), store.unfinished()) == before
+
+
+@pytest.mark.parametrize(
+    ("removed", "detail"),
+    [
+        ([FORWARD_TWO], "chapter 2 bible is not stored"),
+        ([FORWARD_UNPLACED], "unplaced bible is not stored"),
+        ([SETUPS_ONE], "chapter 1 bible setups are not stored"),
+        ([FORWARD_TWO, SETUPS_ONE], "chapter 2 bible is not stored"),
+        ([SETUPS_ONE, SETUPS_TWO], "chapter 2 bible setups are not stored"),
+    ],
+    ids=[
+        "forward-chapter-two",
+        "forward-unplaced",
+        "setups-chapter-one",
+        "forward-before-setups",
+        "setups-highest-chapter-first",
+    ],
+)
+def test_stored_names_the_first_missing_record_in_build_order_and_writes_nothing(tmp_path: Path, removed: list[str], detail: str) -> None:
+    _stored_by_build(tmp_path)
+    for record in removed:
+        (tmp_path / "results" / f"{record}.json").unlink()
+    store = Store(tmp_path)
+    before = (store.finished(), store.unfinished())
+
+    assert stored(store, STORED_CHAPTERS) == Unfinished(detail)
+    assert (store.finished(), store.unfinished()) == before
