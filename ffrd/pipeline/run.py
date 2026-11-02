@@ -470,14 +470,21 @@ def _arc_outcome(outcome: Outcome, verdicts: arcs.Verdicts) -> Outcome:
 def _arc_judged(
     ctx: _Context, scenes: Sequence[Scene], outcomes: list[Outcome], changes: list[Change], ask: Ask
 ) -> tuple[list[Outcome], list[Change]]:
-    rewrites = {(change.namespace, change.key): change.text for change in changes}
-    verdicts = arcs.judge(ctx.store, ctx.lens, ctx.arcs, scenes, rewrites, ask)
-    planned = arcs.Verdicts(_with_plans(verdicts.reverted, changes), _with_plans(verdicts.unfinished, changes))
-    dropped = planned.reverted | planned.unfinished
-    return (
-        [_arc_outcome(outcome, planned) for outcome in outcomes],
-        [change for change in changes if (change.namespace, change.key) not in dropped],
-    )
+    """Judges the line-pass changes against the arcs, then judges the line-pass changes that survived with the scene-pass changes under the scene rubric, when the lens has a scene section and a scene-pass change exists. Second-pass reverts widen to whole plans."""
+    line_pass = [change for change in changes if change.plan is None]
+    verdicts = arcs.judge(ctx.store, ctx.lens, ctx.arcs, scenes, {(c.namespace, c.key): c.text for c in line_pass}, ask)
+    dropped = verdicts.reverted | verdicts.unfinished
+    outcomes = [_arc_outcome(outcome, verdicts) for outcome in outcomes]
+    scene_pass = [change for change in changes if change.plan is not None]
+    if ctx.lens.scene is not None and scene_pass:
+        kept = [change for change in line_pass if (change.namespace, change.key) not in dropped]
+        scene_refs = frozenset((change.namespace, change.key) for change in scene_pass)
+        rewrites = {(change.namespace, change.key): change.text for change in [*kept, *scene_pass]}
+        second = arcs.judge_scene(ctx.store, ctx.lens, ctx.arcs, scenes, rewrites, scene_refs, ask)
+        widened = arcs.Verdicts(_with_plans(second.reverted, scene_pass), _with_plans(second.unfinished, scene_pass))
+        outcomes = [_arc_outcome(outcome, widened) for outcome in outcomes]
+        dropped = dropped | widened.reverted | widened.unfinished
+    return outcomes, [change for change in changes if (change.namespace, change.key) not in dropped]
 
 
 def _write_arcs(path: Path, consolidated: Sequence[Mapping[str, Any]], scenes: Sequence[Scene], changes: Sequence[Change]) -> None:

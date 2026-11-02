@@ -23,6 +23,22 @@ RECHECK_INSTRUCTIONS = (
     "applied, and revert, only the proposed lines that must revert. Refer to lines only by namespace and key."
 )
 
+SCENE_STAGE = "scene_arc"
+
+SCENE_INSTRUCTIONS = (
+    "Judge the arc's lines in story order, each vanilla English beside its rewrite where one is given, against the judge "
+    "rubric and the scene rubric. The scene rubric takes precedence over the judge rubric for the scene-pass lines, and "
+    "only scene-pass lines may revert. Return JSON with holds, true only if the arc holds together with the rewrites "
+    "applied, and revert, the scene-pass lines that must revert for it to hold together. Refer to lines only by namespace "
+    "and key."
+)
+
+SCENE_RECHECK_INSTRUCTIONS = (
+    "A first pass proposed these reverts. The scene rubric takes precedence over the judge rubric for the scene-pass lines, "
+    "and only scene-pass lines may revert. Return JSON with holds, true only if the arc holds together with the rewrites "
+    "applied, and revert, only the proposed lines that must revert. Refer to lines only by namespace and key."
+)
+
 SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -46,6 +62,20 @@ SCHEMA: dict[str, Any] = {
 class Verdicts:
     reverted: frozenset[tuple[str, str]]
     unfinished: frozenset[tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class _Stage:
+    """One arc judge pass for one arc: its store stage and lens text, its prompt parts, and the refs it may revert."""
+
+    stage: str
+    lens_text: str
+    instructions: str
+    recheck: str
+    rubric: tuple[str, ...]
+    allowed: frozenset[tuple[str, str]]
+    after_lines: tuple[str, ...]
+    extra_inputs: Mapping[str, Any]
 
 
 def consolidate(bibles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -130,6 +160,26 @@ def judge(
     ask: Ask,
 ) -> Verdicts:
     verdicts = claude.fan_out(lambda arc: _judge_arc(store, lens, arc, scenes, rewrites, ask), arcs)
+    return _combine(verdicts)
+
+
+def judge_scene(
+    store: Store,
+    lens: Lens,
+    arcs: Sequence[Mapping[str, Any]],
+    scenes: Sequence[Scene],
+    rewrites: Mapping[tuple[str, str], str],
+    scene_refs: Collection[tuple[str, str]],
+    ask: Ask,
+) -> Verdicts:
+    verdicts = claude.fan_out(
+        lambda arc: _judge_scene_arc(store, lens, arc, scenes, rewrites, scene_refs, ask),
+        arcs,
+    )
+    return _combine(verdicts)
+
+
+def _combine(verdicts: Sequence[Verdicts]) -> Verdicts:
     return Verdicts(
         frozenset(ref for verdict in verdicts for ref in verdict.reverted),
         frozenset(ref for verdict in verdicts for ref in verdict.unfinished),
@@ -148,28 +198,79 @@ def _judge_arc(
     changed = frozenset(_ref(line) for line in arc_lines if _ref(line) in rewrites)
     if not changed:
         return Verdicts(frozenset(), frozenset())
-    outcome = _arc(store, lens, arc, arc_lines, rewrites, ask)
+    judge_text = lens.stage_text("judge")
+    stage = _Stage(
+        stage=STAGE,
+        lens_text=judge_text,
+        instructions=INSTRUCTIONS,
+        recheck=RECHECK_INSTRUCTIONS,
+        rubric=(f"Judge rubric:\n{judge_text}",),
+        allowed=changed,
+        after_lines=(),
+        extra_inputs={},
+    )
+    return _verdicts(store, stage, arc, arc_lines, rewrites, ask)
+
+
+def _judge_scene_arc(
+    store: Store,
+    lens: Lens,
+    arc: Mapping[str, Any],
+    scenes: Sequence[Scene],
+    rewrites: Mapping[tuple[str, str], str],
+    scene_refs: Collection[tuple[str, str]],
+    ask: Ask,
+) -> Verdicts:
+    arc_lines = lines(arc, scenes, rewrites)
+    scene_pass = frozenset(_ref(line) for line in arc_lines if _ref(line) in scene_refs)
+    if not scene_pass:
+        return Verdicts(frozenset(), frozenset())
+    judge_text = lens.stage_text("judge")
+    scene_text = lens.stage_text("scene")
+    refs = _ref_list(scene_pass)
+    stage = _Stage(
+        stage=SCENE_STAGE,
+        lens_text=f"{judge_text}\n{scene_text}",
+        instructions=SCENE_INSTRUCTIONS,
+        recheck=SCENE_RECHECK_INSTRUCTIONS,
+        rubric=(f"Judge rubric:\n{judge_text}", f"Scene rubric:\n{scene_text}"),
+        allowed=scene_pass,
+        after_lines=(f"Scene-pass lines:\n{_json(refs)}",),
+        extra_inputs={"scene_refs": refs},
+    )
+    return _verdicts(store, stage, arc, arc_lines, rewrites, ask)
+
+
+def _verdicts(
+    store: Store,
+    stage: _Stage,
+    arc: Mapping[str, Any],
+    arc_lines: Sequence[SceneLine],
+    rewrites: Mapping[tuple[str, str], str],
+    ask: Ask,
+) -> Verdicts:
+    outcome = _arc(store, stage, arc, arc_lines, rewrites, ask)
     if isinstance(outcome, Unfinished | Rejected):
-        return Verdicts(frozenset(), changed)
+        return Verdicts(frozenset(), stage.allowed)
     return Verdicts(outcome, frozenset())
 
 
 def _arc(
     store: Store,
-    lens: Lens,
+    stage: _Stage,
     arc: Mapping[str, Any],
     arc_lines: Sequence[SceneLine],
     rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
 ) -> frozenset[tuple[str, str]] | Unfinished | Rejected:
-    first = _pass(store, lens, arc, arc_lines, rewrites, ask, INSTRUCTIONS, None)
+    first = _pass(store, stage, arc, arc_lines, rewrites, ask, None)
     if isinstance(first, Unfinished | Rejected):
         return first
     first_holds, proposed = first
     if first_holds:
         return frozenset()
 
-    recheck = _pass(store, lens, arc, arc_lines, rewrites, ask, RECHECK_INSTRUCTIONS, proposed)
+    recheck = _pass(store, stage, arc, arc_lines, rewrites, ask, proposed)
     if isinstance(recheck, Unfinished | Rejected):
         return recheck
     recheck_holds, named = recheck
@@ -180,38 +281,38 @@ def _arc(
 
 def _pass(
     store: Store,
-    lens: Lens,
+    stage: _Stage,
     arc: Mapping[str, Any],
     arc_lines: Sequence[SceneLine],
     rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
-    instructions: str,
     proposed: frozenset[tuple[str, str]] | None,
 ) -> tuple[bool, frozenset[tuple[str, str]]] | Unfinished | Rejected:
     line_dicts = _line_dicts(arc_lines, rewrites)
+    instructions = stage.instructions if proposed is None else stage.recheck
     parts = [
         instructions,
-        f"Judge rubric:\n{lens.stage_text('judge')}",
+        *stage.rubric,
         f"Arc:\n{_json(arc)}",
         f"Arc lines:\n{_json(line_dicts)}",
+        *stage.after_lines,
     ]
-    inputs: dict[str, Any] = {"arc": arc, "lines": line_dicts}
+    inputs: dict[str, Any] = {"arc": arc, "lines": line_dicts, **stage.extra_inputs}
     if proposed is not None:
         parts.append(f"Proposed reverts:\n{_json(_ref_list(proposed))}")
         inputs["proposed"] = _ref_list(proposed)
-    changed = {_ref(line) for line in arc_lines if _ref(line) in rewrites}
 
     def call() -> dict[str, Any]:
         answer = ask(claude.OPUS, parts, SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
-        unknown = _refs(answer) - changed
+        unknown = _refs(answer) - stage.allowed
         if unknown:
             raise _Unanswered(Rejected(f"revert names no changed line of this arc: {_json(_ref_list(unknown))}"))
         return answer
 
     try:
-        answer = store.run(STAGE, inputs, lens.stage_text("judge"), call).value
+        answer = store.run(stage.stage, inputs, stage.lens_text, call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return bool(answer["holds"]), _refs(answer)
