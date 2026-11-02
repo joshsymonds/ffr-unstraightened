@@ -548,8 +548,9 @@ def _scene_gate(
     target: stages.Target,
     first: tuple[str, ...] | Unfinished | Rejected,
     ask: Ask,
+    note: str | None = None,
 ) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
-    """Gates one planned line with the mechanical gates, drops the candidates that keep its carrier, then returns the passing candidate nearest the English line with that candidate's writer. A line left with none fails the scene gate."""
+    """Gates one planned line with the mechanical gates, drops the candidates that keep its carrier, then returns the passing candidate nearest the English line with that candidate's writer. A line left with none fails the scene gate. A redraft's retry carries its note."""
     line = target.line
     origin: dict[str, WriterName] = {}
     scores: dict[str, float] = {}
@@ -560,7 +561,7 @@ def _scene_gate(
         return scores[text]
 
     def write(retry: str | None) -> Sequence[Candidate] | Unfinished:
-        drafted = first if retry is None else _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask), line)
+        drafted = first if retry is None else _drafted_for(stages.draft(ctx.store, ctx.lens, scene, [target], retry, ask, note), line)
         if isinstance(drafted, Rejected):
             return Unfinished(drafted.detail)
         return _candidates(ctx, line, drafted, origin)
@@ -577,7 +578,7 @@ def _scene_gate(
 
 @dataclass(frozen=True)
 class _Round:
-    """One scene-pass plan after its gates and, when no required line failed the gates, the scene judge. Failed lines are gate failures and judge reverts."""
+    """One scene-pass plan after its gates and, when no required line failed the gates, the scene judge. Failed lines are gate failures and judge reverts. Redo_failed names the failed lines whose redraft under a reviewer note failed."""
 
     plan: scene_pass.Plan
     picks: dict[tuple[str, str], tuple[Candidate, WriterName]]
@@ -585,6 +586,7 @@ class _Round:
     required_failed: bool
     gates: Counter[str] = field(default_factory=Counter)
     reverts: int = 0
+    redo_failed: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -611,7 +613,14 @@ def _gate_plan(
 
     def gate(item: tuple[scene_pass.PlannedLine, stages.Target]) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
         entry, target = item
-        return _scene_gate(ctx, scene, entry, target, first[(target.line.namespace, target.line.key)], ask)
+        ref = (target.line.namespace, target.line.key)
+        normal = _scene_gate(ctx, scene, entry, target, first[ref], ask)
+        note = ctx.redo.get(ref)
+        if note is None or isinstance(normal, Kept | Unfinished | RateLimited):
+            return normal
+        redrafted = _first_drafts(ctx, scene, [target], ask, note)[ref]
+        redraft = _scene_gate(ctx, scene, entry, target, redrafted, ask, note)
+        return Kept("redo") if isinstance(redraft, Kept) else redraft
 
     gated = claude.fan_out(gate, planned)
     settled: dict[tuple[str, str], tuple[Candidate, WriterName] | Kept] = {}
@@ -644,6 +653,7 @@ def _settled(
     required = {(entry.namespace, entry.key) for entry in plan.lines if entry.required}
     picks = {ref: result for ref, result in gated.items() if not isinstance(result, Kept)}
     failed = {ref for ref, result in gated.items() if isinstance(result, Kept)}
+    redo_failed = {ref for ref, result in gated.items() if isinstance(result, Kept) and result.gate == "redo"}
     gates = Counter(result.gate for result in gated.values() if isinstance(result, Kept))
     reverts = 0
     if picks and not failed & required:
@@ -654,8 +664,21 @@ def _settled(
         reverted = frozenset(ref for ref in verdict if ref in picks)
         picks = {ref: pick for ref, pick in picks.items() if ref not in reverted}
         failed |= reverted
+        redo_failed |= {ref for ref in reverted if ref in ctx.redo}
         reverts = len(reverted)
-    return _Round(plan, picks, frozenset(failed), bool(required & failed), gates, reverts)
+    return _Round(plan, picks, frozenset(failed), bool(required & failed), gates, reverts, frozenset(redo_failed))
+
+
+def _redone(
+    outcomes: Sequence[Outcome], lines: Mapping[tuple[str, str], SceneLine], reasons: tuple[str, ...], failed: frozenset[tuple[str, str]]
+) -> list[Outcome]:
+    """Makes each listed line whose redraft failed a gate_failed under redo, with the scene pass's reasons and no plan. Every other outcome is kept."""
+    return [
+        _outcome(lines[(outcome.namespace, outcome.key)], reasons, "gate_failed", gate="redo")
+        if (outcome.namespace, outcome.key) in failed
+        else outcome
+        for outcome in outcomes
+    ]
 
 
 def _scene_pass(
@@ -668,14 +691,14 @@ def _scene_pass(
     line_rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
 ) -> tuple[list[Outcome], list[Change], _PassRecord]:
-    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan, with the surviving line-pass rewrites as context. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped."""
+    """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan, with the surviving line-pass rewrites as context. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped. A listed line whose redraft failed in any round made is gate_failed under redo."""
+    lines = {(line.namespace, line.key): line for line in scene.lines}
 
-    def unfinished(hit_ids: tuple[str, ...] = ()) -> tuple[list[Outcome], list[Change], _PassRecord]:
-        return (
-            [outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes],
-            [],
-            _PassRecord(hit_ids),
-        )
+    def unfinished(
+        hit_ids: tuple[str, ...] = (), redone: frozenset[tuple[str, str]] = frozenset()
+    ) -> tuple[list[Outcome], list[Change], _PassRecord]:
+        kept = [outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes]
+        return _redone(kept, lines, hit_ids, redone), [], _PassRecord(hit_ids)
 
     hits = scene_pass.screen(ctx.store, ctx.lens, scene, cast, ask)
     if not isinstance(hits, dict):
@@ -690,15 +713,16 @@ def _scene_pass(
         return outcomes, [], _PassRecord(reasons, first.plan)
     chosen = first
     gates, reverts = first.gates, first.reverts
+    redone = first.redo_failed
     if first.required_failed:
         second = _settled(ctx, scene, cast, hits, flagged, first.failed, line_rewrites, ask)
         if not isinstance(second, _Round):
-            return unfinished(reasons)
+            return unfinished(reasons, redone)
         gates, reverts = gates + second.gates, reverts + second.reverts
+        redone = redone | second.redo_failed
         if second.required_failed:
-            return outcomes, [], _PassRecord(reasons, second.plan, True, gates, reverts)
+            return _redone(outcomes, lines, reasons, redone), [], _PassRecord(reasons, second.plan, True, gates, reverts)
         chosen = second
-    lines = {(line.namespace, line.key): line for line in scene.lines}
     shipped: dict[tuple[str, str], Outcome] = {}
     changes: list[Change] = []
     for ref, (candidate, writer) in chosen.picks.items():
@@ -719,7 +743,11 @@ def _scene_pass(
             )
         )
     passed = _PassRecord(reasons, chosen.plan, first.required_failed, gates, reverts)
-    return [shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], changes, passed
+    return (
+        _redone([shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], lines, reasons, redone),
+        changes,
+        passed,
+    )
 
 
 def _from_table(ctx: _Context, scene: Scene) -> bool:

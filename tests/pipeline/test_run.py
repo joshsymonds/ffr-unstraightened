@@ -3252,6 +3252,93 @@ def test_unfinished_scene_pass_stage_leaves_every_unflagged_line_unfinished_and_
     assert _dialog_entries(tmp_path) == {(NS_A, "1")}
 
 
+# Made-up scene-pass redrafts and reviewer note. Not game text.
+REDRAFT_A2 = "Made-up redraft of scene a line two. Not game text."
+SCENE_REDO = "Made-up scene redo note. Not game text."
+SCENE_REASONS = (PATTERN_ONE, PATTERN_TWO)
+
+
+def test_listed_planned_line_is_redrafted_with_its_note_and_the_redraft_ships_with_its_plan(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [REDRAFT_A2]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _note_drafts(claude) == [([(NS_A, "2")], SCENE_REDO)]
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "changed", None, "opus", None, plan, True)
+    assert _dialog_tables(tmp_path)[(NS_A, "2")]["text"] == REDRAFT_A2
+    assert _outcome_of(outcomes, (NS_A, "3")).redo is False
+
+
+def test_scene_run_draft_and_render_results_of_unlisted_lines_are_stored_with_the_redo_file(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    listed = tmp_path / "listed"
+    _scene_run(plain, _scene_claude())
+    _redo_file(listed, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [REDRAFT_A2]
+    _scene_run(listed, claude)
+    plain_stored = _stored(plain / "work" / LENS)
+    assert set(plain_stored.values()) >= {"draft", "render"}
+    assert set(plain_stored.items()) <= set(_stored(listed / "work" / LENS).items())
+
+
+@pytest.mark.parametrize("failure", ["gates", "judge"])
+def test_scene_pass_redraft_failing_its_gates_or_the_scene_judge_is_gate_failed_under_redo_with_no_plan_and_no_dialog_entry(
+    tmp_path: Path, failure: str
+) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.scene_plan = _plan_answer((NS_A, "2", False), (NS_A, "3", False))
+    if failure == "gates":
+        claude.redrafts[(NS_A, "2")] = [LONG]
+    else:
+        claude.redrafts[(NS_A, "2")] = [REDRAFT_A2]
+        claude.scene_judge = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    notes = _note_drafts(claude)
+    assert notes and all(refs == [(NS_A, "2")] and note == SCENE_REDO for refs, note in notes)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, SCENE_REASONS, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+
+
+def test_listed_planned_line_whose_normal_gating_fails_makes_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"3" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "3")] = [LONG]
+    outcomes = _scene_run(tmp_path, claude)
+    assert _note_drafts(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "3")) == replace(_untouched(NS_A, "3"), redo=True)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+
+
+def test_redo_failure_of_a_required_line_is_reported_when_the_replan_also_blocks_the_scene(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [LONG]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _outcome_of(outcomes, (NS_A, "4")) == _untouched(NS_A, "4")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_redo_failure_of_a_required_line_is_reported_when_the_replan_is_unfinished(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{SCENE_REDO}"\n')
+    claude = _scene_claude()
+    claude.redrafts[(NS_A, "2")] = [LONG]
+    claude.scene_replan = Unfinished("Made-up re-plan failure. Not game text.")
+    outcomes = _scene_run(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    for key in ("3", "4"):
+        assert _outcome_of(outcomes, (NS_A, key)) == Outcome(NS_A, key, 1, None, (), "unfinished", None, None)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
 # Made-up scene records. Not game text.
 GATE_LENGTH = "length"
 
