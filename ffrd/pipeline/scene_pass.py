@@ -1,4 +1,4 @@
-"""Scene pass: a Sonnet screen names each scene pattern a scene hits with the lines that carry it, then an Opus plan keeps the scene for a listed reason or plans at most four line rewrites under the scene plan rule, and an Opus scene judge reverts a rewrite only when both passes of the coherence check name it."""
+"""Scene pass: an Opus screen names each scene pattern a scene hits with the lines that carry it, then an Opus plan keeps the scene for a listed reason or plans at most four line rewrites under the scene plan rule, and an Opus scene judge reverts a rewrite only when both passes of the coherence check name it."""
 
 import hashlib
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -68,7 +68,7 @@ def screen(
     ]
 
     def call() -> dict[str, list[dict[str, str]]]:
-        answer = ask(claude.SONNET, parts, SCREEN_SCHEMA)
+        answer = ask(claude.OPUS, parts, SCREEN_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
         hits = _hits(answer, patterns, scene)
@@ -77,7 +77,7 @@ def screen(
         return hits
 
     try:
-        hits = store.run(SCREEN_STAGE, {**_inputs(scene), "cast": list(cast)}, lens.stage_text("scene"), call).value
+        hits = store.run(SCREEN_STAGE, {**_inputs(scene), "cast": list(cast), "model": claude.OPUS}, lens.stage_text("scene"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     return {pattern.id: tuple((ref["namespace"], ref["key"]) for ref in hits[pattern.id]) for pattern in patterns if pattern.id in hits}

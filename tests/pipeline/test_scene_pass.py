@@ -85,14 +85,14 @@ class Fake:
         return answer
 
 
-def test_screen_asks_sonnet_once_with_schema_and_four_parts_in_order(tmp_path: Path) -> None:
+def test_screen_asks_opus_once_with_schema_and_four_parts_in_order(tmp_path: Path) -> None:
     ask = Fake(HIT_ONE)
 
     screen(Store(tmp_path), LENS, SCENE, CAST, ask)
 
     assert len(ask.calls) == 1
     model, parts, schema = ask.calls[0]
-    assert model == claude.SONNET
+    assert model == claude.OPUS
     assert schema == SCREEN_SCHEMA
     assert len(parts) == 4
     assert parts[0] == SCREEN_INSTRUCTIONS
@@ -186,10 +186,21 @@ def test_failed_screen_is_returned_unstored_and_asked_again(tmp_path: Path, fail
 def test_screen_is_stored_under_scene_screen_stage_and_scene_lens_text(tmp_path: Path) -> None:
     store = Store(tmp_path)
     screen(store, LENS, SCENE, CAST, Fake(HIT_ONE))
-    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST, "model": "opus"}
 
     assert SCREEN_STAGE == "scene_screen"
     assert store.read(store_key(SCREEN_STAGE, inputs, LENS.stage_text("scene"))) is not None
+
+
+def test_screen_key_carries_model_so_sonnet_era_answers_are_not_reused(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    screen(store, LENS, SCENE, CAST, Fake(HIT_ONE))
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "cast": CAST}
+    with_model = {**inputs, "model": "opus"}
+
+    assert store.read(store_key(SCREEN_STAGE, with_model, LENS.stage_text("scene"))) is not None
+    assert store_key(SCREEN_STAGE, with_model, LENS.stage_text("scene")) != store_key(SCREEN_STAGE, inputs, LENS.stage_text("scene"))
+    assert store.read(store_key(SCREEN_STAGE, inputs, LENS.stage_text("scene"))) is None
 
 
 def test_fresh_store_on_same_root_returns_stored_screen_without_asking(tmp_path: Path) -> None:
