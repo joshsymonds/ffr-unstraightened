@@ -1,6 +1,5 @@
 chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1778 untouched
   reason u1-presumed-opposite-sex: 1
-  kept no-hit: 3
   kept protection: 1
   character 25: 1
   scene eligible: 119
@@ -15,7 +14,6 @@ chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1778 untouch
   scene changed per scene: max 0, median 0
 total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1778 untouched
   reason u1-presumed-opposite-sex: 1
-  kept no-hit: 3
   kept protection: 1
   character 25: 1
   scene eligible: 119
