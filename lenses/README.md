@@ -52,6 +52,27 @@ screen, the recheck of each edited question, and the scene and cross-scene judge
 reruns the screen and its recheck. Editing `intent` reruns the intents and drafts.
 Editing `judge` reruns both judges, the coherence check and the arc judge.
 
+## Base lens
+
+A lens may declare a base lens with one top-level line, placed before the first
+table header: `base = "<lens>"`. The value is the name of another lens, the file
+name without `.toml`. `base` is optional. A lens without it loads with no base.
+`base` is not a section. It does not change any stage text.
+
+A lens with a base chains onto that lens's rewrites:
+
+- `ffrd run --lens <name>` with a base reads `dialog/<base>/` from the working tree,
+  which is gitignored. It starts each line the base rewrote from that rewrite. If a
+  base record's `vanilla` hash no longer matches the game, the run fails and names
+  the key.
+- Each record in `dialog/<name>/` carries `vanilla`, the hash of the game line. After
+  it comes `base`, the hash of the base text the line rewrote. `base` is absent when
+  the line had no base rewrite.
+- `ffrd build` applies lens directories in base order. A lens wins on a shared key
+  only when its record's `base` equals the hash of its base lens's text. Two unrelated
+  lenses on one key are an error.
+- `ffrd diff --lens <name>` shows the vanilla line beside the chained result.
+
 ## Validation
 
 `load_lens` checks the whole file and reports every problem it finds in one
@@ -72,6 +93,8 @@ example `lenses/made-up-lens.toml: triage[1].id duplicates triage[0].id`.
 - `scene.patterns` needs one or more tables, each with an `id` and a `question`.
 - `scene.criteria` needs one or more non-empty strings.
 - `scene.plan` and `scene.rubric` each need a non-empty string.
+- `base`, when present, must match the lens name pattern above. It must not name the
+  lens itself. The loader does not check that the base lens's file exists.
 - Unknown keys are errors at every level, including unknown sections.
 
 ## Example

@@ -13,6 +13,7 @@ Stage = Literal["triage", "screen", "intent", "judge", "scene"]
 
 ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge", "scene"})
+TOP_LEVEL_KEYS = SECTIONS | frozenset({"base"})
 SCENE_KEYS = frozenset({"patterns", "criteria", "plan", "rubric"})
 
 
@@ -44,6 +45,7 @@ class Lens:
     intent_rule: str
     judge_rubric: str
     scene: SceneSection | None = None
+    base: str | None = None
 
     def stage_text(self, stage: Stage) -> str:
         section: object
@@ -201,6 +203,19 @@ def _scene(data: dict[str, object], triage_index: dict[str, int], report: _Repor
     return SceneSection(patterns=patterns, criteria=criteria, plan=plan, rubric=rubric)
 
 
+def _base(data: dict[str, object], name: str, report: _Report) -> str | None:
+    if "base" not in data:
+        return None
+    value = data["base"]
+    if not isinstance(value, str) or not ID_PATTERN.fullmatch(value):
+        report.add("base", "must be a lens name of lowercase letters, digits and single hyphens, like made-up-id")
+        return None
+    if value == name:
+        report.add("base", "names the lens itself")
+        return None
+    return value
+
+
 def load_lens(path: Path) -> Lens:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -208,7 +223,9 @@ def load_lens(path: Path) -> Lens:
         raise Fail(f"{path}: cannot read as TOML: {e}") from e
 
     report = _Report(str(path))
-    _unknown_keys(data, SECTIONS, "", report)
+    name = path.stem
+    _unknown_keys(data, TOP_LEVEL_KEYS, "", report)
+    base = _base(data, name, report)
     triage, triage_index = _triage(data, report)
     screen = _section(data, "screen", frozenset({"criteria"}), report)
     criteria = _criteria(screen, "screen", report) if screen is not None else ()
@@ -221,10 +238,11 @@ def load_lens(path: Path) -> Lens:
     if report.errors:
         raise Fail("\n".join(report.errors))
     return Lens(
-        name=path.stem,
+        name=name,
         triage=triage,
         screen_criteria=criteria,
         intent_rule=rule,
         judge_rubric=rubric,
         scene=scene,
+        base=base,
     )

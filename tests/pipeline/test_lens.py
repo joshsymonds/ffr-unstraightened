@@ -1,4 +1,5 @@
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -273,6 +274,65 @@ def test_scene_not_a_table_raises_fail_naming_field(tmp_path: Path) -> None:
         load_lens(path)
 
 
+BASE_ID = "made-up-base-lens"
+BASE_MESSAGE = "base must be a lens name of lowercase letters, digits and single hyphens, like made-up-id"
+
+
+def test_declared_base_loads_into_base_field(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, f'base = "{BASE_ID}"\n' + VALID))
+    assert lens == replace(EXPECTED_LENS, base=BASE_ID)
+
+
+def test_lens_without_base_has_none(tmp_path: Path) -> None:
+    assert load_lens(write_lens(tmp_path, VALID)).base is None
+
+
+def test_base_does_not_change_stage_text(tmp_path: Path) -> None:
+    plain = load_lens(write_lens(tmp_path, VALID_WITH_SCENE, name="plain"))
+    based = load_lens(write_lens(tmp_path, f'base = "{BASE_ID}"\n' + VALID_WITH_SCENE, name="based"))
+    for stage in ("triage", "screen", "intent", "judge", "scene"):
+        assert based.stage_text(stage) == plain.stage_text(stage)
+
+
+# Each case declares a base whose value has the wrong type or breaks the lens name pattern.
+BASE_INVALID_VALUES: list[tuple[str, str]] = [
+    ("uppercase", '"Made_Up"'),
+    ("empty", '""'),
+    ("double hyphen", '"made--base"'),
+    ("trailing hyphen", '"made-base-"'),
+    ("integer", "5"),
+    ("array", '["made-up-base-lens"]'),
+    ("boolean", "true"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    BASE_INVALID_VALUES,
+    ids=[case[0] for case in BASE_INVALID_VALUES],
+)
+def test_malformed_base_raises_fail_naming_file_and_field(tmp_path: Path, label: str, value: str) -> None:
+    path = write_lens(tmp_path, f"base = {value}\n" + VALID)
+    with pytest.raises(Fail, match=re.escape(f"{path}: {BASE_MESSAGE}")):
+        load_lens(path)
+
+
+def test_base_naming_the_lens_itself_raises_fail(tmp_path: Path) -> None:
+    path = write_lens(tmp_path, f'base = "{BASE_ID}"\n' + VALID, name=BASE_ID)
+    with pytest.raises(Fail, match=re.escape(f"{path}: base names the lens itself")):
+        load_lens(path)
+
+
+def test_base_problem_reported_with_other_problems_in_one_fail(tmp_path: Path) -> None:
+    text = 'base = "Made_Up"\n' + VALID.replace('rule = "Made-up intent rule, café."', "")
+    path = write_lens(tmp_path, text)
+    with pytest.raises(Fail) as raised:
+        load_lens(path)
+    message = str(raised.value)
+    assert f"{path}: {BASE_MESSAGE}" in message
+    assert f"{path}: intent.rule is missing" in message
+
+
 README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
 FENCED_TOML = re.compile(r"^```toml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 
@@ -282,3 +342,4 @@ def test_readme_example_is_a_valid_lens(tmp_path: Path) -> None:
     assert len(blocks) == 1
     lens = load_lens(write_lens(tmp_path, blocks[0], name="readme-example"))
     assert [question.id for question in lens.triage] == ["made-up-first-id", "made-up-second-id"]
+    assert lens.base is None
