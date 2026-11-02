@@ -91,7 +91,7 @@ Set the game's Text Language to English before you play.
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
 | `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json`, then `redo: n listed, m changed, k gate failed`: the lines on the redo list (those with `redo` true in `outcomes.jsonl`), how many of them changed and how many failed a gate, whatever the gate. For a lens with `selection = "queering"`, it then prints the queering counts: `queering marked: N`, `queering bucket queer|trans|untouched: N`, `queering flirt marked: N, redirect half: M`, `queering changed queer|trans|redirect: N` and `queering gate failed queer|trans|redirect: N`. Then it prints one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
-| `ffrd run --lens <name> [--no-jev] [--concurrency N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. A lens with `selection = "queering"` runs the queering selection instead, which calls no Jev. Keeps up to `N` Claude calls in flight at once, 8 by default. `--through N` keeps only the lines in chapters at or below `N`. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd run --lens <name> [--no-jev] [--concurrency N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. A lens with `selection = "queering"` runs the queering selection instead, which calls no Jev. Keeps up to `N` Claude calls in flight at once, 8 by default. `--through N` keeps only the lines in chapters at or below `N`. Checks `ledger/<name>.jsonl` before any Claude call and appends to it at the end. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
 | `ffrd probe [--shape {target,full,partial,ue4ss}]` | Installs the built mod with a probe-only marker pak beside it on the probe host, and passes when the game honours the marker. Removes both afterwards. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
@@ -155,13 +155,22 @@ protections and precedence are recorded in
 
 `ffrd run` works in three stages.
 
-First, Opus writes a story bible for each chapter, in script order. A bible lists the
+First, for a lens without a `base`, Opus writes a story bible for each chapter, in script order. A bible lists the
 characters with their gender and notes, the facts, the callbacks, and the arcs. Each arc
 has an id, its characters, its state in that chapter, and beats. A beat sits on a line
 and has a kind (setup, escalation, declaration, payoff or other) and an earned flag.
 Lines that name no chapter are read after the last chapter, one chunk per namespace, and
 those chunks run at the same time. Then a backward pass runs over the chapters in
 reverse order. It adds the setups that later bibles rely on to each chapter's callbacks.
+Story-bible refs to lines outside the passed lines (fact lines, callbacks and beats) are
+dropped, not rejected.
+
+A lens with a `base` makes no bible or setups call of its own. It reads the base lens's
+stored bible from `work/<base>/`, under the keys the base run stored. Those keys come from
+every in-scope scene with its game English, whatever `--through` says. If a record is missing,
+the run fails naming the chapter (`chapter N`, or `unplaced` for lines with no chapter) and
+asks for `ffrd run --lens <base>` first. Core cast, antagonists and flirt come from that
+bible. `--through` limits only the scenes the run works on.
 
 Second, the scenes run at the same time, each as its own batch. Opus screens every
 line of the scene against the screen criteria, with the cast notes from the bibles. Jev
@@ -255,7 +264,8 @@ the form `scene i/n <hash>`, where `<hash>` is an 8-digit hex label of the scene
 Every model result is saved under `work/<name>/` as it arrives, so a rerun resumes where
 it stopped.
 Claude calls run through `cswap`, which picks the least-used account. `--concurrency N`
-sets how many Claude calls run at once across the bible, the scenes and the arc judges.
+sets how many Claude calls run at once across the bible (a lens with a `base` makes none), the
+scenes and the arc judges.
 It defaults to 8 and must be at least 1. The written files are the same whatever the
 concurrency. `ffrd run` needs `TYPESAFE_API_KEY` unless `--no-jev` is given.
 
@@ -279,10 +289,12 @@ and the Jev recall check. It calls no Jev, runs no recheck and runs no scene pas
 is `lenses/queering.toml`, and its brief is in
 [docs/lenses/queering.md](docs/lenses/queering.md). The run works in two phases.
 
-Before `--through` is applied, the selection bible is built from every in-scope scene of the
-game. It gives the core cast, the antagonists and the flirt. The core cast is each speaker
-with at least 475 lines and 20 arcs. Core cast and antagonist lines are never marked,
-except the flirt's.
+The selection bible gives the core cast, the antagonists and the flirt. A lens with a `base`,
+as `lenses/queering.toml` is, makes no bible of its own. It reads them from the base lens's
+stored bible, as described in [Rewrite pipeline](#rewrite-pipeline). Without a base, the
+bible is built before `--through` is applied, from every in-scope scene of the game, and the
+core cast is each speaker with at least 475 lines and 20 arcs. Core cast and antagonist
+lines are never marked, except the flirt's.
 
 Phase 1 is one Haiku screen per scene. It runs over the lines of speakers who are neither core
 cast nor antagonist, over the flirt's lines, and over lines with no speaker. Each marked line
@@ -297,6 +309,20 @@ speaker are drafted in one call across all scenes, and speakerless lines are dra
 one call per scene. The drafts then go through the existing gates, the
 judges, the coherence check, the arc judge, the voice classifier and the redo list, as
 described above. Each outcome record carries `bucket` on a marked line.
+
+#### Change ledger
+
+`ledger/<lens>.jsonl` is committed. Each line is one JSON entry with `run`, `lens`, `base`,
+`namespace`, `key`, `vanilla_hash`, `base_hash`, `text_hash`, `reasons`, `writer` and `plan`.
+The fields hold hashes and ids only, never game text.
+
+Each `ffrd run` checks the ledger before any Claude call. At the end it appends one entry for
+each changed line whose latest entry differs in a field other than `run`. A change to or
+removal of an existing ledger line, in the working file or in a commit, fails the run.
+
+With a `base`, the intent, draft, judge, coherence and arc judges are told which lines the
+base rewrote, with the base lens and the reasons, from `ledger/<base>.jsonl`. A line the base
+rewrote with no matching entry there fails the run before any call.
 
 ### Smoke run
 

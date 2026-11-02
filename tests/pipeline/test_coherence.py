@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,28 @@ class Fake:
 
 def _run(store: Store, ask: Fake, lens: Lens = LENS, arcs: Any = ARCS) -> Any:
     return check(store, lens, SCENE, REWRITES, arcs, ask)
+
+
+def _run_with_base(store: Store, ask: Fake, base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None) -> Any:
+    return check(store, LENS, SCENE, REWRITES, ARCS, ask, base_rewrites=base_rewrites)
+
+
+OUTSIDE_REF = ("ST_C99_999_99", "9")
+BASE_REASONS = ["Made-up base reason. Not game text."]
+BASE_REWRITES: dict[tuple[str, str], dict[str, Any]] = {
+    _ref(LINE_TWO): {"lens": "made-up-base", "reasons": BASE_REASONS},
+    OUTSIDE_REF: {"lens": "made-up-base", "reasons": BASE_REASONS},
+}
+BASE_LIST = [{"namespace": "ST_C01_001_01", "key": "2", "lens": "made-up-base", "reasons": BASE_REASONS}]
+BASE_PART = "Base lens rewrites (the arcs describe these lines as they read before the base lens rewrote them):\n" + _j(BASE_LIST)
+# Key of the default call at the commit before the base-rewrites change, computed from the fixtures above.
+BASE_KEY = "8ae3e4ef6402a31e00bcd1a254ec9bf03d16494ca6954ffd260ca771cf09b0f1"
+UNCHANGED_PARTS = [
+    INSTRUCTIONS,
+    "Judge rubric:\n" + LENS.stage_text("judge"),
+    "Arcs:\n" + _j(ARCS),
+    "Scene lines:\n" + _j(_scene_dicts()),
+]
 
 
 def test_coherent_first_pass_returns_no_reverts_after_one_call(tmp_path: Path) -> None:
@@ -228,6 +251,50 @@ def test_default_call_stores_under_scene_coherence_with_judge_text(tmp_path: Pat
     _run(store, Fake(_answer(True)))
 
     assert store.finished() == [key(STAGE, _base_inputs(), LENS.stage_text("judge"))]
+
+
+def test_base_rewrite_part_lists_only_scene_lines_in_both_passes(tmp_path: Path) -> None:
+    ask = Fake(_answer(False, LINE_ONE, LINE_TWO), _answer(True))
+
+    assert _run_with_base(Store(tmp_path), ask, BASE_REWRITES) == frozenset()
+    assert len(ask.calls) == 2
+
+    _, first_parts, _ = ask.calls[0]
+    assert first_parts == [*UNCHANGED_PARTS, BASE_PART]
+    _, recheck_parts, _ = ask.calls[1]
+    assert recheck_parts == [
+        RECHECK_INSTRUCTIONS,
+        *UNCHANGED_PARTS[1:],
+        BASE_PART,
+        "Proposed reverts:\n" + _j([_ref_dict(LINE_ONE), _ref_dict(LINE_TWO)]),
+    ]
+
+
+def test_base_rewrite_list_is_stored_in_inputs_of_both_passes(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(_answer(False, LINE_ONE, LINE_TWO), _answer(True))
+
+    _run_with_base(store, ask, BASE_REWRITES)
+
+    judge = LENS.stage_text("judge")
+    inputs = {**_base_inputs(), "base_rewrites": BASE_LIST}
+    proposed = [_ref_dict(LINE_ONE), _ref_dict(LINE_TWO)]
+    assert sorted(store.finished()) == sorted([key(STAGE, inputs, judge), key(STAGE, {**inputs, "proposed": proposed}, judge)])
+
+
+@pytest.mark.parametrize(
+    "base_rewrites",
+    [None, {}, {OUTSIDE_REF: BASE_REWRITES[OUTSIDE_REF]}],
+    ids=["none", "empty", "outside-scene-only"],
+)
+def test_without_scene_base_rewrites_key_and_prompt_stay_at_base(tmp_path: Path, base_rewrites: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(_answer(True))
+
+    assert _run_with_base(store, ask, base_rewrites) == frozenset()
+
+    assert store.finished() == [BASE_KEY]
+    assert ask.calls[0][1] == UNCHANGED_PARTS
 
 
 def test_scene_rubric_and_stage_reach_both_passes_and_are_stored_and_reused(tmp_path: Path) -> None:

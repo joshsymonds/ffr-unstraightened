@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from ffrd.pipeline import claude
-from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, SETUP_STAGE, STAGE, Line, build, chapter, setups, touching
+from ffrd.pipeline.bible import SCHEMA, SETUP_SCHEMA, SETUP_STAGE, STAGE, Line, build, chapter, setups, stored, touching
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.store import Store, key
 
@@ -231,39 +231,7 @@ def test_build_drops_empty_speaker_from_arc_characters_and_stores_the_drop(tmp_p
             Rejected,
         ),
         (
-            {
-                "characters": [],
-                "facts": [
-                    {
-                        "fact": "Made-up fact with an unknown ref. Not game text.",
-                        "lines": [{"namespace": "ST_C09_001_01", "key": "1"}],
-                    }
-                ],
-                "callbacks": [],
-                "arcs": [],
-            },
-            Rejected,
-        ),
-        (
             {**BIBLE_ONE, "arcs": [{**MADE_UP_ARC, "characters": ["Nobody"]}]},
-            Rejected,
-        ),
-        (
-            {
-                **BIBLE_ONE,
-                "arcs": [
-                    {**MADE_UP_ARC, "beats": [{"line": {"namespace": "ST_C09_001_01", "key": "1"}, "kind": "setup", "earned": False}]}
-                ],
-            },
-            Rejected,
-        ),
-        (
-            {
-                **BIBLE_ONE,
-                "callbacks": [
-                    {"line": {"namespace": "ST_C09_001_01", "key": "1"}, "depends": [], "meaning": "Made-up callback line. Not game text."}
-                ],
-            },
             Rejected,
         ),
     ],
@@ -271,10 +239,7 @@ def test_build_drops_empty_speaker_from_arc_characters_and_stores_the_drop(tmp_p
         "unfinished",
         "rejected",
         "unknown-speaker",
-        "unknown-ref",
         "arc-unknown-character",
-        "arc-unknown-beat-ref",
-        "callback-unknown-line",
     ],
 )
 def test_failed_chapter_is_returned_stores_nothing_and_stays_unfinished(
@@ -378,17 +343,55 @@ def test_build_accepts_ref_to_a_line_of_a_later_passed_chapter(tmp_path: Path) -
     assert built == [{**BIBLE_LATER_REF, "chapter": 1}, {**BIBLE_TWO, "chapter": 2}]
 
 
-def test_build_rejects_ref_to_no_passed_line_and_stores_nothing(tmp_path: Path) -> None:
-    store = Store(tmp_path)
-    unknown = {
-        **BIBLE_ONE,
-        "facts": [{"fact": "Made-up fact with an unknown ref. Not game text.", "lines": [{"namespace": "ST_C09_001_01", "key": "1"}]}],
+def test_build_drops_out_of_scope_fact_callback_and_beat_refs_and_stores_the_drop(tmp_path: Path) -> None:
+    # Made-up refs: an in-scope line of chapter one and a line naming no passed line. Not game text.
+    in_scope_one = {"namespace": "ST_C01_001_01", "key": "1"}
+    in_scope_two = {"namespace": "ST_C01_001_01", "key": "2"}
+    unknown = {"namespace": "ST_C09_001_01", "key": "1"}
+    beatless_arc = {
+        "id": "made-up-beatless-arc",
+        "characters": ["Ash"],
+        "state": "Made-up arc state with no beat left. Not game text.",
+        "beats": [{"line": unknown, "kind": "payoff", "earned": True}],
+    }
+    answer = {
+        "characters": BIBLE_ONE["characters"],
+        "facts": [
+            {"fact": "Made-up fact beside an out-of-scope line. Not game text.", "lines": [unknown, in_scope_one]},
+            {"fact": "Made-up fact whose only line is out of scope. Not game text.", "lines": [unknown]},
+        ],
+        "callbacks": [
+            {"line": in_scope_two, "depends": [], "meaning": "Made-up callback meaning in scope. Not game text."},
+            {"line": unknown, "depends": [], "meaning": "Made-up callback meaning out of scope. Not game text."},
+        ],
+        "arcs": [
+            {
+                **MADE_UP_ARC,
+                "beats": [
+                    {"line": unknown, "kind": "escalation", "earned": False},
+                    {"line": in_scope_one, "kind": "setup", "earned": False},
+                ],
+            },
+            beatless_arc,
+        ],
+    }
+    dropped = {
+        "characters": BIBLE_ONE["characters"],
+        "facts": [{"fact": "Made-up fact beside an out-of-scope line. Not game text.", "lines": [in_scope_one]}],
+        "callbacks": [{"line": in_scope_two, "depends": [], "meaning": "Made-up callback meaning in scope. Not game text."}],
+        "arcs": [
+            {**MADE_UP_ARC, "beats": [{"line": in_scope_one, "kind": "setup", "earned": False}]},
+            {**beatless_arc, "beats": []},
+        ],
     }
 
-    failed = build(store, [(1, C1_LINES), (None, UNPLACED_LINES)], FakeAsk(unknown))
+    built = build(Store(tmp_path), [(1, C1_LINES)], FakeAsk(answer, NO_SETUPS))
 
-    assert isinstance(failed, Rejected)
-    assert store.finished() == []
+    assert built == [{**dropped, "chapter": 1}]
+    rereads = FakeAsk()
+    reread = chapter(Store(tmp_path), 1, C1_LINES, [], C1_SCOPE, C1_SPEAKERS, rereads)
+    assert reread == {**dropped, "chapter": 1}
+    assert rereads.calls == []
 
 
 def test_setup_schema_requires_line_depends_and_meaning_with_no_extra_properties() -> None:
@@ -796,3 +799,72 @@ def test_failed_setups_return_the_highest_chapter_failure_whatever_order_they_fi
     built = build(Store(tmp_path), [(1, C1_LINES), (2, C2_LINES)], ask)
 
     assert built == Rejected("Made-up rejected detail two. Not game text.")
+
+
+STORED_CHAPTERS = [(1, C1_LINES), (2, C2_LINES), (None, UNPLACED_LINES)]
+STORED_BIBLE_ONE = {**BIBLE_ONE, "chapter": 1}
+STORED_BIBLE_TWO = {**BIBLE_TWO, "chapter": 2}
+STORED_BIBLE_UNPLACED = {**BIBLE_UNPLACED, "chapter": None}
+# Record keys written by build for STORED_CHAPTERS, spelled out from the inputs build hashes. Not game text.
+FORWARD_ONE = key(STAGE, {"chapter": 1, "lines": [asdict(line) for line in C1_LINES], "earlier": []}, None)
+FORWARD_TWO = key(STAGE, {"chapter": 2, "lines": [asdict(line) for line in C2_LINES], "earlier": [STORED_BIBLE_ONE]}, None)
+FORWARD_UNPLACED = key(
+    STAGE,
+    {"chapter": None, "lines": [asdict(line) for line in UNPLACED_LINES], "earlier": [STORED_BIBLE_ONE, STORED_BIBLE_TWO]},
+    None,
+)
+SETUPS_ONE = key(
+    SETUP_STAGE,
+    {"chapter": 1, "lines": [asdict(line) for line in C1_LINES], "later": [STORED_BIBLE_TWO, STORED_BIBLE_UNPLACED]},
+    None,
+)
+SETUPS_TWO = key(SETUP_STAGE, {"chapter": 2, "lines": [asdict(line) for line in C2_LINES], "later": [STORED_BIBLE_UNPLACED]}, None)
+
+
+def _stored_by_build(root: Path) -> Any:
+    ask = ByLine(
+        {C1_LINES[0].text: BIBLE_ONE, C2_LINES[0].text: BIBLE_TWO, UNPLACED_LINES[0].text: BIBLE_UNPLACED},
+        {C1_LINES[0].text: SETUP_ONE, C2_LINES[0].text: SETUP_TWO},
+    )
+    return build(Store(root), STORED_CHAPTERS, ask)
+
+
+def test_stored_returns_what_build_returned_from_its_records_without_running_a_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _stored_by_build(tmp_path)
+    assert isinstance(built, list)
+    monkeypatch.setattr(Store, "run", lambda *_args, **_kwargs: pytest.fail("stored must not run a stage"))
+    store = Store(tmp_path)
+    before = (store.finished(), store.unfinished())
+
+    assert stored(store, STORED_CHAPTERS) == built
+    assert (store.finished(), store.unfinished()) == before
+
+
+@pytest.mark.parametrize(
+    ("removed", "detail"),
+    [
+        ([FORWARD_TWO], "chapter 2 bible is not stored"),
+        ([FORWARD_UNPLACED], "unplaced bible is not stored"),
+        ([SETUPS_ONE], "chapter 1 bible setups are not stored"),
+        ([FORWARD_TWO, SETUPS_ONE], "chapter 2 bible is not stored"),
+        ([SETUPS_ONE, SETUPS_TWO], "chapter 2 bible setups are not stored"),
+    ],
+    ids=[
+        "forward-chapter-two",
+        "forward-unplaced",
+        "setups-chapter-one",
+        "forward-before-setups",
+        "setups-highest-chapter-first",
+    ],
+)
+def test_stored_names_the_first_missing_record_in_build_order_and_writes_nothing(tmp_path: Path, removed: list[str], detail: str) -> None:
+    _stored_by_build(tmp_path)
+    for record in removed:
+        (tmp_path / "results" / f"{record}.json").unlink()
+    store = Store(tmp_path)
+    before = (store.finished(), store.unfinished())
+
+    assert stored(store, STORED_CHAPTERS) == Unfinished(detail)
+    assert (store.finished(), store.unfinished()) == before

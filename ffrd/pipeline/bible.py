@@ -7,6 +7,7 @@ from typing import Any
 
 from ffrd.pipeline.claude import Rejected, Unfinished, fan_out
 from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import key as store_key
 
 STAGE = "bible"
 
@@ -153,16 +154,13 @@ class _Refused(Exception):
         self.failure = failure
 
 
-def _refs(bible: Mapping[str, Any]) -> list[tuple[str, str]]:
-    refs = [(ref["namespace"], ref["key"]) for fact in bible["facts"] for ref in fact["lines"]]
-    refs.extend((callback["line"]["namespace"], callback["line"]["key"]) for callback in bible["callbacks"])
-    refs.extend((beat["line"]["namespace"], beat["line"]["key"]) for arc in bible["arcs"] for beat in arc["beats"])
-    return refs
+def _line_in_scope(ref: Mapping[str, Any], scope: Set[tuple[str, str]]) -> bool:
+    return (ref["namespace"], ref["key"]) in scope
 
 
-def _in_scope(depends: Sequence[Mapping[str, Any]], scope: Set[tuple[str, str]]) -> list[Mapping[str, Any]]:
-    # A depends ref naming no line passed to the story bible is dropped, not rejected; in-scope refs keep their order.
-    return [ref for ref in depends if (ref["namespace"], ref["key"]) in scope]
+def _in_scope(refs: Sequence[Mapping[str, Any]], scope: Set[tuple[str, str]]) -> list[Mapping[str, Any]]:
+    # A ref naming no line passed to the story bible is dropped, not rejected; in-scope refs keep their order.
+    return [ref for ref in refs if _line_in_scope(ref, scope)]
 
 
 def _label(number: int | None) -> str:
@@ -177,9 +175,15 @@ def _line_json(lines: Sequence[Line]) -> str:
     return json.dumps([asdict(line) for line in lines], sort_keys=True, ensure_ascii=False)
 
 
-def _check(
-    output: Mapping[str, Any], number: int | None, lines: Sequence[Line], scope: Set[tuple[str, str]], speakers: Set[str]
-) -> Rejected | None:
+def _forward_inputs(number: int | None, lines: Sequence[Line], earlier: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {"chapter": number, "lines": [asdict(line) for line in lines], "earlier": list(earlier)}
+
+
+def _setups_inputs(number: int | None, lines: Sequence[Line], later: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
+
+
+def _check(output: Mapping[str, Any], number: int | None, lines: Sequence[Line], speakers: Set[str]) -> Rejected | None:
     chapter_speakers = {line.speaker for line in lines}
     for character in output["characters"]:
         if character["speaker"] not in chapter_speakers:
@@ -188,9 +192,6 @@ def _check(
         for speaker in arc["characters"]:
             if speaker and speaker not in speakers:
                 return Rejected(f"{_label(number)} arc {arc['id']!r} character speaker {speaker!r} speaks no in-scope line")
-    for namespace, key in _refs(output):
-        if (namespace, key) not in scope:
-            return Rejected(f"{_label(number)} ref {namespace}/{key} names no line passed to the story bible")
     return None
 
 
@@ -210,16 +211,30 @@ def chapter(
         output = ask(parts, SCHEMA)
         if isinstance(output, Unfinished | Rejected):
             raise _Refused(output)
-        problem = _check(output, number, lines, scope, speakers)
+        problem = _check(output, number, lines, speakers)
         if problem is not None:
             raise _Refused(problem)
-        arcs = [{**arc, "characters": [speaker for speaker in arc["characters"] if speaker]} for arc in output["arcs"]]
-        callbacks = [{**callback, "depends": _in_scope(callback["depends"], scope)} for callback in output["callbacks"]]
-        return {**output, "arcs": arcs, "callbacks": callbacks, "chapter": number}
+        # Out-of-scope refs are dropped before storing: a fact left with no line, a callback on an out-of-scope line
+        # and a beat on an out-of-scope line go; arcs stay even when no beat is left.
+        facts = [{**fact, "lines": _in_scope(fact["lines"], scope)} for fact in output["facts"]]
+        facts = [fact for fact in facts if fact["lines"]]
+        arcs = [
+            {
+                **arc,
+                "characters": [speaker for speaker in arc["characters"] if speaker],
+                "beats": [beat for beat in arc["beats"] if _line_in_scope(beat["line"], scope)],
+            }
+            for arc in output["arcs"]
+        ]
+        callbacks = [
+            {**callback, "depends": _in_scope(callback["depends"], scope)}
+            for callback in output["callbacks"]
+            if _line_in_scope(callback["line"], scope)
+        ]
+        return {**output, "facts": facts, "arcs": arcs, "callbacks": callbacks, "chapter": number}
 
-    inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "earlier": list(earlier)}
     try:
-        return store.run(STAGE, inputs, None, call).value
+        return store.run(STAGE, _forward_inputs(number, lines, earlier), None, call).value
     except _Refused as refused:
         return refused.failure
 
@@ -253,9 +268,8 @@ def setups(
             raise _Refused(problem)
         return [{**setup, "depends": _in_scope(setup["depends"], scope)} for setup in output["setups"]]
 
-    inputs = {"chapter": number, "lines": [asdict(line) for line in lines], "later": list(later)}
     try:
-        return store.run(SETUP_STAGE, inputs, None, call).value
+        return store.run(SETUP_STAGE, _setups_inputs(number, lines, later), None, call).value
     except _Refused as refused:
         return refused.failure
 
@@ -295,6 +309,40 @@ def build(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]], a
         if not isinstance(result, list):
             return result
         found[index] = result
+    return [{**bible, "callbacks": [*bible["callbacks"], *found[index]]} for index, bible in enumerate(bibles)]
+
+
+def _stored_forward(
+    store: Store, number: int | None, lines: Sequence[Line], earlier: Sequence[Mapping[str, Any]]
+) -> dict[str, Any] | Unfinished:
+    saved = store.read(store_key(STAGE, _forward_inputs(number, lines, earlier), None))
+    return Unfinished(f"{_label(number)} bible is not stored") if saved is None else saved.value
+
+
+def stored(store: Store, chapters: Sequence[tuple[int | None, Sequence[Line]]]) -> list[dict[str, Any]] | Unfinished:
+    # Reads the records build stored under the same keys, in build's order, and runs no stage: it never asks and writes nothing.
+    placed = [(number, lines) for number, lines in chapters if number is not None]
+    loose = [(number, lines) for number, lines in chapters if number is None]
+    bibles: list[dict[str, Any]] = []
+    for number, lines in placed:
+        result = _stored_forward(store, number, lines, bibles)
+        if isinstance(result, Unfinished):
+            return result
+        bibles.append(result)
+    placed_bibles = list(bibles)
+    for number, lines in loose:
+        result = _stored_forward(store, number, lines, placed_bibles)
+        if isinstance(result, Unfinished):
+            return result
+        bibles.append(result)
+    ordered = [*placed, *loose]
+    found: dict[int, list[dict[str, Any]]] = {}
+    for index in reversed(range(len(bibles))):
+        number, lines = ordered[index]
+        saved = store.read(store_key(SETUP_STAGE, _setups_inputs(number, lines, bibles[index + 1 :]), None))
+        if saved is None:
+            return Unfinished(f"{_label(number)} bible setups are not stored")
+        found[index] = saved.value
     return [{**bible, "callbacks": [*bible["callbacks"], *found[index]]} for index, bible in enumerate(bibles)]
 
 

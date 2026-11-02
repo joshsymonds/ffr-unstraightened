@@ -65,6 +65,15 @@ A lens with a base chains onto that lens's rewrites:
   which is gitignored. It starts each line the base rewrote from that rewrite. If a
   base record's `vanilla` hash no longer matches the game, the run fails and names
   the key.
+- `ffrd run --lens <name>` with a base makes no bible or setups call of its own. It
+  reads the base lens's stored bible from `work/<base>/`, under the keys the base run stored.
+  Core cast, antagonists and flirt come from that bible. If a record is missing, the run
+  fails naming the chapter (`chapter N`, or `unplaced`) and asks for `ffrd run --lens <base>`
+  first. `--through` limits only the scenes worked on.
+- With a base, the intent, draft, judge, coherence and arc judges are told which lines the
+  base rewrote, with the base lens and reasons from `ledger/<base>.jsonl`. A line the base
+  rewrote with no matching entry there fails the run before any call. The ledger is described
+  in [the README](../README.md#change-ledger).
 - Each record in `dialog/<name>/` carries `vanilla`, the hash of the game line. After
   it comes `base`, the hash of the base text the line rewrote. `base` is absent when
   the line had no base rewrite.
