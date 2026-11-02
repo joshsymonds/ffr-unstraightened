@@ -398,25 +398,45 @@ def _line_dicts(lines: Sequence[SceneLine]) -> list[dict[str, Any]]:
     ]
 
 
+KEEP_REASONS = (
+    "no-hit",
+    "earned",
+    "no-invented-motive",
+    "gender-rule-narrow",
+    "own-wish",
+    "oaths-outside-romance",
+    "protection",
+    "plot",
+    "none",
+)
+
 INTENT_INSTRUCTIONS = (
     "State the intent of the target line: what the rewritten line must do for the player in this scene, in one "
     "sentence. Follow the intent rule. Use the callbacks and the scene lines for context. Set keep to true when the "
-    "intent rule leaves the target line unchanged, and to false when it calls for a rewrite. Return JSON with intent "
-    "and keep. Refer to lines only by namespace and key."
+    "intent rule leaves the target line unchanged, and to false when it calls for a rewrite. When keep is true, set "
+    "keep_reason to the reason from the intent rule's keep list that the target line meets; otherwise set keep_reason "
+    "to none. Return JSON with intent, keep and keep_reason. Refer to lines only by namespace and key."
 )
 
 INTENT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"intent": {"type": "string"}, "keep": {"type": "boolean"}},
-    "required": ["intent", "keep"],
+    "properties": {
+        "intent": {"type": "string"},
+        "keep": {"type": "boolean"},
+        "keep_reason": {"type": "string", "enum": list(KEEP_REASONS)},
+    },
+    "required": ["intent", "keep", "keep_reason"],
     "additionalProperties": False,
 }
+# Bumped whenever the intent answer changes shape, so results stored under the old answer are not reused.
+INTENT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
 class Intent:
     text: str
     keep: bool
+    keep_reason: str
 
 
 def intent(
@@ -442,7 +462,7 @@ def intent(
         answer = ask(claude.OPUS, parts, INTENT_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
-        return asdict(Intent(text=answer["intent"], keep=answer["keep"]))
+        return asdict(Intent(text=answer["intent"], keep=answer["keep"], keep_reason=answer["keep_reason"]))
 
     inputs = {
         **_inputs(scene),
@@ -450,6 +470,7 @@ def intent(
         "reasons": list(reasons),
         "callbacks": list(callbacks),
         "context": context,
+        "schema": INTENT_SCHEMA_VERSION,
     }
     try:
         return Intent(**store.run("intent", inputs, lens.stage_text("intent"), call).value)

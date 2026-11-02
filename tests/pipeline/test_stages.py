@@ -3,7 +3,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,7 @@ from ffrd.pipeline.stages import (
     triage,
 )
 from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import key as store_key
 
 # Made-up scene, lens and answers. Not game text.
 LINE_ONE = SceneLine("ST_C01_001_01", "1", "Ash", "Made-up first line. Not game text.", "Made-up Japanese one. Not game text.", 1)
@@ -446,8 +447,8 @@ def test_racing_first_asks_choose_one_account_and_every_ask_is_answered() -> Non
 CALLBACK = {"line": {"namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, "depends": [], "chapter": 1}
 REASONS = ("made-up-alpha",)
 INTENT_TEXT = "Made-up intent. Not game text."
-INTENT_ANSWER = {"intent": "Made-up intent. Not game text.", "keep": False}
-INTENT = Intent(text="Made-up intent. Not game text.", keep=False)
+INTENT_ANSWER = {"intent": "Made-up intent. Not game text.", "keep": False, "keep_reason": "none"}
+INTENT = Intent(text="Made-up intent. Not game text.", keep=False, keep_reason="none")
 TARGET_ONE = Target(LINE_ONE, "Made-up intent.", (CALLBACK,), CONTEXT)
 TARGET_TWO = Target(LINE_TWO, "Made-up intent two. Not game text.", (), CHANGED_CONTEXT)
 DRAFT_ONE = ("Made-up draft one. Not game text.", "Made-up draft two. Not game text.")
@@ -479,17 +480,39 @@ class FakeRenderer:
         return self.fake(speaker, text)
 
 
-def test_intent_schema_requires_intent_and_keep_and_forbids_extra_properties() -> None:
+def test_intent_schema_requires_intent_keep_and_keep_reason_and_forbids_extra_properties() -> None:
     assert INTENT_SCHEMA["type"] == "object"
-    assert INTENT_SCHEMA["required"] == ["intent", "keep"]
+    assert INTENT_SCHEMA["required"] == ["intent", "keep", "keep_reason"]
     assert INTENT_SCHEMA["properties"]["intent"]["type"] == "string"
     assert INTENT_SCHEMA["properties"]["keep"]["type"] == "boolean"
     assert INTENT_SCHEMA["additionalProperties"] is False
 
 
+def test_intent_schema_keep_reason_is_exactly_the_listed_reasons_in_order() -> None:
+    assert INTENT_SCHEMA["properties"]["keep_reason"] == {
+        "type": "string",
+        "enum": [
+            "no-hit",
+            "earned",
+            "no-invented-motive",
+            "gender-rule-narrow",
+            "own-wish",
+            "oaths-outside-romance",
+            "protection",
+            "plot",
+            "none",
+        ],
+    }
+
+
 def test_intent_instructions_tell_the_model_to_set_keep_when_the_line_stays_unchanged() -> None:
     assert "keep" in INTENT_INSTRUCTIONS
     assert "unchanged" in INTENT_INSTRUCTIONS
+
+
+def test_intent_instructions_tell_the_model_to_name_the_listed_keep_reason_or_none() -> None:
+    assert "keep_reason" in INTENT_INSTRUCTIONS
+    assert "none" in INTENT_INSTRUCTIONS
 
 
 def test_intent_asks_opus_with_schema_and_returns_intent(tmp_path: Path) -> None:
@@ -503,12 +526,45 @@ def test_intent_asks_opus_with_schema_and_returns_intent(tmp_path: Path) -> None
     assert schema == INTENT_SCHEMA
 
 
-def test_intent_returns_keep_true_when_the_rule_leaves_the_line_unchanged(tmp_path: Path) -> None:
-    ask = Fake({"intent": "Made-up kept intent. Not game text.", "keep": True})
+def test_intent_returns_keep_true_with_its_keep_reason_when_the_rule_leaves_the_line_unchanged(tmp_path: Path) -> None:
+    ask = Fake({"intent": "Made-up kept intent. Not game text.", "keep": True, "keep_reason": "earned"})
 
     result = intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
 
-    assert result == Intent(text="Made-up kept intent. Not game text.", keep=True)
+    assert result == Intent(text="Made-up kept intent. Not game text.", keep=True, keep_reason="earned")
+
+
+def test_intent_store_key_carries_its_schema_version(tmp_path: Path) -> None:
+    intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, Fake(INTENT_ANSWER))
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "line": {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key},
+        "reasons": list(REASONS),
+        "callbacks": [CALLBACK],
+        "context": CONTEXT,
+        "schema": 2,
+    }
+    text = LENS.stage_text("intent")
+
+    assert record.stem == store_key("intent", inputs, text)
+    assert store_key("intent", {k: v for k, v in inputs.items() if k != "schema"}, text) != record.stem
+
+
+def test_draft_store_key_does_not_carry_the_intent_schema_version(tmp_path: Path) -> None:
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, Fake(DRAFT_ANSWER))
+    [record] = (tmp_path / "results").glob("*.json")
+    target = {
+        "namespace": LINE_ONE.namespace,
+        "key": LINE_ONE.key,
+        "intent": TARGET_ONE.intent,
+        "callbacks": [CALLBACK],
+        "context": CONTEXT,
+    }
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "targets": [target], "retry": None}
+
+    assert record.stem == store_key("draft", inputs, LENS.stage_text("intent"))
 
 
 def test_intent_prompt_carries_rule_callbacks_japanese_lines_and_target_reasons(tmp_path: Path) -> None:

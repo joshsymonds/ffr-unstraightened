@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ffrd.game import Fail, natural, repo_root
 from ffrd.pipeline.lens import load_lens
+from ffrd.pipeline.stages import KEEP_REASONS
 from ffrd.pipeline.store import work_dir
 
 OUTCOMES = "outcomes.jsonl"
@@ -32,6 +33,7 @@ class Record:
     reasons: frozenset[str]
     outcome: str
     gate: str | None
+    keep_reason: str | None
 
 
 def _require(obj: dict[str, object], name: str, where: str) -> object:
@@ -89,6 +91,17 @@ def _gate(obj: dict[str, object], outcome: str, where: str) -> str | None:
     return value
 
 
+def _keep_reason(obj: dict[str, object], where: str) -> str | None:
+    if "keep_reason" not in obj:
+        return None
+    value = obj["keep_reason"]
+    if value is None:
+        return None
+    if isinstance(value, str) and value in KEEP_REASONS:
+        return value
+    raise Fail(f"{where}: field keep_reason is not a listed keep reason or null")
+
+
 def _parse(text: str, where: str, triage: frozenset[str]) -> Record:
     try:
         obj = json.loads(text)
@@ -105,6 +118,7 @@ def _parse(text: str, where: str, triage: frozenset[str]) -> Record:
         reasons=_reasons(obj, where, triage),
         outcome=outcome,
         gate=_gate(obj, outcome, where),
+        keep_reason=_keep_reason(obj, where),
     )
 
 
@@ -200,6 +214,9 @@ def _block(label: str, records: list[Record], numbers: dict[str, int], triage_id
 
     reasons = Counter(reason for r in changed for reason in r.reasons)
     lines += [f"  reason {rid}: {reasons[rid]}" for rid in triage_ids if reasons[rid]]
+
+    kept = Counter(r.keep_reason for r in records if r.keep_reason is not None)
+    lines += [f"  kept {reason}: {kept[reason]}" for reason in KEEP_REASONS if kept[reason]]
 
     speakers = Counter(r.speaker for r in changed)
     characters = sorted((numbers[s], n) for s, n in speakers.items() if s is not None)

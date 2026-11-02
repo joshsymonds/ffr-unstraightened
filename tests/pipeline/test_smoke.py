@@ -98,7 +98,7 @@ class FakeClaude:
             target = _section(parts, "Target line:\n")
             if target["key"] in self.unfinished_intent:
                 return Unfinished("Made-up intent failure. Not game text.")
-            return {"intent": "Made-up intent. Not game text.", "keep": False}
+            return {"intent": "Made-up intent. Not game text.", "keep": False, "keep_reason": "none"}
         if schema is DRAFT_SCHEMA:
             english = {(line["namespace"], line["key"]): line["english"] for line in _section(parts, "Scene lines:\n")}
             targets = _section(parts, "Targets:\n")
