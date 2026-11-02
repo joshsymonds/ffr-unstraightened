@@ -137,7 +137,7 @@ chapter 9: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 269 untouche
   scene replanned: 0
   scene reverted lines: 0
   scene changed per scene: max 0, median 0
-unattributed: 10 changed, 2 kept for plot, 12 gate failed, 0 unfinished, 7370 untouched
+unattributed: 13 changed, 2 kept for plot, 9 gate failed, 0 unfinished, 7370 untouched
   reason u1-presumed-opposite-sex: 3
   reason u7-gender-rule: 2
   kept no-hit: 14
@@ -146,15 +146,16 @@ unattributed: 10 changed, 2 kept for plot, 12 gate failed, 0 unfinished, 7370 un
   kept own-wish: 4
   kept protection: 3
   kept plot: 2
+  character 5: 1
   character 9: 1
   character 50: 4
   character 92: 1
+  character 113: 2
   character 131: 1
   character 165: 1
   character 194: 2
   gate arc: 5
   gate classifier: 4
-  gate scene: 3
   scene eligible: 326
   scene flagged s1-manhood-performance: 1
   scene flagged s2-conquest-fixation: 5
@@ -163,15 +164,17 @@ unattributed: 10 changed, 2 kept for plot, 12 gate failed, 0 unfinished, 7370 un
   scene kept plot: 1
   scene kept trait: 1
   scene planned lines: 14 (required 8)
-  scene changed lines: 5
+  scene changed lines: 8
   scene replanned: 0
-  scene reverted lines: 8
+  scene reverted lines: 5
   scene gate classifier: 1
-  scene changed per scene: max 2, median 0.5
+  scene changed per scene: max 3, median 1.5
+  scene character 5: 1
   scene character 50: 3
+  scene character 113: 2
   scene character 131: 1
   scene character 165: 1
-total: 22 changed, 3 kept for plot, 14 gate failed, 0 unfinished, 15931 untouched
+total: 25 changed, 3 kept for plot, 11 gate failed, 0 unfinished, 15931 untouched
   reason u1-presumed-opposite-sex: 4
   reason u7-gender-rule: 4
   kept no-hit: 43
@@ -181,18 +184,19 @@ total: 22 changed, 3 kept for plot, 14 gate failed, 0 unfinished, 15931 untouche
   kept own-wish: 9
   kept protection: 7
   kept plot: 3
+  character 5: 1
   character 9: 1
   character 40: 1
   character 50: 12
   character 90: 1
   character 92: 2
+  character 113: 2
   character 131: 1
   character 165: 1
   character 184: 1
   character 194: 2
   gate arc: 5
   gate classifier: 6
-  gate scene: 3
   scene eligible: 819
   scene flagged s1-manhood-performance: 1
   scene flagged s2-conquest-fixation: 10
@@ -201,14 +205,16 @@ total: 22 changed, 3 kept for plot, 14 gate failed, 0 unfinished, 15931 untouche
   scene kept plot: 1
   scene kept trait: 3
   scene planned lines: 23 (required 14)
-  scene changed lines: 14
+  scene changed lines: 17
   scene replanned: 0
-  scene reverted lines: 8
+  scene reverted lines: 5
   scene gate classifier: 1
-  scene changed per scene: max 3, median 1.5
+  scene changed per scene: max 3, median 2
+  scene character 5: 1
   scene character 40: 1
   scene character 50: 9
   scene character 90: 1
+  scene character 113: 2
   scene character 131: 1
   scene character 165: 1
   scene character 184: 1
