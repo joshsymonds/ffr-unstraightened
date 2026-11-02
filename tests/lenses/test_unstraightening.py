@@ -203,6 +203,9 @@ SCENE_RUBRIC: frozenset[str] = frozenset(
         "carries-pattern",
         "no-added-content",
         "grammatical",
+        "keeps-subject",
+        "no-new-detail",
+        "not-a-no-op",
     }
 )
 SCENE_LABELS: frozenset[str] = SCENE_CRITERIA | SCENE_PLAN | SCENE_RUBRIC
@@ -416,3 +419,44 @@ def test_doc_names_opus_as_the_screen_model() -> None:
     doc = DOC.read_text(encoding="utf-8")
     assert "The screen is Opus." in doc
     assert "The screen is Sonnet" not in doc
+
+
+# E20-D7: the scene rubric rejects rewrites that change the line's subject, add detail or change too little.
+E20_D7_PHRASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "rubric",
+        "keeps-subject",
+        "Reject a rewrite that changes what the line is about beyond the pattern words: its subject, its point or the information it gives.",
+    ),
+    (
+        "rubric",
+        "no-new-detail",
+        "Reject a rewrite that adds a name, object, motive, topic or clause the original line lacks.",
+    ),
+    ("rubric", "not-a-no-op", "Reject a rewrite that changes so little the pattern still reads the same."),
+)
+
+
+@pytest.mark.parametrize(("part", "label", "phrase"), E20_D7_PHRASES)
+def test_e20_d7_paragraph_carries_its_sentence(scene: SceneSection, part: str, label: str, phrase: str) -> None:
+    assert phrase in scene_paragraph(scene_part(scene, part), label)
+
+
+E20_D7_DOC_BULLETS: tuple[tuple[str, str], ...] = (
+    (
+        "keeps-subject",
+        "a rewrite that changes what the line is about beyond the pattern words, its subject, its point or the information it gives, is rejected.",
+    ),
+    (
+        "no-new-detail",
+        "a rewrite that adds a name, object, motive, topic or clause the original line lacks is rejected.",
+    ),
+    ("not-a-no-op", "a rewrite that changes so little the pattern still reads the same is rejected."),
+)
+
+
+@pytest.mark.parametrize(("label", "sentence"), E20_D7_DOC_BULLETS)
+def test_doc_rubric_bullet_carries_its_sentence(label: str, sentence: str) -> None:
+    rubric = DOC.read_text(encoding="utf-8").split("### Rubric", 1)[1].split("\n## ", 1)[0]
+    (bullet,) = re.findall(rf"^- `{label}`:.*(?:\n  .*)*", rubric, re.M)
+    assert sentence in " ".join(bullet.split())

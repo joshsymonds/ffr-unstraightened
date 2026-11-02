@@ -239,6 +239,12 @@ lens file holds the scene text in its `[scene]` section.
 - `no-added-content`: a rewrite that adds content the scene does not offer is
   rejected.
 - `grammatical`: a rewrite that leaves a line ungrammatical is rejected.
+- `keeps-subject`: a rewrite that changes what the line is about beyond the pattern
+  words, its subject, its point or the information it gives, is rejected.
+- `no-new-detail`: a rewrite that adds a name, object, motive, topic or clause the
+  original line lacks is rejected.
+- `not-a-no-op`: a rewrite that changes so little the pattern still reads the same is
+  rejected.
 
 ## What the lens never does
 
