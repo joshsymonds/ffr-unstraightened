@@ -23,6 +23,7 @@ from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
 from ffrd.pipeline.lens import Lens, SceneSection, load_lens
 from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, Record, render
+from ffrd.pipeline.scene_record import SCENES, SceneRecord, write_scenes
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose, distance
 from ffrd.pipeline.stages import Ask, Classifier, Renderer, Scene, SceneLine, Triage
@@ -531,6 +532,19 @@ class _Round:
     picks: dict[tuple[str, str], tuple[Candidate, WriterName]]
     failed: frozenset[tuple[str, str]]
     required_failed: bool
+    gates: Counter[str] = field(default_factory=Counter)
+    reverts: int = 0
+
+
+@dataclass(frozen=True)
+class _PassRecord:
+    """A scene's record data from the scene pass: its screen's pattern ids in lens order, the final plan, whether a re-plan ran, and the gate failures and judge reverts across the plans made."""
+
+    patterns: tuple[str, ...] = ()
+    plan: scene_pass.Plan | None = None
+    replanned: bool = False
+    gate_failures: Counter[str] = field(default_factory=Counter)
+    judge_reverts: int = 0
 
 
 def _gate_plan(
@@ -578,6 +592,8 @@ def _settled(
     required = {(entry.namespace, entry.key) for entry in plan.lines if entry.required}
     picks = {ref: result for ref, result in gated.items() if not isinstance(result, Kept)}
     failed = {ref for ref, result in gated.items() if isinstance(result, Kept)}
+    gates = Counter(result.gate for result in gated.values() if isinstance(result, Kept))
+    reverts = 0
     if picks and not failed & required:
         rewrites = {ref: candidate.text for ref, (candidate, _) in picks.items()}
         reverted = scene_pass.judge(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
@@ -585,7 +601,8 @@ def _settled(
             return reverted
         picks = {ref: pick for ref, pick in picks.items() if ref not in reverted}
         failed |= reverted
-    return _Round(plan, picks, frozenset(failed), bool(required & failed))
+        reverts = len(reverted)
+    return _Round(plan, picks, frozenset(failed), bool(required & failed), gates, reverts)
 
 
 def _scene_pass(
@@ -596,34 +613,38 @@ def _scene_pass(
     flagged: Mapping[tuple[str, str], tuple[str, ...]],
     outcomes: list[Outcome],
     ask: Ask,
-) -> tuple[list[Outcome], list[Change]]:
+) -> tuple[list[Outcome], list[Change], _PassRecord]:
     """Screens a scene for its patterns, plans line rewrites the line pass did not flag, gates them mechanically and judges the passing ones as a plan. Returns the outcomes and only the scene pass's own changes. A failed required line, by gate or judge, triggers one re-plan that excludes every failed line of the first plan; a failed required line of the re-plan blocks every scene-pass change. A failed optional line is dropped."""
 
-    def unfinished() -> tuple[list[Outcome], list[Change]]:
-        return [
-            outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes
-        ], []
+    def unfinished(hit_ids: tuple[str, ...] = ()) -> tuple[list[Outcome], list[Change], _PassRecord]:
+        return (
+            [outcome if (outcome.namespace, outcome.key) in flagged else replace(outcome, outcome="unfinished") for outcome in outcomes],
+            [],
+            _PassRecord(hit_ids),
+        )
 
     hits = scene_pass.screen(ctx.store, ctx.lens, scene, cast, ask)
     if not isinstance(hits, dict):
         return unfinished()
     if not hits:
-        return outcomes, []
+        return outcomes, [], _PassRecord()
+    reasons = tuple(pattern.id for pattern in section.patterns if pattern.id in hits)
     first = _settled(ctx, scene, cast, hits, flagged, frozenset(), ask)
     if not isinstance(first, _Round):
-        return unfinished()
+        return unfinished(reasons)
     if first.plan.keep_reason is not None:
-        return outcomes, []
+        return outcomes, [], _PassRecord(reasons, first.plan)
     chosen = first
+    gates, reverts = first.gates, first.reverts
     if first.required_failed:
         second = _settled(ctx, scene, cast, hits, flagged, first.failed, ask)
         if not isinstance(second, _Round):
-            return unfinished()
+            return unfinished(reasons)
+        gates, reverts = gates + second.gates, reverts + second.reverts
         if second.required_failed:
-            return outcomes, []
+            return outcomes, [], _PassRecord(reasons, second.plan, True, gates, reverts)
         chosen = second
     lines = {(line.namespace, line.key): line for line in scene.lines}
-    reasons = tuple(pattern.id for pattern in section.patterns if pattern.id in hits)
     shipped: dict[tuple[str, str], Outcome] = {}
     changes: list[Change] = []
     for ref, (candidate, writer) in chosen.picks.items():
@@ -643,7 +664,8 @@ def _scene_pass(
                 plan=chosen.plan.id,
             )
         )
-    return [shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], changes
+    passed = _PassRecord(reasons, chosen.plan, first.required_failed, gates, reverts)
+    return [shipped.get((outcome.namespace, outcome.key), outcome) for outcome in outcomes], changes, passed
 
 
 def _from_table(ctx: _Context, scene: Scene) -> bool:
@@ -651,7 +673,7 @@ def _from_table(ctx: _Context, scene: Scene) -> bool:
     return all((line.namespace, line.key) in ctx.table_lines for line in scene.lines)
 
 
-def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall]:
+def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
     cast = arcs.cast(ctx.bibles, _speakers(scene))
 
     def screen() -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
@@ -664,11 +686,11 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
 
     flagged, probabilities = _both(screen, triage)
     if not isinstance(flagged, dict):
-        return _every_line(scene, "unfinished"), [], _Recall()
+        return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
     recall = _Recall()
     if ctx.jev is not None:
         if not isinstance(probabilities, dict):
-            return _every_line(scene, "unfinished"), [], _Recall()
+            return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
         # A disagreement is decided from the screen's flags only. A recheck adds just its own triage id, so it never decides another id.
         questions = [
             question
@@ -679,7 +701,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         for question, rechecked in zip(questions, rechecks, strict=True):
             recall.disagreements[question.id] += 1
             if not isinstance(rechecked, dict):
-                return _every_line(scene, "unfinished"), [], _Recall()
+                return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
             if rechecked:
                 recall.confirmed[question.id] += 1
             flagged = _join(ctx.lens, flagged, rechecked)
@@ -703,11 +725,12 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
     outcomes = [outcome for outcome, _ in gated]
     changes = [change for _, change in gated if change is not None]
     section = ctx.lens.scene
+    passed = _PassRecord()
     if section is not None and _from_table(ctx, scene):
-        outcomes, scene_changes = _scene_pass(ctx, scene, section, cast, flagged, outcomes, ask)
+        outcomes, scene_changes, passed = _scene_pass(ctx, scene, section, cast, flagged, outcomes, ask)
         changes += scene_changes
     outcomes, changes = _coherent(ctx, scene, outcomes, changes, ask)
-    return outcomes, changes, recall
+    return outcomes, changes, recall, passed
 
 
 def _record(outcome: Outcome) -> Record:
@@ -727,6 +750,37 @@ def _write_provisional(root: Path, lens: Lens, outcomes: Sequence[Outcome]) -> N
     records = [_record(o) for o in outcomes if o.chapter == 1]
     lines = render(records, [question.id for question in lens.triage])
     _write_atomic(root / "reports" / f"{lens.name}-c01.txt", "".join(f"{line}\n" for line in lines))
+
+
+def _scene_chapter(scene: Scene) -> int | None:
+    return min((line.chapter for line in scene.lines if line.chapter is not None), default=None)
+
+
+def _scene_records(ctx: _Context, scenes: Sequence[Scene], passes: Sequence[_PassRecord], outcomes: Sequence[Outcome]) -> list[SceneRecord]:
+    """One record per scene in run order. A plan's changed and reverted counts are the final outcomes that name its id."""
+    final: Counter[tuple[str | None, str]] = Counter((o.plan, o.outcome) for o in outcomes if o.plan is not None)
+    records: list[SceneRecord] = []
+    for scene, data in zip(scenes, passes, strict=True):
+        plan = data.plan
+        lines = () if plan is None else plan.lines
+        plan_id = None if plan is None else plan.id
+        records.append(
+            SceneRecord(
+                scene=scene.key,
+                chapter=_scene_chapter(scene),
+                eligible=ctx.lens.scene is not None and _from_table(ctx, scene),
+                patterns=data.patterns,
+                plan=plan_id,
+                keep_reason=None if plan is None else plan.keep_reason,
+                planned=len(lines),
+                required=sum(line.required for line in lines),
+                changed=final[(plan_id, "changed")],
+                reverted=data.judge_reverts + final[(plan_id, "gate_failed")],
+                replanned=int(data.replanned),
+                gate_failures=dict(data.gate_failures),
+            )
+        )
+    return records
 
 
 def _write_recall(path: Path, lens: Lens, recall: _Recall) -> None:
@@ -780,10 +834,10 @@ def run(
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
     chapter_one: list[Outcome] = []
 
-    def scene_pass(item: tuple[int, Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall]:
+    def scene_pass(item: tuple[int, Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
         nonlocal waiting
         position, scene, ask = item
-        scene_outcomes, scene_changes, scene_recall = _scene(ctx, scene, ask)
+        scene_outcomes, scene_changes, scene_recall, passed = _scene(ctx, scene, ask)
         with progress:
             out(f"scene {position}/{len(scenes)} {opaque_label(scene.key)}: {_counts(scene_outcomes)}")
             if _holds_chapter_one(scene):
@@ -791,21 +845,24 @@ def run(
                 waiting -= 1
                 if waiting == 0:
                     _write_provisional(root, lens, chapter_one)
-        return scene_outcomes, scene_changes, scene_recall
+        return scene_outcomes, scene_changes, scene_recall, passed
 
     scene_results = claude.fan_out(scene_pass, [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)])
     outcomes: list[Outcome] = []
     changes: list[Change] = []
+    passes: list[_PassRecord] = []
     recall = _Recall()
-    for scene_outcomes, scene_changes, scene_recall in scene_results:
+    for scene_outcomes, scene_changes, scene_recall, scene_pass_record in scene_results:
         outcomes += scene_outcomes
         changes += scene_changes
+        passes.append(scene_pass_record)
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)
+    write_scenes(store.root / SCENES, _scene_records(ctx, scenes, passes, outcomes))
     _write_arcs(store.root / ARCS, ctx.arcs, scenes, changes)
     _write_recall(store.root / RECALL, lens, recall)
     write_dialog(root / "dialog" / lens.name, changes)

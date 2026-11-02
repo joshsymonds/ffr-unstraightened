@@ -12,7 +12,7 @@ from typing import Any, Literal
 import pytest
 
 from ffrd.game import Fail, vanilla_hash
-from ffrd.pipeline import arcs, bible, coherence, report, scene_pass, stages
+from ffrd.pipeline import arcs, bible, coherence, report, scene_pass, scene_record, stages
 from ffrd.pipeline import claude as claude_module
 from ffrd.pipeline import jev as jev_module
 from ffrd.pipeline.claude import Rejected, Unfinished
@@ -2595,3 +2595,196 @@ def test_unfinished_scene_pass_stage_leaves_every_unflagged_line_unfinished_and_
     for key in ("2", "3", "4"):
         assert _outcome_of(outcomes, (NS_A, key)) == Outcome(NS_A, key, 1, None, (), "unfinished", None, None)
     assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+# Made-up scene records. Not game text.
+GATE_LENGTH = "length"
+
+
+def _records(tmp_path: Path) -> list[scene_record.SceneRecord]:
+    return scene_record.read_scenes(tmp_path / "work" / LENS / scene_record.SCENES)
+
+
+def _expected_record(**fields: Any) -> scene_record.SceneRecord:
+    base: dict[str, Any] = {
+        "scene": TABLE_SCENE.key,
+        "chapter": 1,
+        "eligible": True,
+        "patterns": (),
+        "plan": None,
+        "keep_reason": None,
+        "planned": 0,
+        "required": 0,
+        "changed": 0,
+        "reverted": 0,
+        "replanned": 0,
+        "gate_failures": {},
+    }
+    return scene_record.SceneRecord(**{**base, **fields})
+
+
+def test_shipped_plan_writes_one_record_with_its_plan_patterns_and_counts(tmp_path: Path) -> None:
+    _scene_run(tmp_path, _scene_claude())
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=2),
+    ]
+
+
+def test_one_record_per_in_scope_scene_in_run_order_with_ineligible_scenes_marked(tmp_path: Path) -> None:
+    _run(
+        tmp_path,
+        _scene_claude(),
+        [],
+        jev=None,
+        scenes=(SCENE_B, TABLE_SCENE),
+        lens=SCENE_LENS,
+        renderer=FakeRenderer({OPUS_S2: VOICE_FAR}),
+    )
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=2),
+        _expected_record(scene=SCENE_B.key, chapter=2, eligible=False),
+    ]
+
+
+@pytest.mark.parametrize(("lens", "table"), [(LENS_OBJ, True), (SCENE_LENS, False)])
+def test_lens_without_a_scene_section_or_a_non_table_scene_records_ineligible_with_empty_counts(
+    tmp_path: Path, lens: Lens, table: bool
+) -> None:
+    _scene_run(tmp_path, _scene_claude(), scene=replace(TABLE_SCENE, table=table), lens=lens)
+    assert _records(tmp_path) == [_expected_record(eligible=False)]
+
+
+def test_kept_scene_records_its_keep_reason_and_no_plan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_plan = KEEP_ANSWER
+    _scene_run(tmp_path, claude)
+    assert _records(tmp_path) == [_expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), keep_reason="plot")]
+
+
+def test_scene_with_no_pattern_hit_records_eligible_with_empty_counts(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_screen = {"patterns": []}
+    _scene_run(tmp_path, claude)
+    assert _records(tmp_path) == [_expected_record()]
+
+
+def test_replan_record_names_the_replan_id_and_counts_its_gate_failures(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "3", True))
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            changed=1,
+            replanned=1,
+            gate_failures={GATE_LENGTH: 1},
+        ),
+    ]
+
+
+def test_gate_failures_count_both_plans_and_the_record_names_the_replan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [LONG]
+    claude.drafts[(NS_A, "3")] = [LONG]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "4")])
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            replanned=1,
+            gate_failures={GATE_LENGTH: 3},
+        ),
+    ]
+
+
+def test_scene_judge_revert_of_an_optional_line_counts_as_reverted(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "3")), _verdict(False, (NS_A, "3"))]
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=1, reverted=1),
+    ]
+
+
+def test_scene_judge_revert_of_a_required_line_counts_in_both_plans_and_names_the_replan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "4")] = [OPUS_S4]
+    claude.scene_judge = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    claude.scene_replan = _plan_answer((NS_A, "4", True))
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "4")])
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            changed=1,
+            reverted=1,
+            replanned=1,
+        ),
+    ]
+
+
+def test_coherence_revert_counts_every_reverted_line_of_the_plan(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.coherence = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+    _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _records(tmp_path) == [
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=0, reverted=2),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure", "patterns"),
+    [("screen", ()), ("plan", (PATTERN_ONE, PATTERN_TWO)), ("replan", (PATTERN_ONE, PATTERN_TWO))],
+)
+def test_unfinished_scene_pass_keeps_its_patterns_with_no_plan_and_zero_counts(
+    tmp_path: Path, failure: str, patterns: tuple[str, ...]
+) -> None:
+    claude = _scene_claude()
+    if failure == "screen":
+        claude.scene_screen = Unfinished("Made-up screen failure. Not game text.")
+    elif failure == "plan":
+        claude.scene_plan = Rejected("Made-up plan rejection. Not game text.")
+    else:
+        claude.drafts[(NS_A, "2")] = [LONG]
+        claude.scene_replan = Unfinished("Made-up re-plan failure. Not game text.")
+    _scene_run(tmp_path, claude)
+    assert _records(tmp_path) == [_expected_record(patterns=patterns)]
+
+
+def test_scenes_file_reads_back_and_holds_no_line_text(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "3")), _verdict(False, (NS_A, "3"))]
+    claude.drafts[(NS_A, "4")] = [LONG]
+    _scene_run(tmp_path, claude)
+    path = tmp_path / "work" / LENS / scene_record.SCENES
+    assert len(scene_record.read_scenes(path)) == 1
+    written = path.read_text(encoding="utf-8")
+    assert not any(text in written for text in (*ENGLISH, OPUS_A1, VOICE_A1, OPUS_S2, OPUS_S3, OPUS_S4, VOICE_FAR, LONG))
+
+
+def test_rerun_with_a_scene_section_reuses_every_line_pass_result_and_asks_only_the_scene_screen(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_screen = {"patterns": []}
+    _scene_run(tmp_path, claude, lens=LENS_OBJ)
+    claude.calls.clear()
+    _scene_run(tmp_path, claude)
+    assert len(claude.calls) == 1
+    assert len(_scene_prompts(claude, scene_pass.SCREEN_SCHEMA)) == 1
+    assert _records(tmp_path) == [_expected_record()]
