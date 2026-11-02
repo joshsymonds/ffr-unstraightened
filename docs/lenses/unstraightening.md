@@ -215,6 +215,8 @@ lens file holds the scene text in its `[scene]` section.
   does not offer. An s3 fix may turn the talk toward a topic already in the scene.
 - `named-keep`: when no in-budget plan fixes the scene, the scene is kept and one
   reason is named: `protection`, `plot`, `trait`, `earned-arc` or `not-recurring`.
+  `not-recurring` is never named for a `minor-flirt` hit, because that hit
+  counts even once.
 
 ### Rubric
 

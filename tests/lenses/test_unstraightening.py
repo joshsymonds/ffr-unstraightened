@@ -265,6 +265,18 @@ def test_named_keep_names_every_keep_reason(scene: SceneSection, reason: str) ->
     assert re.search(rf"(?<![\w-]){re.escape(reason)}(?![\w-])", text)
 
 
+def test_named_keep_never_keeps_a_minor_flirt_hit_as_not_recurring(scene: SceneSection) -> None:
+    text = scene_paragraph(scene.plan, "named-keep")
+    assert "Never name not-recurring for a minor-flirt hit" in text
+    assert "counts even once" in text
+
+
+def test_doc_named_keep_never_keeps_a_minor_flirt_hit_as_not_recurring() -> None:
+    doc = DOC.read_text(encoding="utf-8")
+    assert "`not-recurring` is never named for a `minor-flirt` hit" in doc
+    assert "counts even once" in doc
+
+
 @pytest.mark.parametrize("protection", (*PROTECTIONS, *EXCLUSIONS))
 def test_protections_hold_names_each_protection_unbracketed(scene: SceneSection, protection: str) -> None:
     text = scene_paragraph(scene.rubric, "protections-hold")
