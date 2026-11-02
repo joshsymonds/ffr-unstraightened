@@ -821,6 +821,85 @@ def test_draft_retry_is_part_of_its_key(tmp_path: Path) -> None:
     assert len(ask.calls) == 2
 
 
+REVIEWER_NOTE = "Made-up reviewer note. Not game text."
+REVIEWER_NOTE_TWO = "Made-up second reviewer note. Not game text."
+NOTE_INSTRUCTION_START = "A reviewer read the earlier rewrite of this target line"
+
+
+def test_draft_without_note_has_no_note_part_and_keeps_its_pre_change_key(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_ANSWER)
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, ask)
+    [record] = (tmp_path / "results").glob("*.json")
+    parts = ask.calls[0][1]
+    target = {
+        "namespace": LINE_ONE.namespace,
+        "key": LINE_ONE.key,
+        "intent": TARGET_ONE.intent,
+        "callbacks": [CALLBACK],
+        "context": CONTEXT,
+    }
+    inputs = {"scene": SCENE.key, "lines": [asdict(line) for line in SCENE.lines], "targets": [target], "retry": None}
+
+    assert not any(part.startswith("Reviewer note:") for part in parts)
+    assert NOTE_INSTRUCTION_START not in "\n".join(parts)
+    assert record.stem == store_key("draft", inputs, LENS.stage_text("intent"))
+
+
+def test_draft_with_note_sends_the_fix_instruction_then_the_note_right_after_targets(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_ANSWER)
+
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, ask, REVIEWER_NOTE)
+
+    parts = ask.calls[0][1]
+    targets_at = next(index for index, part in enumerate(parts) if part.startswith("Targets:\n"))
+    instruction = next(part for part in parts if part.startswith(NOTE_INSTRUCTION_START))
+    assert parts[targets_at + 1 :] == [instruction, f"Reviewer note:\n{REVIEWER_NOTE}"]
+
+
+def test_each_reviewer_note_is_its_own_stored_draft_and_a_repeated_note_reuses_it(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(DRAFT_ANSWER, DRAFT_ANSWER)
+
+    first = draft(store, LENS, SCENE, [TARGET_ONE], None, ask, REVIEWER_NOTE)
+    second = draft(store, LENS, SCENE, [TARGET_ONE], None, ask, REVIEWER_NOTE_TWO)
+    repeated = draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, Fake(), REVIEWER_NOTE)
+
+    assert first == second == repeated == {(LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE}
+    assert len(ask.calls) == 2
+    assert len(list((tmp_path / "results").glob("*.json"))) == 2
+
+
+def test_draft_note_is_part_of_its_key(tmp_path: Path) -> None:
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], None, Fake(DRAFT_ANSWER), REVIEWER_NOTE)
+    [record] = (tmp_path / "results").glob("*.json")
+    target = {
+        "namespace": LINE_ONE.namespace,
+        "key": LINE_ONE.key,
+        "intent": TARGET_ONE.intent,
+        "callbacks": [CALLBACK],
+        "context": CONTEXT,
+    }
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "targets": [target],
+        "retry": None,
+        "note": REVIEWER_NOTE,
+    }
+
+    assert record.stem == store_key("draft", inputs, LENS.stage_text("intent"))
+
+
+def test_retry_with_note_carries_the_note_and_the_retry_gate(tmp_path: Path) -> None:
+    ask = Fake(DRAFT_ANSWER)
+
+    draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE], "classifier", ask, REVIEWER_NOTE)
+
+    parts = ask.calls[0][1]
+    assert parts[-2] == f"Reviewer note:\n{REVIEWER_NOTE}"
+    assert parts[-1] == "The previous candidates failed the classifier gate. Write candidates that pass it."
+
+
 def test_fresh_store_on_same_root_returns_stored_drafts_without_asking(tmp_path: Path) -> None:
     expected = {(LINE_ONE.namespace, LINE_ONE.key): DRAFT_ONE, (LINE_TWO.namespace, LINE_TWO.key): DRAFT_TWO}
     draft(Store(tmp_path), LENS, SCENE, [TARGET_ONE, TARGET_TWO], None, Fake(DRAFT_TWO_ANSWER))
