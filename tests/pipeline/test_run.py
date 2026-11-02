@@ -1600,6 +1600,161 @@ def test_no_arc_and_no_changed_arc_line_makes_no_arc_call(tmp_path: Path) -> Non
     assert _arc_calls(claude) == []
 
 
+# Made-up scenes whose lines share one English text, and a made-up table scene for the scene pass. Not game text.
+EN_SHARED = "Made-up shared English. Not game text."
+SHARED_X = Scene("made-up-scene-x", (_line(NS_A, "1", "made-up-speaker-a", EN_SHARED, 1), _line(NS_A, "2", "made-up-speaker-c", EN_A2, 1)))
+SHARED_Y = Scene("made-up-scene-y", (_line(NS_B, "1", "made-up-speaker-a", EN_SHARED, 2),))
+SHARED_LATE = Scene("made-up-scene-late-shared", (_line(NS_C, "1", "made-up-speaker-c", EN_SHARED, 3),))
+SHARED_ARC_SCENES = (SHARED_X, SHARED_Y)
+SHARED_TABLE = Scene(
+    "made-up-scene-shared",
+    (_line(NS_A, "1", None, EN_SHARED, 1), _line(NS_A, "2", None, EN_SHARED, 1)),
+    table=True,
+)
+
+
+def _shared_arc_claude() -> FakeClaude:
+    # OPUS_A1 loses to its voiced text, so the first occurrence ships VOICE_A1 with the voice writer. OPUS_B1 ships with the opus writer.
+    claude = _arc_claude()
+    claude.judgments = {OPUS_A1: _judgment(restores_japanese=False)}
+    return claude
+
+
+def test_identical_english_changed_in_two_scenes_ships_the_earlier_rewrite_and_writer_under_both_keys(tmp_path: Path) -> None:
+    outcomes = _run(tmp_path, _shared_arc_claude(), [], jev=None, scenes=SHARED_ARC_SCENES)
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "changed", None, "voice")
+    assert _outcome_of(outcomes, (NS_B, "1")) == Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice")
+    tables = _dialog_tables(tmp_path)
+    assert tables[(NS_A, "1")]["text"] == VOICE_A1
+    assert tables[(NS_A, "1")]["writer"] == "voice"
+    assert tables[(NS_B, "1")]["text"] == VOICE_A1
+    assert tables[(NS_B, "1")]["writer"] == "voice"
+    assert tables[(NS_B, "1")]["reason"] == [ALPHA]
+
+
+def test_arc_judge_prompt_carries_the_unified_rewrite_under_both_keys(tmp_path: Path) -> None:
+    claude = _shared_arc_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=SHARED_ARC_SCENES)
+    [parts] = _first_pass_arc_calls(claude)
+    rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Arc lines:\n"))}
+    assert rewrites == {(NS_A, "1"): VOICE_A1, (NS_B, "1"): VOICE_A1}
+
+
+def test_a_third_occurrence_no_stage_changed_stays_untouched_with_no_dialog_entry(tmp_path: Path) -> None:
+    outcomes = _run(tmp_path, _shared_arc_claude(), [], jev=None, scenes=(*SHARED_ARC_SCENES, SHARED_LATE))
+    assert _outcome_of(outcomes, (NS_C, "1")) == Outcome(NS_C, "1", 3, "made-up-speaker-c", (), "untouched", None, None)
+    tables = _dialog_tables(tmp_path)
+    assert (NS_C, "1") not in tables
+    assert tables[(NS_B, "1")]["text"] == VOICE_A1
+
+
+def test_scene_pass_change_sharing_english_with_a_line_pass_change_takes_its_rewrite_and_keeps_its_plan(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.bible = {}
+    claude.flags = {(NS_A, "1"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_S2]}
+    claude.scene_screen = {"patterns": [{"id": PATTERN_ONE, "carriers": [{"namespace": NS_A, "key": "2"}]}]}
+    claude.scene_plan = {
+        "keep": False,
+        "keep_reason": "none",
+        "lines": [
+            {"namespace": NS_A, "key": "2", "intent": "Made-up scene intent. Not game text.", "carrier": EN_SHARED, "required": True}
+        ],
+    }
+    outcomes = _scene_run(tmp_path, claude, scene=SHARED_TABLE)
+    plan = scene_pass.plan_id(SHARED_TABLE.key, [(NS_A, "2")])
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, None, (ALPHA,), "changed", None, "opus")
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, (PATTERN_ONE,), "changed", None, "opus", None, plan)
+    tables = _dialog_tables(tmp_path)
+    assert tables[(NS_A, "2")]["text"] == OPUS_A1
+    assert tables[(NS_A, "2")]["writer"] == "opus"
+
+
+def test_distinct_english_changed_in_two_scenes_keeps_each_own_rewrite_and_writer(tmp_path: Path) -> None:
+    _run(tmp_path, _shared_arc_claude(), [], jev=None, scenes=ARC_SCENES)
+    tables = _dialog_tables(tmp_path)
+    assert tables[(NS_A, "1")]["text"] == VOICE_A1
+    assert tables[(NS_A, "1")]["writer"] == "voice"
+    assert tables[(NS_B, "1")]["text"] == OPUS_B1
+    assert tables[(NS_B, "1")]["writer"] == "opus"
+
+
+def test_unification_makes_no_claude_call_so_a_shared_english_run_calls_as_often_as_a_distinct_one(tmp_path: Path) -> None:
+    shared = _shared_arc_claude()
+    _run(tmp_path / "shared", shared, [], jev=None, scenes=SHARED_ARC_SCENES)
+    distinct = _shared_arc_claude()
+    _run(tmp_path / "distinct", distinct, [], jev=None, scenes=ARC_SCENES)
+    assert len(shared.calls) == len(distinct.calls)
+    assert len(_arc_calls(shared)) == len(_arc_calls(distinct)) == 1
+
+
+# Made-up scenes for one key in two scenes: untouched in the first, changed in the last, with another key sharing its English changed between. Not game text.
+EN_REPEAT = "Made-up line of the repeated scenes. Not game text."
+OPUS_REPEAT_LATE = "Made-up opus rewrite of the late scene. Not game text."
+OPUS_REPEAT_MIDDLE = "Made-up opus rewrite of the middle scene. Not game text."
+VOICE_REPEAT_MIDDLE = "Made-up voiced rewrite of the middle scene. Not game text."
+REPEAT_EARLY = Scene(
+    "made-up-scene-repeat-early", (_line(NS_A, "1", "made-up-speaker-a", EN_REPEAT, 1), _line(NS_A, "2", "made-up-speaker-a", EN_A2, 1))
+)
+REPEAT_MIDDLE = Scene("made-up-scene-repeat-middle", (_line(NS_B, "1", "made-up-speaker-a", EN_REPEAT, 2),))
+REPEAT_LATE = Scene("made-up-scene-repeat-late", (_line(NS_A, "1", "made-up-speaker-a", EN_REPEAT, 3),))
+REPEAT_SCENES = (REPEAT_EARLY, REPEAT_MIDDLE, REPEAT_LATE)
+
+
+class _FlagsByScene(FakeClaude):
+    """Screens each scene from the flags keyed by the exact set of line refs in that scene, so one key can be flagged in one scene and not in another. Not game text."""
+
+    def __init__(self, flags_by_scene: Mapping[frozenset[tuple[str, str]], Mapping[tuple[str, str], list[str]]]) -> None:
+        super().__init__()
+        self.flags_by_scene = flags_by_scene
+
+    def _screen(self, parts: Sequence[str]) -> dict[str, Any]:
+        lines = json.loads(_part(parts, "Scene lines:\n"))
+        flags = self.flags_by_scene.get(frozenset((line["namespace"], line["key"]) for line in lines), {})
+        return {"flagged": [{"namespace": namespace, "key": key, "reasons": reasons} for (namespace, key), reasons in flags.items()]}
+
+
+def _repeat_run(tmp_path: Path) -> list[Outcome]:
+    claude = _FlagsByScene(
+        {
+            frozenset({(NS_B, "1")}): {(NS_B, "1"): [ALPHA]},
+            frozenset({(NS_A, "1")}): {(NS_A, "1"): [ALPHA]},
+        }
+    )
+    claude.drafts = {(NS_A, "1"): [OPUS_REPEAT_LATE], (NS_B, "1"): [OPUS_REPEAT_MIDDLE]}
+    # The middle line's opus draft loses to its voiced text, so the voice writer ships. The late line's opus draft wins.
+    claude.judgments = {OPUS_REPEAT_MIDDLE: _judgment(restores_japanese=False)}
+    return _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        scenes=REPEAT_SCENES,
+        renderer=FakeRenderer({OPUS_REPEAT_MIDDLE: VOICE_REPEAT_MIDDLE}),
+    )
+
+
+def test_untouched_occurrence_of_a_key_changed_in_a_later_scene_keeps_no_writer(tmp_path: Path) -> None:
+    outcomes = _repeat_run(tmp_path)
+    assert outcomes[:2] == [
+        Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
+        Outcome(NS_A, "2", 1, "made-up-speaker-a", (), "untouched", None, None),
+    ]
+
+
+def test_changed_occurrences_of_a_repeated_english_take_the_earliest_changed_rewrite_and_writer(tmp_path: Path) -> None:
+    outcomes = _repeat_run(tmp_path)
+    assert outcomes[2:] == [
+        Outcome(NS_B, "1", 2, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_A, "1", 3, "made-up-speaker-a", (ALPHA,), "changed", None, "voice"),
+    ]
+    tables = _dialog_tables(tmp_path)
+    assert tables[(NS_B, "1")]["text"] == VOICE_REPEAT_MIDDLE
+    assert tables[(NS_B, "1")]["writer"] == "voice"
+    assert tables[(NS_A, "1")]["text"] == VOICE_REPEAT_MIDDLE
+    assert tables[(NS_A, "1")]["writer"] == "voice"
+
+
 def test_line_named_on_both_arc_passes_ends_gate_failed_arc_with_no_dialog_entry(tmp_path: Path) -> None:
     claude = _arc_claude()
     claude.arc = [_arc_verdict(False, (NS_A, "1")), _arc_verdict(False, (NS_A, "1"))]
@@ -3000,6 +3155,84 @@ def test_gate_failures_count_both_plans_and_the_record_names_the_replan(tmp_path
             gate_failures={GATE_LENGTH: 3},
         ),
     ]
+
+
+GATE_SCENE = "scene"
+
+
+def _scene_texts(tmp_path: Path) -> list[str]:
+    """The dialog tables and scene records a run wrote, for checking that no carrier text reached them."""
+    dialog = [path.read_text(encoding="utf-8") for path in (tmp_path / "repo" / "dialog" / LENS).iterdir()]
+    return [*dialog, (tmp_path / "work" / LENS / scene_record.SCENES).read_text(encoding="utf-8")]
+
+
+@pytest.mark.parametrize("draft", [EN_A3.upper(), EN_A3.lower()], ids=["upper", "lower"])
+def test_optional_planned_line_whose_only_candidate_keeps_its_carrier_in_another_case_ships_nothing_and_counts_a_scene_gate_failure(
+    tmp_path: Path, draft: str
+) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "3")] = [draft]
+    printed: list[str] = []
+    outcomes = _run(
+        tmp_path,
+        claude,
+        printed,
+        jev=None,
+        scenes=(TABLE_SCENE,),
+        lens=SCENE_LENS,
+        renderer=FakeRenderer({OPUS_S2: VOICE_FAR}),
+    )
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+    assert _records(tmp_path) == [
+        _expected_record(patterns=reasons, plan=plan, planned=2, required=1, changed=1, gate_failures={GATE_SCENE: 1}),
+    ]
+    assert not any(EN_A3.casefold() in text.casefold() for text in [*printed, *_scene_texts(tmp_path)])
+
+
+def test_required_planned_line_whose_only_candidate_keeps_its_carrier_triggers_one_replan_counting_a_scene_gate_failure(
+    tmp_path: Path,
+) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [EN_A2.upper()]
+    claude.scene_replan = _plan_answer((NS_A, "3", True))
+    outcomes = _scene_run(tmp_path, claude)
+    _, replan = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(replan, "Excluded lines:\n")) == [{"namespace": NS_A, "key": "2"}]
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "3")])
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(
+        NS_A, "3", 1, None, (PATTERN_ONE, PATTERN_TWO), "changed", None, "opus", None, plan
+    )
+    assert _outcome_of(outcomes, (NS_A, "2")) == _untouched(NS_A, "2")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+    assert _records(tmp_path) == [
+        _expected_record(
+            patterns=(PATTERN_ONE, PATTERN_TWO),
+            plan=plan,
+            planned=1,
+            required=1,
+            changed=1,
+            replanned=1,
+            gate_failures={GATE_SCENE: 1},
+        ),
+    ]
+    assert not any(EN_A2.casefold() in text.casefold() for text in _scene_texts(tmp_path))
+
+
+def test_free_candidate_ships_over_a_nearer_candidate_that_keeps_its_carrier(tmp_path: Path) -> None:
+    keeper = f"{EN_A2} Yes."
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "2")] = [keeper, VOICE_FAR]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(
+        NS_A, "2", 1, None, (PATTERN_ONE, PATTERN_TWO), "changed", None, "opus", None, plan
+    )
+    assert _dialog_tables(tmp_path)[(NS_A, "2")]["text"] == VOICE_FAR
+    assert not any(keeper.casefold() in text.casefold() for text in _scene_texts(tmp_path))
 
 
 def test_scene_judge_revert_of_an_optional_line_counts_as_reverted(tmp_path: Path) -> None:

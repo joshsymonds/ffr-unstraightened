@@ -21,6 +21,7 @@ from ffrd.pipeline.scene_pass import (
     Plan,
     PlannedLine,
     judge,
+    keeps_carrier,
     plan,
     plan_id,
     screen,
@@ -233,8 +234,25 @@ HIT_LIST = [
 FINAL = ((LINE_ONE.namespace, LINE_ONE.key),)
 EXCLUDED = ((LINE_THREE.namespace, LINE_THREE.key),)
 PLAN_INTENT = "Made-up intent. Not game text."
-PLAN_LINE_ONE = PlannedLine(LINE_ONE.namespace, LINE_ONE.key, "Made-up intent one. Not game text.", True)
-PLAN_LINE_TWO = PlannedLine(LINE_TWO.namespace, LINE_TWO.key, "Made-up intent two. Not game text.", False)
+
+# Made-up carrier. Not game text.
+CARRIER = "Made-up narration"
+
+
+def _planned_line(line: SceneLine, intent: str, required: bool, carrier: str) -> PlannedLine:
+    folded = carrier.casefold()
+    return PlannedLine(
+        namespace=line.namespace,
+        key=line.key,
+        intent=intent,
+        required=required,
+        quote_hash=hashlib.sha256(folded.encode("utf-8")).hexdigest()[:16],
+        quote_length=len(folded),
+    )
+
+
+PLAN_LINE_ONE = _planned_line(LINE_ONE, "Made-up intent one. Not game text.", True, LINE_ONE.english)
+PLAN_LINE_TWO = _planned_line(LINE_TWO, "Made-up intent two. Not game text.", False, CARRIER)
 
 
 def _dump(value: Any) -> str:
@@ -296,7 +314,7 @@ def test_kept_scene_returns_its_reason_with_no_id_and_no_lines(tmp_path: Path) -
 
 def test_planned_scene_returns_lines_in_answer_order_with_intents_required_and_plan_id(tmp_path: Path) -> None:
     answer = _planned(
-        _entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text."),
+        _entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text.", carrier=CARRIER),
         _entry(_pair(LINE_ONE), required=True, intent="Made-up intent one. Not game text."),
     )
 
@@ -465,7 +483,7 @@ def test_failed_plan_is_returned_unstored_and_asked_again(tmp_path: Path, failur
     assert result == Plan(
         id=plan_id(SCENE.key, [_pair(LINE_TWO)]),
         keep_reason=None,
-        lines=(PlannedLine(LINE_TWO.namespace, LINE_TWO.key, PLAN_INTENT, True),),
+        lines=(_planned_line(LINE_TWO, PLAN_INTENT, True, LINE_TWO.english),),
     )
     assert len(ask.calls) == 2
 
@@ -501,6 +519,52 @@ def test_different_excluded_lines_ask_again(tmp_path: Path) -> None:
 
     assert plan(Store(tmp_path), LENS, SCENE, CAST, HITS, (), EXCLUDED, ask) == Plan(id=None, keep_reason="plot", lines=())
     assert len(ask.calls) == 1
+
+
+CARRIED_LINE = _planned_line(LINE_TWO, PLAN_INTENT, True, CARRIER)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Made-up narration. Not game text.",
+        "Made-up line. Made-up narration. Not game text.",
+        "Made-up line, then Made-up narration",
+        "MADE-UP NARRATION. Not game text.",
+    ],
+    ids=["start", "middle", "end", "other-case"],
+)
+def test_keeps_carrier_is_true_when_rewrite_holds_carrier_ignoring_case(text: str) -> None:
+    assert keeps_carrier(CARRIED_LINE, text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Made-up narrazion. Not game text.",
+        "Made-up narr. Not game text.",
+        "Made-up story. Not game text.",
+        "Made-up",
+    ],
+    ids=["one-character-changed", "truncated", "absent", "shorter-than-carrier"],
+)
+def test_keeps_carrier_is_false_when_rewrite_changes_or_lacks_carrier(text: str) -> None:
+    assert keeps_carrier(CARRIED_LINE, text) is False
+
+
+def test_stored_plan_line_holds_carrier_fingerprint_and_length_but_not_carrier(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    answer = _planned(_entry(_pair(LINE_TWO), required=False, intent="Made-up intent two. Not game text.", carrier=CARRIER))
+    plan(store, LENS, SCENE, CAST, HITS, (), (), Fake(answer))
+    keys = store.finished()
+    assert len(keys) == 1
+    saved = store.read(keys[0])
+    assert saved is not None
+    line = saved.value["lines"][0]
+
+    assert line["quote_hash"] == hashlib.sha256(CARRIER.casefold().encode("utf-8")).hexdigest()[:16]
+    assert line["quote_length"] == len(CARRIER)
+    assert CARRIER not in _dump(saved.value)
 
 
 # Made-up judge inputs. Not game text.

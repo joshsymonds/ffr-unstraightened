@@ -206,6 +206,12 @@ rubric = """
 [no-added-content] Reject a rewrite that adds content the scene does not offer. The rewrite draws only on what the scene already holds.
 
 [grammatical] Reject a rewrite that leaves a line ungrammatical. Each rewritten line must read as a grammatical sentence.
+
+[keeps-subject] Reject a rewrite that changes what the line is about beyond the pattern words: its subject, its point or the information it gives.
+
+[no-new-detail] Reject a rewrite that adds a name, object, motive, topic or clause the original line lacks.
+
+[not-a-no-op] Reject a rewrite that changes so little the pattern still reads the same.
 """
 
 [[scene.patterns]]

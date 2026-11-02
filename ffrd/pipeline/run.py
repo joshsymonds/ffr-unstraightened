@@ -466,6 +466,25 @@ def _arc_outcome(outcome: Outcome, verdicts: arcs.Verdicts) -> Outcome:
     return outcome
 
 
+def _unified(ctx: _Context, outcomes: Sequence[Outcome], changes: Sequence[Change]) -> tuple[list[Outcome], list[Change]]:
+    """Gives every changed line that shares one English text the text and writer of the earliest of them in story order. Each line keeps its own key, plan and outcome, and only the rewrite and writer are copied."""
+    position = {(outcome.namespace, outcome.key): index for index, outcome in enumerate(outcomes) if outcome.outcome == "changed"}
+    english = {(change.namespace, change.key): ctx.lines[(change.namespace, change.key)].english for change in changes}
+    earliest: dict[str, Change] = {}
+    for change in sorted(changes, key=lambda c: position[(c.namespace, c.key)]):
+        earliest.setdefault(english[(change.namespace, change.key)], change)
+    sources = {ref: earliest[text] for ref, text in english.items()}
+    unified_changes = [
+        replace(change, text=sources[(change.namespace, change.key)].text, writer=sources[(change.namespace, change.key)].writer)
+        for change in changes
+    ]
+    unified_outcomes = [
+        replace(outcome, writer=sources[(outcome.namespace, outcome.key)].writer) if outcome.outcome == "changed" else outcome
+        for outcome in outcomes
+    ]
+    return unified_outcomes, unified_changes
+
+
 def _arc_judged(
     ctx: _Context, scenes: Sequence[Scene], outcomes: list[Outcome], changes: list[Change], ask: Ask
 ) -> tuple[list[Outcome], list[Change]]:
@@ -503,11 +522,12 @@ def _both[A, B](first: Callable[[], A], second: Callable[[], B]) -> tuple[A, B]:
 def _scene_gate(
     ctx: _Context,
     scene: Scene,
+    entry: scene_pass.PlannedLine,
     target: stages.Target,
     first: tuple[str, ...] | Unfinished | Rejected,
     ask: Ask,
 ) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
-    """Gates one planned line with the mechanical gates only, then returns its passing candidate nearest the English line with that candidate's writer."""
+    """Gates one planned line with the mechanical gates, drops the candidates that keep its carrier, then returns the passing candidate nearest the English line with that candidate's writer. A line left with none fails the scene gate."""
     line = target.line
     origin: dict[str, WriterName] = {}
     scores: dict[str, float] = {}
@@ -526,7 +546,10 @@ def _scene_gate(
     verdict = gate_mechanical(write, classify=classify, threshold=ctx.classifier.threshold)
     if isinstance(verdict, Kept | Unfinished | RateLimited):
         return verdict
-    best = min(verdict, key=lambda candidate: (distance(candidate.text, line.english), candidate.text))
+    free = [candidate for candidate in verdict if not scene_pass.keeps_carrier(entry, candidate.text)]
+    if not free:
+        return Kept("scene")
+    best = min(free, key=lambda candidate: (distance(candidate.text, line.english), candidate.text))
     return best, origin[best.text]
 
 
@@ -565,8 +588,8 @@ def _gate_plan(
     first = _first_drafts(ctx, scene, [target for _, target in planned], ask)
 
     def gate(item: tuple[scene_pass.PlannedLine, stages.Target]) -> tuple[Candidate, WriterName] | Kept | Unfinished | RateLimited:
-        _, target = item
-        return _scene_gate(ctx, scene, target, first[(target.line.namespace, target.line.key)], ask)
+        entry, target = item
+        return _scene_gate(ctx, scene, entry, target, first[(target.line.namespace, target.line.key)], ask)
 
     gated = claude.fan_out(gate, planned)
     settled: dict[tuple[str, str], tuple[Candidate, WriterName] | Kept] = {}
@@ -873,6 +896,7 @@ def run(
         passes.append(scene_pass_record)
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
+    outcomes, changes = _unified(ctx, outcomes, changes)
     outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
