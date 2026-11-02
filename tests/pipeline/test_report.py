@@ -45,7 +45,8 @@ DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|char
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 QUEERING_LINE = (
-    r"queering (marked: [0-9]+|bucket (queer|trans|untouched): [0-9]+|flirt marked: [0-9]+, redirect half: [0-9]+"
+    r"queering (marked: [0-9]+|bucket (queer|trans|untouched): [0-9]+"
+    r"|speakers (queer|trans|untouched): [0-9]+, no speaker: [0-9]+|flirt marked: [0-9]+, redirect half: [0-9]+"
     r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
 )
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
@@ -365,7 +366,7 @@ def test_absent_bucket_reads_as_none(tmp_path: Path) -> None:
 # Made-up queering lens: the queering selection declared above the lens tables. Not game text.
 QUEERING_LENS_TOML = 'selection = "queering"\n' + LENS_TOML
 
-# Made-up outcomes for the queering block: eight records, the last one unmarked. Not game text.
+# Made-up outcomes for the queering block: ten records, the last one unmarked. Not game text.
 QUEERING_RECORDS = (
     _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="queer"),
     _record(chapter=1, speaker=SPEAKER_TEN, reasons=[FIRST], outcome="changed", bucket="trans"),
@@ -374,14 +375,19 @@ QUEERING_RECORDS = (
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="redirect"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched", bucket="not-redirected"),
+    _record(chapter=2, speaker=None, outcome="untouched", bucket="queer"),
+    _record(chapter=2, speaker=SPEAKER_TWO, outcome="untouched", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched"),
 )
 
 EXPECTED_QUEERING = [
-    "queering marked: 7",
-    "queering bucket queer: 2",
+    "queering marked: 9",
+    "queering bucket queer: 4",
     "queering bucket trans: 1",
     "queering bucket untouched: 1",
+    "queering speakers queer: 2, no speaker: 1",
+    "queering speakers trans: 1, no speaker: 0",
+    "queering speakers untouched: 1, no speaker: 0",
     "queering flirt marked: 3, redirect half: 2",
     "queering changed queer: 1",
     "queering changed trans: 1",

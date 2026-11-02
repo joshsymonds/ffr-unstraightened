@@ -445,6 +445,9 @@ def _queering_lines(records: list[Record]) -> list[str]:
     gate_failed = Counter(r.bucket for r in records if r.outcome == "gate_failed")
     lines = [f"queering marked: {sum(marked.values())}"]
     lines += [f"queering bucket {bucket}: {marked[bucket]}" for bucket in QUEERING_BUCKETS]
+    speakers = {b: {r.speaker for r in records if r.bucket == b and r.speaker is not None} for b in QUEERING_BUCKETS}
+    no_speaker = Counter(r.bucket for r in records if r.bucket is not None and r.speaker is None)
+    lines += [f"queering speakers {b}: {len(speakers[b])}, no speaker: {no_speaker[b]}" for b in QUEERING_BUCKETS]
     lines.append(f"queering flirt marked: {flirt}, redirect half: {redirect}")
     lines += [f"queering changed {bucket}: {changed[bucket]}" for bucket in QUEERING_REWRITES]
     lines += [f"queering gate failed {bucket}: {gate_failed[bucket]}" for bucket in QUEERING_REWRITES]
