@@ -745,11 +745,16 @@ def _record(outcome: Outcome) -> Record:
     )
 
 
-def _write_provisional(root: Path, lens: Lens, outcomes: Sequence[Outcome]) -> None:
-    """Writes the counts of Chapter 1's outcomes in the report format, before the arc judge."""
+def _write_provisional(root: Path, ctx: _Context, done: Sequence[tuple[int, Scene, _PassRecord, Sequence[Outcome]]]) -> None:
+    """Writes the counts of Chapter 1 in the report format, before the arc judge. The scene lines cover the scenes holding a Chapter 1 line, in run order."""
+    ordered = sorted(done, key=lambda entry: entry[0])
+    scenes = [scene for _, scene, _, _ in ordered]
+    outcomes = [outcome for _, _, _, scene_outcomes in ordered for outcome in scene_outcomes]
     records = [_record(o) for o in outcomes if o.chapter == 1]
-    lines = render(records, [question.id for question in lens.triage])
-    _write_atomic(root / "reports" / f"{lens.name}-c01.txt", "".join(f"{line}\n" for line in lines))
+    scene_records = _scene_records(ctx, scenes, [data for _, _, data, _ in ordered], outcomes)
+    scene_ids = [] if ctx.lens.scene is None else [pattern.id for pattern in ctx.lens.scene.patterns]
+    lines = render(records, [question.id for question in ctx.lens.triage], scenes=scene_records, scene_ids=scene_ids)
+    _write_atomic(root / "reports" / f"{ctx.lens.name}-c01.txt", "".join(f"{line}\n" for line in lines))
 
 
 def _scene_chapter(scene: Scene) -> int | None:
@@ -832,7 +837,7 @@ def run(
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
-    chapter_one: list[Outcome] = []
+    chapter_one: list[tuple[int, Scene, _PassRecord, list[Outcome]]] = []
 
     def scene_pass(item: tuple[int, Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
         nonlocal waiting
@@ -841,10 +846,10 @@ def run(
         with progress:
             out(f"scene {position}/{len(scenes)} {opaque_label(scene.key)}: {_counts(scene_outcomes)}")
             if _holds_chapter_one(scene):
-                chapter_one.extend(scene_outcomes)
+                chapter_one.append((position, scene, passed, scene_outcomes))
                 waiting -= 1
                 if waiting == 0:
-                    _write_provisional(root, lens, chapter_one)
+                    _write_provisional(root, ctx, chapter_one)
         return scene_outcomes, scene_changes, scene_recall, passed
 
     scene_results = claude.fan_out(scene_pass, [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)])

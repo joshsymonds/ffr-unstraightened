@@ -2016,26 +2016,68 @@ EXPECTED_PROVISIONAL = (
     f"  reason {ALPHA}: 1\n"
     "  character 1: 1\n"
     "  gate minimal_change: 1\n"
+    "  scene eligible: 0\n"
+    "  scene plans: 0\n"
+    "  scene planned lines: 0 (required 0)\n"
+    "  scene changed lines: 0\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 0, median 0\n"
     "total: 1 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched\n"
     f"  reason {ALPHA}: 1\n"
     "  character 1: 1\n"
     "  gate minimal_change: 1\n"
+    "  scene eligible: 0\n"
+    "  scene plans: 0\n"
+    "  scene planned lines: 0 (required 0)\n"
+    "  scene changed lines: 0\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 0, median 0\n"
 )
 EXPECTED_PROVISIONAL_ARC = (
     "chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
     f"  reason {ALPHA}: 1\n"
     "  character 1: 1\n"
+    "  scene eligible: 0\n"
+    "  scene plans: 0\n"
+    "  scene planned lines: 0 (required 0)\n"
+    "  scene changed lines: 0\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 0, median 0\n"
     "total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
     f"  reason {ALPHA}: 1\n"
     "  character 1: 1\n"
+    "  scene eligible: 0\n"
+    "  scene plans: 0\n"
+    "  scene planned lines: 0 (required 0)\n"
+    "  scene changed lines: 0\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 0, median 0\n"
 )
 EXPECTED_PROVISIONAL_MIXED = (
     "chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched\n"
     f"  reason {ALPHA}: 1\n"
     "  character 1: 1\n"
+    "  scene eligible: 0\n"
+    "  scene plans: 0\n"
+    "  scene planned lines: 0 (required 0)\n"
+    "  scene changed lines: 0\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 0, median 0\n"
     "total: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 0 untouched\n"
     f"  reason {ALPHA}: 1\n"
     "  character 1: 1\n"
+    "  scene eligible: 0\n"
+    "  scene plans: 0\n"
+    "  scene planned lines: 0 (required 0)\n"
+    "  scene changed lines: 0\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 0, median 0\n"
 )
 
 
@@ -2115,10 +2157,24 @@ def test_provisional_file_waits_for_every_scene_holding_a_chapter_one_line(tmp_p
         f"  reason {ALPHA}: 2\n"
         "  character 1: 2\n"
         "  gate minimal_change: 1\n"
+        "  scene eligible: 0\n"
+        "  scene plans: 0\n"
+        "  scene planned lines: 0 (required 0)\n"
+        "  scene changed lines: 0\n"
+        "  scene replanned: 0\n"
+        "  scene reverted lines: 0\n"
+        "  scene changed per scene: max 0, median 0\n"
         "total: 2 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 1 untouched\n"
         f"  reason {ALPHA}: 2\n"
         "  character 1: 2\n"
         "  gate minimal_change: 1\n"
+        "  scene eligible: 0\n"
+        "  scene plans: 0\n"
+        "  scene planned lines: 0 (required 0)\n"
+        "  scene changed lines: 0\n"
+        "  scene replanned: 0\n"
+        "  scene reverted lines: 0\n"
+        "  scene changed per scene: max 0, median 0\n"
     )
 
 
@@ -2788,3 +2844,104 @@ def test_rerun_with_a_scene_section_reuses_every_line_pass_result_and_asks_only_
     assert len(claude.calls) == 1
     assert len(_scene_prompts(claude, scene_pass.SCREEN_SCHEMA)) == 1
     assert _records(tmp_path) == [_expected_record()]
+
+
+# Made-up provisional scene lines for a shipped scene pass, and the same scene with an arc revert. Not game text.
+ARC_TABLE_SCENE = Scene(
+    "made-up-scene-arc-table",
+    (
+        _line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),
+        _line(NS_A, "2", "made-up-speaker-a", EN_A2, 1),
+        _line(NS_A, "3", "made-up-speaker-a", EN_A3, 1),
+        _line(NS_A, "4", "made-up-speaker-c", EN_A4, 1),
+    ),
+    table=True,
+)
+SCENE_PASS_PROVISIONAL = (
+    "chapter 1: 3 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  no speaker: 3\n"
+    "  scene eligible: 1\n"
+    f"  scene flagged {PATTERN_ONE}: 1\n"
+    f"  scene flagged {PATTERN_TWO}: 1\n"
+    "  scene plans: 1\n"
+    "  scene planned lines: 2 (required 1)\n"
+    "  scene changed lines: 2\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 2, median 2\n"
+    "total: 3 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  no speaker: 3\n"
+    "  scene eligible: 1\n"
+    f"  scene flagged {PATTERN_ONE}: 1\n"
+    f"  scene flagged {PATTERN_TWO}: 1\n"
+    "  scene plans: 1\n"
+    "  scene planned lines: 2 (required 1)\n"
+    "  scene changed lines: 2\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 2, median 2\n"
+)
+
+SCENE_PASS_PROVISIONAL_ARC = (
+    "chapter 1: 3 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 3\n"
+    "  scene eligible: 1\n"
+    f"  scene flagged {PATTERN_ONE}: 1\n"
+    f"  scene flagged {PATTERN_TWO}: 1\n"
+    "  scene plans: 1\n"
+    "  scene planned lines: 2 (required 1)\n"
+    "  scene changed lines: 2\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 2, median 2\n"
+    "  scene character 1: 2\n"
+    "total: 3 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched\n"
+    f"  reason {ALPHA}: 1\n"
+    "  character 1: 3\n"
+    "  scene eligible: 1\n"
+    f"  scene flagged {PATTERN_ONE}: 1\n"
+    f"  scene flagged {PATTERN_TWO}: 1\n"
+    "  scene plans: 1\n"
+    "  scene planned lines: 2 (required 1)\n"
+    "  scene changed lines: 2\n"
+    "  scene replanned: 0\n"
+    "  scene reverted lines: 0\n"
+    "  scene changed per scene: max 2, median 2\n"
+    "  scene character 1: 2\n"
+)
+
+
+def test_provisional_file_shows_the_chapter_one_scene_lines_of_a_shipped_scene_pass(tmp_path: Path) -> None:
+    _scene_run(tmp_path, _scene_claude())
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == SCENE_PASS_PROVISIONAL
+
+
+def test_provisional_scene_lines_are_taken_before_an_arc_revert_of_a_scene_pass_line(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.bible = {1: ARC_BIBLE}
+    claude.arc = [_arc_verdict(False, (NS_A, "2")), _arc_verdict(False, (NS_A, "2"))]
+    outcomes = _scene_run(tmp_path, claude, scene=ARC_TABLE_SCENE)
+    plan = scene_pass.plan_id(ARC_TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _outcome_of(outcomes, (NS_A, "2")).gate == "arc"
+    assert _records(tmp_path) == [
+        _expected_record(
+            scene=ARC_TABLE_SCENE.key, patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=0, reverted=2
+        )
+    ]
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == SCENE_PASS_PROVISIONAL_ARC
+
+
+def test_provisional_scene_lines_leave_out_a_scene_without_a_chapter_one_line(tmp_path: Path) -> None:
+    _run(
+        tmp_path,
+        _scene_claude(),
+        [],
+        jev=None,
+        scenes=(SCENE_B, TABLE_SCENE),
+        lens=SCENE_LENS,
+        renderer=FakeRenderer({OPUS_S2: VOICE_FAR}),
+    )
+    assert _c01_path(tmp_path).read_text(encoding="utf-8") == SCENE_PASS_PROVISIONAL
