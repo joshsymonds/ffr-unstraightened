@@ -39,6 +39,13 @@ the line stages.
     when it proposes changed lines for the scene.
   - `rubric`, one string. The scene pass judges each plan against it.
 
+  When a scene shows a pattern and no plan reduces it, the scene is kept, and the
+  kept scene records exactly one keep reason. The reasons are the fixed set in
+  `ffrd/pipeline/scene_record.py`: `protection`, `plot`, `trait`, `earned-arc` and
+  `not-recurring`. A record's keep reason is one of these five or null. The
+  `plan` text should name these reasons, using the same words, where it covers
+  when a scene is kept. The loader does not check `plan` for keep reasons.
+
 Each stage's saved results are keyed by the text of the sections it reads, so an edit
 reruns only the stages that read that section. Editing `triage` reruns Jev triage, the
 screen, the recheck of each edited question, and the scene and cross-scene judges. Editing `screen`
