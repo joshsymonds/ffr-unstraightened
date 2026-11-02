@@ -1474,7 +1474,7 @@ def _verdict(coherent: bool, *refs: tuple[str, str]) -> dict[str, Any]:
 
 
 def _coherence_calls(claude: FakeClaude) -> list[list[str]]:
-    return [parts for _, parts, schema in claude.calls if schema is coherence.SCHEMA]
+    return [parts for _, parts, schema in claude.calls if schema is coherence.SCHEMA and not _is_scene_judge(parts)]
 
 
 def test_scene_with_two_changes_makes_one_coherence_call_and_keeps_both_when_coherent(tmp_path: Path) -> None:
@@ -2290,47 +2290,20 @@ def _arc_answers(claude: FakeClaude, answers: Mapping[str, dict[str, Any] | Unfi
     return ask
 
 
-def test_coherence_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan_and_the_unplanned_line_ships(tmp_path: Path) -> None:
+def test_coherence_revert_of_a_line_pass_change_reverts_only_the_named_line(tmp_path: Path) -> None:
     claude = FakeClaude()
     claude.coherence = [_verdict(False, (NS_C, "2")), _verdict(False, (NS_C, "2"))]
-    changes = [_change(NS_C, "2", 3, plan=PLAN_ID), _change(NS_C, "3", 3, plan=PLAN_ID), _change(NS_C, "4", 3)]
+    changes = [_change(NS_C, "2", 3), _change(NS_C, "3", 3)]
     outcomes = [
-        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
-        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
-        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice"),
     ]
     kept_outcomes, kept_changes = _coherent(_plan_context(tmp_path), PLAN_SCENE, outcomes, changes, claude.start_batch())
     assert kept_outcomes == [
-        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
-        Outcome(NS_C, "3", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
-        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice"),
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice"),
     ]
-    assert kept_changes == [_change(NS_C, "4", 3)]
-
-
-def test_coherence_revert_of_one_plan_leaves_the_other_plan_to_ship(tmp_path: Path) -> None:
-    claude = FakeClaude()
-    claude.coherence = [_verdict(False, (NS_C, "2")), _verdict(False, (NS_C, "2"))]
-    changes = [
-        _change(NS_C, "2", 3, plan=PLAN_ID),
-        _change(NS_C, "3", 3, plan=PLAN_ID),
-        _change(NS_C, "4", 3, plan=PLAN_TWO_ID),
-        _change(NS_C, "5", 3, plan=PLAN_TWO_ID),
-    ]
-    outcomes = [
-        Outcome(NS_C, "2", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
-        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_ID),
-        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
-        Outcome(NS_C, "5", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
-    ]
-    kept_outcomes, kept_changes = _coherent(_plan_context(tmp_path), PLAN_SCENE, outcomes, changes, claude.start_batch())
-    assert kept_outcomes == [
-        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
-        Outcome(NS_C, "3", 3, None, (ALPHA,), "gate_failed", "scene", None, plan=PLAN_ID),
-        Outcome(NS_C, "4", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
-        Outcome(NS_C, "5", 3, None, (ALPHA,), "changed", None, "voice", plan=PLAN_TWO_ID),
-    ]
-    assert kept_changes == changes[2:]
+    assert kept_changes == [_change(NS_C, "3", 3)]
 
 
 def test_arc_revert_of_one_plan_line_reverts_every_changed_line_of_that_plan(tmp_path: Path) -> None:
@@ -2599,6 +2572,72 @@ def _scene_judge_prompts(claude: FakeClaude) -> list[list[str]]:
     return [parts for _, parts, schema in claude.calls if schema is coherence.SCHEMA and _is_scene_judge(parts)]
 
 
+def _two_line_pass_claude() -> FakeClaude:
+    """Lines 1 and 4 are flagged by the line pass. Lines 2 and 3 are the scene pass's planned lines. Not game text."""
+    claude = _scene_claude()
+    claude.flags[(NS_A, "4")] = [ALPHA]
+    claude.drafts[(NS_A, "4")] = [OPUS_A4]
+    return claude
+
+
+def _store_keys(tmp_path: Path, stage: str) -> set[str]:
+    results = (tmp_path / "work" / LENS / "results").glob("*.json")
+    return {path.stem for path in results if json.loads(path.read_text(encoding="utf-8"))["stage"] == stage}
+
+
+def test_line_rubric_coherence_of_a_table_scene_matches_the_same_line_pass_without_the_scene_pass(tmp_path: Path) -> None:
+    scene_claude = _two_line_pass_claude()
+    scene_claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    scene_outcomes = _run(tmp_path / "scene", scene_claude, [], jev=None, scenes=(TABLE_SCENE,), lens=SCENE_LENS)
+    plain_claude = _two_line_pass_claude()
+    plain_claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    plain_outcomes = _run(tmp_path / "plain", plain_claude, [], jev=None, scenes=(TABLE_SCENE,))
+    assert {_outcome_of(scene_outcomes, ref).outcome for ref in ((NS_A, "2"), (NS_A, "3"))} == {"changed"}
+    assert len(_coherence_calls(scene_claude)) == 2
+    assert _coherence_calls(scene_claude) == _coherence_calls(plain_claude)
+    assert len(_store_keys(tmp_path / "plain", coherence.STAGE)) == 2
+    assert _store_keys(tmp_path / "scene", coherence.STAGE) == _store_keys(tmp_path / "plain", coherence.STAGE)
+    for ref in ((NS_A, "1"), (NS_A, "4")):
+        assert _outcome_of(scene_outcomes, ref) == _outcome_of(plain_outcomes, ref)
+
+
+def test_one_line_pass_change_and_two_scene_pass_changes_make_no_line_rubric_coherence_call(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    outcomes = _scene_run(tmp_path, claude)
+    assert _coherence_calls(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "3")).outcome == "changed"
+
+
+@pytest.mark.parametrize(
+    ("answers", "line_pass", "shipped"),
+    [
+        (
+            [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))],
+            Outcome(NS_A, "1", 1, None, (ALPHA,), "gate_failed", "scene", None),
+            {(NS_A, "2"), (NS_A, "3"), (NS_A, "4")},
+        ),
+        (
+            [Unfinished("Made-up coherence failure. Not game text.")],
+            Outcome(NS_A, "1", 1, None, (ALPHA,), "unfinished", None, None),
+            {(NS_A, "2"), (NS_A, "3")},
+        ),
+    ],
+)
+def test_scene_pass_lines_ship_when_coherence_reverts_or_fails_on_the_line_pass_lines(
+    tmp_path: Path, answers: list[dict[str, Any] | Unfinished | Rejected], line_pass: Outcome, shipped: set[tuple[str, str]]
+) -> None:
+    claude = _two_line_pass_claude()
+    claude.coherence = answers
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "1")) == line_pass
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == shipped
+
+
 def _dialog_tables(tmp_path: Path) -> dict[tuple[str, str], dict[str, Any]]:
     tables: dict[tuple[str, str], dict[str, Any]] = {}
     for path in (tmp_path / "repo" / "dialog" / LENS).iterdir():
@@ -2664,7 +2703,54 @@ def test_scene_judge_receives_the_passing_rewrites_under_the_scene_rubric(tmp_pa
     _scene_run(tmp_path, claude)
     [parts] = _scene_judge_prompts(claude)
     rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
-    assert rewrites == {(NS_A, "1"): None, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): None}
+    assert rewrites == {(NS_A, "1"): OPUS_A1, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): None}
+
+
+def test_scene_judge_reads_the_line_pass_rewrites_of_the_changed_line_pass_lines(tmp_path: Path) -> None:
+    claude = _two_line_pass_claude()
+    _scene_run(tmp_path, claude)
+    [parts] = _scene_judge_prompts(claude)
+    rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
+    assert rewrites == {(NS_A, "1"): OPUS_A1, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): OPUS_A4}
+
+
+def test_scene_judge_gets_no_rewrite_for_a_line_pass_line_coherence_reverted(tmp_path: Path) -> None:
+    claude = _two_line_pass_claude()
+    claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    _scene_run(tmp_path, claude)
+    [parts] = _scene_judge_prompts(claude)
+    rewrites = {(line["namespace"], line["key"]): line["rewrite"] for line in json.loads(_part(parts, "Scene lines:\n"))}
+    assert rewrites == {(NS_A, "1"): None, (NS_A, "2"): OPUS_S2, (NS_A, "3"): OPUS_S3, (NS_A, "4"): OPUS_A4}
+
+
+def test_judge_naming_a_line_pass_line_on_both_passes_leaves_it_shipped_and_reverts_no_scene_line(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2"), (NS_A, "3")}
+    assert _records(tmp_path) == [
+        _expected_record(patterns=reasons, plan=plan, planned=2, required=1, changed=2),
+    ]
+
+
+def test_judge_naming_a_line_pass_and_a_scene_pass_line_reverts_only_the_scene_pass_line(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.scene_judge = [_verdict(False, (NS_A, "1"), (NS_A, "3")), _verdict(False, (NS_A, "1"), (NS_A, "3"))]
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    reasons = (PATTERN_ONE, PATTERN_TWO)
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, reasons, "changed", None, "opus", None, plan)
+    assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "2")}
+    assert _records(tmp_path) == [
+        _expected_record(patterns=reasons, plan=plan, planned=2, required=1, changed=1, reverted=1),
+    ]
 
 
 def test_judge_reverted_optional_line_is_dropped_and_the_rest_ship(tmp_path: Path) -> None:
@@ -2696,7 +2782,7 @@ def test_judge_reverted_required_line_triggers_one_replan_that_excludes_it_and_s
     assert _outcome_of(outcomes, (NS_A, "3")) == _untouched(NS_A, "3")
     assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "4")}
     [replan_judge] = _scene_judge_prompts(claude)[2:]
-    assert [line["key"] for line in json.loads(_part(replan_judge, "Scene lines:\n")) if line["rewrite"]] == ["4"]
+    assert [line["key"] for line in json.loads(_part(replan_judge, "Scene lines:\n")) if line["rewrite"]] == ["1", "4"]
 
 
 def test_gate_failed_required_line_triggers_one_replan_that_excludes_it_and_ships_the_replan_with_its_id(tmp_path: Path) -> None:
@@ -2939,13 +3025,13 @@ def test_scene_judge_revert_of_a_required_line_counts_in_both_plans_and_names_th
     ]
 
 
-def test_coherence_revert_counts_every_reverted_line_of_the_plan(tmp_path: Path) -> None:
-    claude = _scene_claude()
-    claude.coherence = [_verdict(False, (NS_A, "2")), _verdict(False, (NS_A, "2"))]
+def test_coherence_revert_of_a_line_pass_line_leaves_the_scene_pass_plan_whole_in_its_record(tmp_path: Path) -> None:
+    claude = _two_line_pass_claude()
+    claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
     _scene_run(tmp_path, claude)
     plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
     assert _records(tmp_path) == [
-        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=0, reverted=2),
+        _expected_record(patterns=(PATTERN_ONE, PATTERN_TWO), plan=plan, planned=2, required=1, changed=2),
     ]
 
 
