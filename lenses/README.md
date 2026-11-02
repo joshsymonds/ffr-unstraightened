@@ -10,9 +10,10 @@ comes from the lens. The code adds only generic instructions, such as the output
 
 ## Sections
 
-A lens has four sections. Each one feeds the stages that read it. The stages run in
-this order: the Sonnet screen with the Jev recall check, Opus intents and drafts, then
-the judges.
+A lens has four required sections and one optional section, `[scene]`. Each one feeds
+the stages that read it. The line stages run in this order: the Sonnet screen with the
+Jev recall check, Opus intents and drafts, then the judges. The scene pass runs after
+the line stages.
 
 - `[[triage]]` holds one or more questions. Each question has an `id` and a
   `question`. Jev answers each question for every scene, and the screen names the
@@ -26,6 +27,17 @@ the judges.
 - `[judge]` holds `rubric`, one string. The scene judge, the cross-scene judge, the
   coherence check and the arc judge all read it. The rubric defines what `meaning`
   protects, and it overrides the Japanese line where the two conflict.
+- `[scene]` is optional. It configures the scene pass, which reads each scene as a
+  whole. When `[scene]` is present, it holds four keys:
+  - `[[scene.patterns]]` holds one or more questions. Each question has an `id` and a
+    `question`. The scene screen asks each question of the whole scene and flags the
+    scene when the pattern is present. Each `id` is the pattern's name and must differ
+    from every `triage` id.
+  - `criteria`, a list of one or more strings. The scene screen uses them to decide
+    whether a pattern is present in the scene.
+  - `plan`, one string. When a scene shows a pattern, the planner follows this text
+    when it proposes changed lines for the scene.
+  - `rubric`, one string. The scene pass judges each plan against it.
 
 Each stage's saved results are keyed by the text of the sections it reads, so an edit
 reruns only the stages that read that section. Editing `triage` reruns Jev triage, the
@@ -41,12 +53,18 @@ example `lenses/made-up-lens.toml: triage[1].id duplicates triage[0].id`.
 
 - Every `triage` entry needs an `id` and a `question`, and `triage` needs one or
   more tables.
-- Each `id` must match lowercase letters and digits joined by single hyphens, such
-  as `made-up-id`. Ids must be unique across all of `triage`.
+- Each `id`, in `triage` or in `scene.patterns`, must match lowercase letters and
+  digits joined by single hyphens, such as `made-up-id`. Ids must be unique across
+  `triage` and `scene.patterns` together.
 - Every string must be non-empty. A string that holds only whitespace counts as
   empty.
 - `screen` needs `criteria`, and `criteria` needs one or more non-empty strings.
 - `intent` needs `rule`. `judge` needs `rubric`.
+- `scene` is optional. When it is present, `patterns`, `criteria`, `plan` and
+  `rubric` are all required.
+- `scene.patterns` needs one or more tables, each with an `id` and a `question`.
+- `scene.criteria` needs one or more non-empty strings.
+- `scene.plan` and `scene.rubric` each need a non-empty string.
 - Unknown keys are errors at every level, including unknown sections.
 
 ## Example
@@ -73,4 +91,17 @@ rule = "Made-up intent rule."
 
 [judge]
 rubric = "Made-up judge rubric."
+
+[scene]
+criteria = ["Made-up scene criterion one.", "Made-up scene criterion two."]
+plan = "Made-up scene plan."
+rubric = "Made-up scene rubric."
+
+[[scene.patterns]]
+id = "made-up-scene-first-pattern"
+question = "Made-up scene question one. Does the scene show a made-up pattern?"
+
+[[scene.patterns]]
+id = "made-up-scene-second-pattern"
+question = "Made-up scene question two. Does the scene repeat a made-up pattern?"
 ```
