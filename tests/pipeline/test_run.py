@@ -4372,22 +4372,51 @@ def _screens(claude: FakeClaude) -> list[tuple[str, list[dict[str, str]]]]:
     return sorted(calls, key=lambda call: [(ref["namespace"], ref["key"]) for ref in call[1]])
 
 
-def test_queering_screens_only_markable_lines_on_haiku_and_writes_each_marked_line_with_its_bucket(tmp_path: Path) -> None:
+def _screen_casts(claude: FakeClaude) -> dict[tuple[str, str], list[tuple[str, object]]]:
+    """Each screen's cast as (speaker, flirt), keyed by its scene's first line. A cast entry without a flirt key reads "absent"."""
+    casts: dict[tuple[str, str], list[tuple[str, object]]] = {}
+    for _, parts, schema in claude.calls:
+        if schema is not SCREEN_SCHEMA:
+            continue
+        first = json.loads(_part(parts, "Scene lines:\n"))[0]
+        cast = json.loads(_part(parts, "Cast:\n"))
+        casts[(first["namespace"], first["key"])] = [(entry["speaker"], entry.get("flirt", "absent")) for entry in cast]
+    return casts
+
+
+def test_queering_screens_only_markable_lines_on_opus_and_writes_each_marked_line_with_its_bucket(tmp_path: Path) -> None:
     claude = _queer_claude()
     jev = FakeJev(JEV_HIGH)
     outcomes = _run(tmp_path, claude, [], jev=jev, scenes=QUEER_SCENES, lens=QUEER_LENS)
     assert _screens(claude) == [
-        (claude_module.HAIKU, [{"namespace": NS_A, "key": "2"}, {"namespace": NS_A, "key": "3"}]),
-        (claude_module.HAIKU, [{"namespace": NS_B, "key": "1"}, {"namespace": NS_B, "key": "2"}]),
-        (claude_module.HAIKU, [{"namespace": NS_C, "key": "1"}]),
+        (claude_module.OPUS, [{"namespace": NS_A, "key": "2"}, {"namespace": NS_A, "key": "3"}]),
+        (claude_module.OPUS, [{"namespace": NS_B, "key": "1"}, {"namespace": NS_B, "key": "2"}]),
+        (claude_module.OPUS, [{"namespace": NS_C, "key": "1"}]),
     ]
     assert outcomes == EXPECTED_QUEER_OUTCOMES
     assert jev.calls == []
-    assert all(schema is SCREEN_SCHEMA for model, _, schema in claude.calls if model == claude_module.HAIKU)
+    assert {model for model, _, schema in claude.calls if schema is SCREEN_SCHEMA} == {claude_module.OPUS}
     # The bible, one batch per scene, the speakerless draft of scene c, and the arc judge.
     assert claude.batches == 3 + len(QUEER_SCENES)
     records = [json.loads(line) for line in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()]
     assert ["bucket" in record for record in records] == [outcome.bucket is not None for outcome in EXPECTED_QUEER_OUTCOMES]
+
+
+def test_queering_screen_cast_marks_only_the_flirt_entries_with_a_flirt_key(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    assert _screen_casts(claude) == {
+        (NS_A, "1"): [("made-up-speaker-a", "absent"), ("made-up-speaker-c", True)],
+        (NS_B, "1"): [],
+        (NS_C, "1"): [],
+    }
+
+
+def test_unstraightening_screen_cast_carries_no_flirt_key(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    claude.flags = {}
+    _run(tmp_path, claude, [], jev=None, scenes=(QUEER_SCENE_A,), lens=LENS_OBJ)
+    assert _screen_casts(claude) == {(NS_A, "1"): [("made-up-speaker-a", "absent"), ("made-up-speaker-c", "absent")]}
 
 
 def test_queering_scene_without_a_markable_line_makes_no_call_and_leaves_every_line_untouched(tmp_path: Path) -> None:
@@ -4680,7 +4709,7 @@ def test_queering_through_takes_the_core_cast_from_the_whole_game_bible(tmp_path
     claude.bible = {2: THROUGH_BIBLE}
     claude.flags = {(NS_A, "2"): [ALPHA]}
     outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=QUEER_LENS, through=1)
-    assert _screens(claude) == [(claude_module.HAIKU, [{"namespace": NS_A, "key": "2"}])]
+    assert _screens(claude) == [(claude_module.OPUS, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
         Outcome(NS_A, "2", 1, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
@@ -4699,7 +4728,7 @@ def test_queering_through_chained_run_takes_the_core_cast_from_the_seeded_whole_
     claude.bible = {}
     claude.flags = {(NS_A, "2"): [ALPHA]}
     outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=replace(QUEER_LENS, base=BASE), through=1)
-    assert _screens(claude) == [(claude_module.HAIKU, [{"namespace": NS_A, "key": "2"}])]
+    assert _screens(claude) == [(claude_module.OPUS, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
         Outcome(NS_A, "2", 1, None, (ALPHA,), "untouched", None, None, bucket="untouched"),

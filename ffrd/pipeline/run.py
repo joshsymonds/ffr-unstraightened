@@ -827,7 +827,7 @@ def _marking(bibles: Sequence[Mapping[str, Any]], scenes: Sequence[Scene]) -> _M
 
 
 def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
-    """Phase 1 of queering: one Haiku screen over the scene's markable lines. Each marked line is recorded untouched with its reasons and its bucket, and every other line untouched. A scene with no markable line makes no call."""
+    """Phase 1 of queering: one Opus screen over the scene's markable lines. Each marked line is recorded untouched with its reasons and its bucket, and every other line untouched. A scene with no markable line makes no call."""
     eligible = {
         (line.namespace, line.key)
         for line in scene.lines
@@ -835,8 +835,8 @@ def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[l
     }
     if not eligible:
         return _every_line(scene, "untouched"), [], _Recall(), _PassRecord()
-    cast = arcs.cast(ctx.bibles, _speakers(scene))
-    marked = stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=claude.HAIKU, eligible=eligible)
+    cast = [{**entry, "flirt": True} if entry["speaker"] == marking.flirt else entry for entry in arcs.cast(ctx.bibles, _speakers(scene))]
+    marked = stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=claude.OPUS, eligible=eligible)
     if not isinstance(marked, dict):
         return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
     outcomes: list[Outcome] = []
