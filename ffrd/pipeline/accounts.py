@@ -15,6 +15,13 @@ MIN_WAIT = 60.0
 TRANSIENT_BACKOFF = 30.0
 TRANSIENT_BOUND = 300.0
 
+_pinned: int | None = None
+
+
+def pin(number: int | None) -> None:
+    global _pinned
+    _pinned = number
+
 
 @dataclass(frozen=True)
 class Account:
@@ -56,6 +63,8 @@ def read() -> list[Account]:
 
 
 def _least_used(accounts: list[Account], exclude: Collection[int]) -> Account | None:
+    if _pinned is not None:
+        return next((a for a in accounts if a.number not in exclude), None)
     under = [a for a in accounts if a.number not in exclude and a.weekly_pct < WEEKLY_LIMIT]
     return min(under, key=lambda a: (a.weekly_pct, a.number), default=None)
 
@@ -70,6 +79,8 @@ def choose(
     absent_since: datetime | None = None
     while True:
         accounts = read()
+        if _pinned is not None:
+            accounts = [a for a in accounts if a.number == _pinned]
         if not accounts:
             if absent_since is None:
                 absent_since = now()

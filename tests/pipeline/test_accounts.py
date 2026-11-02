@@ -141,6 +141,13 @@ def cswap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCswap:
     return FakeCswap(tmp_path, monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def unpinned() -> Iterator[None]:
+    # cmd_run pins the process to one cswap account, so every test in this file lifts the pin afterwards.
+    yield
+    accounts.pin(None)
+
+
 def stamp(delta: timedelta) -> str:
     return f"{NOW + delta:%Y-%m-%dT%H:%M:%S.%f}+00"
 
@@ -300,6 +307,52 @@ def test_concurrent_choose_through_transient_empty_listing_each_returns_a_usable
         picked = list(pool.map(pick, range(threads)))
     assert [account.number for account in picked] == [1] * threads
     assert cswap.calls() == ["list --json"] * (2 * threads)
+
+
+# Made-up pinned-account cases. Account 2 is the pin in each test. Not game text.
+def test_pinned_choose_returns_the_pinned_account_even_over_the_weekly_limit(cswap: FakeCswap) -> None:
+    cswap.publish(listing(usable(1, 10.0), usable(2, 95.0)))
+    accounts.pin(2)
+    sleep = Sleeps()
+    assert choose(sleep=sleep, now=fixed_now).number == 2
+    assert sleep.durations == []
+
+
+def test_pinned_choose_with_pinned_account_excluded_waits_for_its_reset_then_returns_it(cswap: FakeCswap) -> None:
+    cswap.publish(listing(usable(1, 10.0, timedelta(days=1)), usable(2, 95.0, timedelta(hours=2))))
+    accounts.pin(2)
+    sleep = Sleeps()
+    assert choose([2], sleep=sleep, now=fixed_now).number == 2
+    assert sleep.durations == [7200.0]
+    assert cswap.calls() == ["list --json", "list --json"]
+
+
+@pytest.mark.parametrize("reset_in", [timedelta(seconds=10), timedelta(hours=-1)])
+def test_pinned_choose_excluded_waits_at_least_sixty_seconds(cswap: FakeCswap, reset_in: timedelta) -> None:
+    cswap.publish(listing(usable(2, 95.0, reset_in)))
+    accounts.pin(2)
+    sleep = Sleeps(on_sleep=lambda: cswap.publish(listing(usable(2, 10.0))))
+    assert choose([2], sleep=sleep, now=fixed_now).number == 2
+    assert sleep.durations == [60.0]
+
+
+def test_pinned_choose_while_pinned_account_is_unusable_backs_off_and_never_returns_another(cswap: FakeCswap) -> None:
+    cswap.publish(listing(usable(1, 10.0), unusable(2)))
+    accounts.pin(2)
+    sleep = Sleeps(on_sleep=lambda: cswap.publish(listing(usable(1, 10.0), usable(2, 40.0))))
+    assert choose(sleep=sleep, now=fixed_now).number == 2
+    assert sleep.durations == [30.0]
+
+
+def test_pinned_ask_rate_limited_retries_the_pinned_account_and_never_another(cswap: FakeCswap) -> None:
+    # The reset is in the past, so the wait is the minimum: ask reads the clock itself and the test cannot inject it.
+    cswap.publish(listing(usable(1, 10.0), usable(2, 95.0, timedelta(hours=-1))))
+    cswap.answer(2, RATE_LIMIT)
+    accounts.pin(2)
+    sleep = Sleeps(on_sleep=lambda: cswap.answer(2, document(structured_output=MADE_UP)))
+    assert ask(2, OPUS, PARTS, SCHEMA, sleep=sleep) == (2, MADE_UP)
+    assert [call_["account"] for call_ in cswap.claude_calls()] == [2, 2]
+    assert sleep.durations == [60.0]
 
 
 def test_read_with_cswap_missing_from_path_raises_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
