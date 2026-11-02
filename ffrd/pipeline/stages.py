@@ -214,9 +214,25 @@ def _inputs(scene: Scene) -> dict[str, Any]:
     return {"scene": scene.key, "lines": [asdict(line) for line in scene.lines]}
 
 
+def _triage_lines(
+    jev: Triage, lens: Lens, scene_key: str, lines: Sequence[SceneLine]
+) -> dict[str, float] | RateLimited | Unfinished | Rejected:
+    answer = jev(scene_text(Scene(scene_key, tuple(lines))), lens.triage)
+    if not isinstance(answer, Rejected) or len(lines) < 2:
+        return answer
+    middle = len(lines) // 2
+    first = _triage_lines(jev, lens, scene_key, lines[:middle])
+    if not isinstance(first, dict):
+        return first
+    second = _triage_lines(jev, lens, scene_key, lines[middle:])
+    if not isinstance(second, dict):
+        return second
+    return {question: max(first[question], second[question]) for question in first}
+
+
 def triage(store: Store, lens: Lens, scene: Scene, jev: Triage) -> dict[str, float] | RateLimited | Unfinished | Rejected:
     def call() -> dict[str, float]:
-        answer = jev(scene_text(scene), lens.triage)
+        answer = _triage_lines(jev, lens, scene.key, scene.lines)
         if isinstance(answer, RateLimited | Unfinished | Rejected):
             raise _Refused(answer)
         return answer

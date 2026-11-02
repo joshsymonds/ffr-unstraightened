@@ -44,7 +44,20 @@ from ffrd.pipeline.store import Store
 # Made-up scene, lens and answers. Not game text.
 LINE_ONE = SceneLine("ST_C01_001_01", "1", "Ash", "Made-up first line. Not game text.", "Made-up Japanese one. Not game text.", 1)
 LINE_TWO = SceneLine("ST_C01_001_01", "2", None, "Made-up narration. Not game text.", "Made-up Japanese two. Not game text.", 1)
+LINE_THREE = SceneLine("ST_C01_001_01", "3", "Ash", "Made-up third line. Not game text.", "Made-up Japanese three. Not game text.", 1)
+LINE_FOUR = SceneLine("ST_C01_001_01", "4", None, "Made-up closing line. Not game text.", "Made-up Japanese four. Not game text.", 1)
+LONG_LINE = SceneLine(
+    "ST_C01_001_01",
+    "5",
+    "Ash",
+    "Made-up overlong line, longer than the size limit. Not game text.",
+    "Made-up Japanese five. Not game text.",
+    1,
+)
 SCENE = Scene("made-up-scene", (LINE_ONE, LINE_TWO))
+FOUR_LINE_SCENE = Scene("made-up-scene", (LINE_ONE, LINE_TWO, LINE_THREE, LINE_FOUR))
+ONE_LINE_SCENE = Scene("made-up-scene", (LINE_ONE,))
+LONG_LINE_SCENE = Scene("made-up-scene", (LONG_LINE,))
 
 LENS = Lens(
     name="made-up",
@@ -92,6 +105,28 @@ RACERS = 8
 RACE_PAUSE = 0.05
 
 
+SIZE_LIMIT = 60
+SIZE_REJECTION = "Made-up size rejection. Not game text."
+
+
+class SizedJev:
+    """Stands in for Jev: rejects scene text over SIZE_LIMIT characters and answers shorter text from answers keyed by that text. Records each call's arguments. Not game text."""
+
+    def __init__(self, answers: dict[str, Any]) -> None:
+        self.answers = answers
+        self.calls: list[tuple[Any, ...]] = []
+
+    def __call__(self, text: str, questions: Any) -> Any:
+        self.calls.append((text, questions))
+        if len(text) > SIZE_LIMIT:
+            return Rejected(SIZE_REJECTION)
+        return self.answers[text]
+
+
+def _text(*lines: SceneLine) -> str:
+    return scene_text(Scene("made-up-scene", lines))
+
+
 class SlowFake(Fake):
     """A Fake that pauses before it answers, so racing threads overlap inside it. Not game text."""
 
@@ -135,25 +170,93 @@ def test_fresh_store_on_same_root_returns_stored_triage_without_calling_jev(tmp_
 
 
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "scene"),
     [
-        RateLimited("Made-up rate limit detail. Not game text."),
-        Unfinished("Made-up unfinished detail. Not game text."),
-        Rejected("Made-up rejected detail. Not game text."),
+        (RateLimited("Made-up rate limit detail. Not game text."), SCENE),
+        (Unfinished("Made-up unfinished detail. Not game text."), SCENE),
+        (Rejected("Made-up rejected detail. Not game text."), ONE_LINE_SCENE),
     ],
     ids=["rate-limited", "unfinished", "rejected"],
 )
-def test_failed_triage_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any) -> None:
+def test_failed_triage_is_returned_unstored_and_asked_again(tmp_path: Path, failure: Any, scene: Scene) -> None:
     store = Store(tmp_path)
     jev = Fake(failure, PROBABILITIES)
+
+    assert triage(store, LENS, scene, jev) == failure
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+    assert triage(store, LENS, scene, jev) == PROBABILITIES
+    assert len(jev.calls) == 2
+    assert store.unfinished() == []
+
+
+def test_rejected_scene_is_split_in_halves_and_combined_by_per_question_maximum(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    jev = SizedJev(
+        {_text(LINE_ONE): {"made-up-alpha": 0.9, "made-up-beta": 0.1}, _text(LINE_TWO): {"made-up-alpha": 0.2, "made-up-beta": 0.6}}
+    )
+
+    assert triage(store, LENS, SCENE, jev) == {"made-up-alpha": 0.9, "made-up-beta": 0.6}
+    assert [text for text, _ in jev.calls] == [_text(LINE_ONE, LINE_TWO), _text(LINE_ONE), _text(LINE_TWO)]
+    assert store.unfinished() == []
+
+    fresh = SizedJev({})
+    assert triage(Store(tmp_path), LENS, SCENE, fresh) == {"made-up-alpha": 0.9, "made-up-beta": 0.6}
+    assert fresh.calls == []
+
+
+def test_half_still_over_size_is_split_again_and_every_part_is_combined(tmp_path: Path) -> None:
+    jev = SizedJev(
+        {
+            _text(LINE_ONE): {"made-up-alpha": 0.1, "made-up-beta": 0.9},
+            _text(LINE_TWO): {"made-up-alpha": 0.8, "made-up-beta": 0.2},
+            _text(LINE_THREE): {"made-up-alpha": 0.3, "made-up-beta": 0.95},
+            _text(LINE_FOUR): {"made-up-alpha": 0.5, "made-up-beta": 0.05},
+        }
+    )
+
+    assert triage(Store(tmp_path), LENS, FOUR_LINE_SCENE, jev) == {"made-up-alpha": 0.8, "made-up-beta": 0.95}
+    assert [text for text, _ in jev.calls] == [
+        _text(*FOUR_LINE_SCENE.lines),
+        _text(LINE_ONE, LINE_TWO),
+        _text(LINE_ONE),
+        _text(LINE_TWO),
+        _text(LINE_THREE, LINE_FOUR),
+        _text(LINE_THREE),
+        _text(LINE_FOUR),
+    ]
+
+
+def test_scene_under_size_makes_exactly_one_call(tmp_path: Path) -> None:
+    jev = SizedJev({_text(LINE_ONE): PROBABILITIES})
+
+    assert triage(Store(tmp_path), LENS, ONE_LINE_SCENE, jev) == PROBABILITIES
+    assert jev.calls == [(_text(LINE_ONE), LENS.triage)]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [RateLimited("Made-up rate limit detail. Not game text."), Unfinished("Made-up unfinished detail. Not game text.")],
+    ids=["rate-limited", "unfinished"],
+)
+def test_failed_half_propagates_and_nothing_is_stored(tmp_path: Path, failure: RateLimited | Unfinished) -> None:
+    store = Store(tmp_path)
+    jev = SizedJev({_text(LINE_ONE): PROBABILITIES, _text(LINE_TWO): failure})
 
     assert triage(store, LENS, SCENE, jev) == failure
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert triage(store, LENS, SCENE, jev) == PROBABILITIES
-    assert len(jev.calls) == 2
-    assert store.unfinished() == []
+
+def test_rejected_one_line_scene_is_returned_rejected_and_stores_nothing(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    jev = SizedJev({})
+
+    assert triage(store, LENS, LONG_LINE_SCENE, jev) == Rejected(SIZE_REJECTION)
+    assert len(jev.calls) == 1
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
 
 
 def test_editing_triage_text_reruns_triage_and_screen(tmp_path: Path) -> None:
