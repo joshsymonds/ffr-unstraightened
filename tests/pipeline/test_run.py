@@ -993,6 +993,158 @@ def test_redo_path_that_cannot_be_read_fails_naming_the_file_and_strerror(tmp_pa
     assert claude.batches == 0
 
 
+BASE = "made-up-base-lens"
+BASE_A1 = "Made-up base rewrite of line one of scene a. Not game text."
+BASE_A2 = "Made-up base rewrite of line two of scene a. Not game text."
+BASE_FIELD_ORDER = ["vanilla", "base", "text", "lens", "reason", "writer", "verdict", "run"]
+EN_STALE = "Made-up English the game no longer has. Not game text."
+
+
+def _base_record(namespace: str, key: str, english: str, text: str) -> str:
+    # A base record as the base lens wrote it, for a line whose game English is english. Not game text.
+    return f'[{namespace}.{key}]\nvanilla = "{vanilla_hash(english)}"\ntext = "{text}"\n'
+
+
+def _base_file(tmp_path: Path, text: str, name: str = "chapter-01.toml") -> Path:
+    path = tmp_path / "repo" / "dialog" / BASE / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_base_rewrite_is_the_starting_english_of_every_prompt(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    outcomes = _run(tmp_path, claude, [], jev=jev, lens=replace(LENS_OBJ, base=BASE))
+    prompts = _all_prompts(claude, jev)
+    assert not any(EN_A1 in text for text in prompts)
+    assert any(BASE_A1 in text for text in prompts)
+    assert outcomes == EXPECTED_OUTCOMES
+
+
+def test_changed_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    dialog = tmp_path / "repo" / "dialog" / LENS
+    chapter_one = tomllib.loads((dialog / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert list(chapter_one[NS_A]["1"]) == BASE_FIELD_ORDER
+    assert chapter_one[NS_A]["1"] == {
+        "vanilla": vanilla_hash(EN_A1),
+        "base": vanilla_hash(BASE_A1),
+        "text": VOICE_A1,
+        "lens": LENS,
+        "reason": [ALPHA],
+        "writer": "voice",
+        "verdict": "passed",
+        "run": RUN,
+    }
+    chapter_two = tomllib.loads((dialog / "chapter-02.toml").read_text(encoding="utf-8"))
+    assert "base" not in chapter_two[NS_B]["1"]
+    assert chapter_two[NS_B]["1"]["vanilla"] == vanilla_hash(EN_B1)
+
+
+def test_base_record_whose_vanilla_differs_from_the_game_line_fails_naming_the_key_before_any_claude_call(tmp_path: Path) -> None:
+    path = _base_file(tmp_path, _base_record(NS_A, "1", EN_STALE, BASE_A1))
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert str(raised.value) == f"{path}: {NS_A}/1: changed in the game"
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        pytest.param(f'[{NS_A}.1]\ntext = "{BASE_A1}"\n', f"{NS_A}/1", id="record-lacks-vanilla"),
+        pytest.param(f'[{NS_A}.1]\nvanilla = "{vanilla_hash(EN_A1)}"\n', f"{NS_A}/1", id="record-lacks-text"),
+        pytest.param(f'[{NS_A}.1]\nvanilla = 5\ntext = "{BASE_A1}"\n', f"{NS_A}/1", id="vanilla-not-a-string"),
+        pytest.param(f'[{NS_A}.1]\nvanilla = "{vanilla_hash(EN_A1)}"\ntext = 5\n', f"{NS_A}/1", id="text-not-a-string"),
+        pytest.param(f'[{NS_A}]\n1 = "{BASE_A1}"\n', f"{NS_A}/1", id="record-not-a-table"),
+        pytest.param(f'{NS_A} = "{BASE_A1}"\n', NS_A, id="namespace-not-a-table"),
+    ],
+)
+def test_malformed_base_record_fails_naming_the_file_and_key_before_any_claude_call(tmp_path: Path, text: str, name: str) -> None:
+    path = _base_file(tmp_path, text)
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert str(raised.value).startswith(f"{path}: {name}: ")
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_base_record_for_a_key_outside_the_passed_scenes_is_neither_checked_nor_used(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1) + f'[{NS_A}.9]\nvanilla = "stale"\n')
+    outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert outcomes == EXPECTED_OUTCOMES
+
+
+def test_missing_base_directory_fails_naming_it_before_any_claude_call(tmp_path: Path) -> None:
+    claude = _claude()
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert str(raised.value) == f"dialog/{BASE}/: directory is missing"
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_base_file_that_is_not_toml_fails_naming_the_file_before_any_claude_call(tmp_path: Path) -> None:
+    path = _base_file(tmp_path, f"[{NS_A}\n")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(str(path))):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_change_with_a_base_writes_base_directly_after_vanilla(tmp_path: Path) -> None:
+    directory = tmp_path / "dialog" / LENS
+    write_dialog(directory, [replace(_change(), base=vanilla_hash(BASE_A1))])
+    first = tomllib.loads((directory / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert list(first["made-up-scene-a"]["1"]) == BASE_FIELD_ORDER
+    assert first["made-up-scene-a"]["1"]["base"] == vanilla_hash(BASE_A1)
+
+
+def test_scene_pass_change_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
+    claude = _scene_claude()
+    # The plan quotes the carrier from the base text, the English the scene pass now reads.
+    claude.scene_plan = {
+        "keep": False,
+        "keep_reason": "none",
+        "lines": [{"namespace": NS_A, "key": "2", "intent": "Made-up scene intent. Not game text.", "carrier": BASE_A2, "required": True}],
+    }
+    outcomes = _scene_run(tmp_path, claude, lens=replace(SCENE_LENS, base=BASE))
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+    chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert chapter_one[NS_A]["2"]["vanilla"] == vanilla_hash(EN_A2)
+    assert chapter_one[NS_A]["2"]["base"] == vanilla_hash(BASE_A2)
+
+
+def test_base_rewrite_draft_equal_to_the_game_line_is_never_judged_or_written_and_the_run_completes(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    claude = _claude()
+    claude.drafts[(NS_A, "1")] = [EN_A1, OPUS_A1]
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert outcomes[0] == EXPECTED_OUTCOMES[0]
+    assert EN_A1 not in [candidate for _, candidate in _judged(claude, JUDGE_SCHEMA)]
+    chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert chapter_one[NS_A]["1"]["text"] == VOICE_A1
+
+
+def test_base_rewrite_whose_only_draft_is_the_game_line_completes_the_run_and_writes_no_game_line(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    claude = _claude()
+    claude.drafts[(NS_A, "1")] = [EN_A1]
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    assert EN_A1 not in [candidate for _, candidate in _judged(claude, JUDGE_SCHEMA)]
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "writer", None)
+    dialog = tmp_path / "repo" / "dialog" / LENS
+    assert not any(EN_A1 in path.read_text(encoding="utf-8") for path in dialog.glob("*.toml"))
+
+
 def _note_drafts(claude: FakeClaude) -> list[tuple[list[tuple[str, str]], str]]:
     """Each draft call that carries a reviewer note, with the lines it names and its note."""
     return [
@@ -2636,6 +2788,8 @@ def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = (), lens
         lines={},
         table_lines=frozenset(),
         redo={},
+        vanilla_hashes={},
+        base_hashes={},
     )
 
 

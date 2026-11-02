@@ -29,11 +29,13 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from pylocres import Entry, LocresFile, Namespace
 
 from ffrd.game import LOCRES, MOD_NAME, Fail, build_id, paks_dir, read_locres, repo_root, vanilla, vanilla_dir, vanilla_hash
+from ffrd.pipeline.lens import load_lens
 
 REPAK = "repak"
 PAK_SHAPES = ("target", "full", "partial")
@@ -54,17 +56,96 @@ PLACEHOLDER = re.compile(r"\{[^}]*\}")
 STYLE_OPEN = re.compile(r"<text\b[^>]*>")
 
 
+@dataclass(frozen=True)
+class _Claim:
+    """The edit that set a key: its file, its lens group (None for files directly in dialog/) and its text."""
+
+    rel: Path
+    group: str | None
+    text: object
+
+
+def group_of(root: Path, toml_path: Path) -> str | None:
+    parts = toml_path.relative_to(root / "dialog").parts
+    return parts[0] if len(parts) > 1 else None
+
+
+def lens_base(root: Path, group: str) -> str | None:
+    path = root / "lenses" / f"{group}.toml"
+    return load_lens(path).base if path.is_file() else None
+
+
+def base_cycle_errors(root: Path, groups: set[str | None]) -> list[str]:
+    """One error per base cycle reachable from a lens group, naming the lenses around the loop."""
+    errors: list[str] = []
+    checked: set[str] = set()
+    for start in sorted(g for g in groups if g is not None):
+        chain: list[str] = []
+        current: str | None = start
+        while current is not None and current not in checked:
+            if current in chain:
+                loop = [*chain[chain.index(current) :], current]
+                errors.append(f"base cycle between lenses: {' -> '.join(loop)}")
+                break
+            chain.append(current)
+            current = lens_base(root, current)
+        checked.update(chain)
+    return errors
+
+
+def apply_order(groups: set[str | None], bases: dict[str, str | None]) -> list[str | None]:
+    """The unnamed group first, then each lens group after its base when the base is also a group; ties by name."""
+    order: list[str | None] = [None] if None in groups else []
+
+    def visit(name: str) -> None:
+        if name in order:
+            return
+        base = bases[name]
+        if base is not None and base in bases:
+            visit(base)
+        order.append(name)
+
+    for name in sorted(bases):
+        visit(name)
+    return order
+
+
+def base_problem(where: str, record_base: str | None, earlier: _Claim | None, edit: object) -> str | None:
+    """Why a record may not set its key, given the earlier edit of that key and the base lens of the record's group."""
+    if earlier is not None and (earlier.group is None or earlier.group != record_base):
+        return f"{where} is also edited in {earlier.rel}"
+    if not isinstance(edit, dict):
+        return None
+    if "base" in edit and not isinstance(edit["base"], str):
+        return f'{where} needs a string "base"'
+    if earlier is None:
+        return f"{where} has a base but no earlier lens edits it" if "base" in edit else None
+    if not isinstance(earlier.text, str) or edit.get("base") != vanilla_hash(earlier.text):
+        return f"{where} does not match its base in {earlier.rel}"
+    return None
+
+
 def load_overrides(root: Path, en: LocresFile) -> tuple[dict[tuple[str, str], str], list[str], list[str]]:
     """Map (namespace, key) -> new text from dialog/**/*.toml, validated against the game's English text.
 
+    Lens groups apply in base order, so a lens's record may replace a key an earlier lens set when its base matches.
     Messages name the file and namespace,key but never the vanilla line.
     """
     overrides: dict[tuple[str, str], str] = {}
-    origin: dict[tuple[str, str], Path] = {}
+    origin: dict[tuple[str, str], _Claim] = {}
     errors: list[str] = []
     warnings: list[str] = []
-    for toml_path in sorted((root / "dialog").rglob("*.toml")):
+    paths = sorted((root / "dialog").rglob("*.toml"))
+    groups = {group_of(root, path) for path in paths}
+    cycles = base_cycle_errors(root, groups)
+    if cycles:
+        return overrides, cycles, warnings
+    bases = {group: lens_base(root, group) for group in groups if group is not None}
+    rank = {group: i for i, group in enumerate(apply_order(groups, bases))}
+    files = sorted(((group_of(root, path), path) for path in paths), key=lambda item: (rank[item[0]], item[1]))
+    for group, toml_path in files:
         rel = toml_path.relative_to(root)
+        record_base = bases[group] if group is not None else None
         try:
             data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
@@ -76,10 +157,12 @@ def load_overrides(root: Path, en: LocresFile) -> tuple[dict[tuple[str, str], st
                 continue
             for key, edit in keys.items():
                 where = f"{rel}: {ns},{key}"
-                if (ns, key) in origin:
-                    errors.append(f"{where} is also edited in {origin[(ns, key)]}")
+                problem = base_problem(where, record_base, origin.get((ns, key)), edit)
+                if problem is not None:
+                    errors.append(problem)
                     continue
-                origin[(ns, key)] = rel
+                text = edit.get("text") if isinstance(edit, dict) else None
+                origin[(ns, key)] = _Claim(rel, group, text)
                 if not isinstance(edit, dict):
                     errors.append(f"{where} must be a table with vanilla and text")
                     continue

@@ -66,6 +66,7 @@ class Change:
     writer: WriterName
     run: str
     plan: str | None = None
+    base: str | None = None
 
 
 def _mkdir(directory: Path) -> None:
@@ -113,9 +114,11 @@ def write_outcomes(path: Path, outcomes: Sequence[Outcome]) -> None:
 
 def _table(c: Change) -> str:
     key = c.key if BARE_KEY.fullmatch(c.key) else toml_string(c.key)
+    base = "" if c.base is None else f"base = {toml_string(c.base)}\n"
     return (
         f"[{toml_string(c.namespace)}.{key}]\n"
         f"vanilla = {toml_string(c.vanilla)}\n"
+        f"{base}"
         f"text = {toml_string(c.text)}\n"
         f"lens = {toml_string(c.lens)}\n"
         f"reason = [{', '.join(toml_string(reason) for reason in c.reasons)}]\n"
@@ -189,6 +192,8 @@ class _Context:
     lines: Mapping[tuple[str, str], SceneLine]
     table_lines: frozenset[tuple[str, str]]
     redo: Mapping[tuple[str, str], str]
+    vanilla_hashes: Mapping[tuple[str, str], str]
+    base_hashes: Mapping[tuple[str, str], str]
 
 
 @dataclass
@@ -287,10 +292,11 @@ def _candidates(
     voiced = dict(zip(unique, claude.fan_out(lambda text: stages.render(ctx.store, ctx.renderer, line.speaker, text), unique), strict=True))
     candidates: list[Candidate] = []
     seen: set[str] = set()
+    game = ctx.vanilla_hashes[(line.namespace, line.key)]
     for text in texts:
         options: tuple[tuple[WriterName, str], ...] = (("opus", text), ("voice", voiced[text]))
         for writer, option in options:
-            if option == line.english or option in seen:
+            if option == line.english or vanilla_hash(option) == game or option in seen:
                 continue
             seen.add(option)
             origin.setdefault(option, writer)
@@ -418,12 +424,13 @@ def _line(
         namespace=line.namespace,
         key=line.key,
         chapter=line.chapter,
-        vanilla=vanilla_hash(line.english),
+        vanilla=ctx.vanilla_hashes[(line.namespace, line.key)],
         text=text,
         lens=ctx.lens.name,
         reasons=reasons,
         writer=writer,
         run=ctx.run_id,
+        base=ctx.base_hashes.get((line.namespace, line.key)),
     )
     return _outcome(line, reasons, "changed", writer=writer), change
 
@@ -733,13 +740,14 @@ def _scene_pass(
                 namespace=line.namespace,
                 key=line.key,
                 chapter=line.chapter,
-                vanilla=vanilla_hash(line.english),
+                vanilla=ctx.vanilla_hashes[(line.namespace, line.key)],
                 text=candidate.text,
                 lens=ctx.lens.name,
                 reasons=reasons,
                 writer=writer,
                 run=ctx.run_id,
                 plan=chosen.plan.id,
+                base=ctx.base_hashes.get((line.namespace, line.key)),
             )
         )
     passed = _PassRecord(reasons, chosen.plan, first.required_failed, gates, reverts)
@@ -883,6 +891,48 @@ def _write_recall(path: Path, lens: Lens, recall: _Recall) -> None:
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _base(directory: Path, base: str, scenes: Sequence[Scene]) -> dict[tuple[str, str], str]:
+    """Reads the base lens's records under dialog/<base>/ for the lines of the passed scenes. Each such record must carry string vanilla and text, and its vanilla hash must match the game line. Returns each checked line's base text."""
+    if not directory.is_dir():
+        raise Fail(f"dialog/{base}/: directory is missing")
+    lines = _first_lines(scenes)
+    texts: dict[tuple[str, str], str] = {}
+    for path in sorted(directory.rglob("*.toml")):
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except OSError as e:
+            raise Fail(f"{path}: cannot read: {e.strerror}") from e
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            raise Fail(f"{path}: cannot read as UTF-8 TOML: {e}") from e
+        for namespace, keys in data.items():
+            if not isinstance(keys, dict):
+                raise Fail(f"{path}: {namespace}: must be a table of records")
+            for key, record in keys.items():
+                if (namespace, key) not in lines:
+                    continue
+                ref = f"{namespace}/{key}"
+                if not isinstance(record, dict) or not isinstance(record.get("vanilla"), str) or not isinstance(record.get("text"), str):
+                    raise Fail(f"{path}: {ref}: record needs string vanilla and text")
+                if record["vanilla"] != vanilla_hash(lines[(namespace, key)].english):
+                    raise Fail(f"{path}: {ref}: changed in the game")
+                texts[(namespace, key)] = record["text"]
+    return texts
+
+
+def _chained(scenes: Sequence[Scene], texts: Mapping[tuple[str, str], str]) -> list[Scene]:
+    """Starts each line that has a base text from that text, the English every stage then reads."""
+    return [
+        replace(
+            scene,
+            lines=tuple(
+                replace(line, english=texts[(line.namespace, line.key)]) if (line.namespace, line.key) in texts else line
+                for line in scene.lines
+            ),
+        )
+        for scene in scenes
+    ]
+
+
 def _redo(path: Path, scenes: Sequence[Scene]) -> dict[tuple[str, str], str]:
     """Reads the lens's redo list, where a missing file is an empty list. Each key must name a line of the in-scope scenes, and each note must be a non-empty string of at most REDO_NOTE_MAX characters."""
     try:
@@ -930,6 +980,9 @@ def run(
     if through is not None and through < 1:
         raise Fail("through must be at least 1")
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
+    vanilla_hashes = {ref: vanilla_hash(line.english) for ref, line in _first_lines(scenes).items()}
+    base_texts = {} if lens.base is None else _base(root / "dialog" / lens.base, lens.base, scenes)
+    scenes = _chained(scenes, base_texts)
     scenes = scoped(scenes, scene_table=scene_table)
     redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
     if through is not None:
@@ -952,6 +1005,8 @@ def run(
         lines=_first_lines(scenes),
         table_lines=table_lines,
         redo=redo,
+        vanilla_hashes=vanilla_hashes,
+        base_hashes={ref: vanilla_hash(text) for ref, text in base_texts.items()},
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
