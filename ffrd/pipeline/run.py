@@ -206,6 +206,7 @@ class _Context:
     redo: Mapping[tuple[str, str], str]
     vanilla_hashes: Mapping[tuple[str, str], str]
     base_hashes: Mapping[tuple[str, str], str]
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]]
     marking: _Marking | None = None
 
 
@@ -359,8 +360,16 @@ def _first_drafts(
 
 
 def _neighbourhood(ctx: _Context, scene: Scene, line: SceneLine) -> tuple[tuple[Mapping[str, Any], ...], Mapping[str, Any]]:
-    """The bible callbacks that touch a line and the arc context of its scene's speakers."""
-    return tuple(bible.touching(ctx.bibles, line.namespace, line.key)), arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
+    """The bible callbacks that touch a line and the arc context of its scene's speakers, which names the scene's base rewrites when the lens has a base."""
+    context = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
+    rewrites = [
+        {"namespace": scene_line.namespace, "key": scene_line.key, **ctx.base_rewrites[(scene_line.namespace, scene_line.key)]}
+        for scene_line in scene.lines
+        if (scene_line.namespace, scene_line.key) in ctx.base_rewrites
+    ]
+    if rewrites:
+        context = {**context, "base_rewrites": rewrites}
+    return tuple(bible.touching(ctx.bibles, line.namespace, line.key)), context
 
 
 def _intend(
@@ -501,7 +510,7 @@ def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: lis
     if len(changes) < 2:
         return outcomes, changes
     rewrites = {(change.namespace, change.key): change.text for change in changes}
-    verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
+    verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask, base_rewrites=ctx.base_rewrites)
     if isinstance(verdict, Unfinished | Rejected):
         return [replace(o, outcome="unfinished", writer=None) if (o.namespace, o.key) in rewrites else o for o in outcomes], []
     return (
@@ -545,7 +554,9 @@ def _arc_judged(
 ) -> tuple[list[Outcome], list[Change]]:
     """Judges the line-pass changes against the arcs, then judges the line-pass changes that survived with the scene-pass changes under the scene rubric, when the lens has a scene section and a scene-pass change exists. Second-pass reverts widen to whole plans."""
     line_pass = [change for change in changes if change.plan is None]
-    verdicts = arcs.judge(ctx.store, ctx.lens, ctx.arcs, scenes, {(c.namespace, c.key): c.text for c in line_pass}, ask)
+    verdicts = arcs.judge(
+        ctx.store, ctx.lens, ctx.arcs, scenes, {(c.namespace, c.key): c.text for c in line_pass}, ask, base_rewrites=ctx.base_rewrites
+    )
     dropped = verdicts.reverted | verdicts.unfinished
     outcomes = [_arc_outcome(outcome, verdicts) for outcome in outcomes]
     scene_pass = [change for change in changes if change.plan is not None]
@@ -553,7 +564,7 @@ def _arc_judged(
         kept = [change for change in line_pass if (change.namespace, change.key) not in dropped]
         scene_refs = frozenset((change.namespace, change.key) for change in scene_pass)
         rewrites = {(change.namespace, change.key): change.text for change in [*kept, *scene_pass]}
-        second = arcs.judge_scene(ctx.store, ctx.lens, ctx.arcs, scenes, rewrites, scene_refs, ask)
+        second = arcs.judge_scene(ctx.store, ctx.lens, ctx.arcs, scenes, rewrites, scene_refs, ask, base_rewrites=ctx.base_rewrites)
         widened = arcs.Verdicts(_with_plans(second.reverted, scene_pass), _with_plans(second.unfinished, scene_pass))
         outcomes = [_arc_outcome(outcome, widened) for outcome in outcomes]
         dropped = dropped | widened.reverted | widened.unfinished
@@ -1053,6 +1064,19 @@ def _base(directory: Path, base: str, scenes: Sequence[Scene]) -> dict[tuple[str
     return texts
 
 
+def _base_rewrites(root: Path, base: str, texts: Mapping[tuple[str, str], str]) -> dict[tuple[str, str], dict[str, Any]]:
+    """The lens and reasons of each base-rewritten line, from the base lens's latest ledger entry. The entry must hold the hash of the base text, or the base lens has not run over that text."""
+    latest = ledger.latest(ledger.read(root, base))
+    rewrites: dict[tuple[str, str], dict[str, Any]] = {}
+    for ref, text in texts.items():
+        entry = latest.get(ref)
+        if entry is None or entry.text_hash != vanilla_hash(text):
+            line = opaque_label(f"{ref[0]}/{ref[1]}")
+            raise Fail(f"ledger/{base}.jsonl: line {line} has no entry for its base rewrite; run ffrd run --lens {base} first")
+        rewrites[ref] = {"lens": base, "reasons": list(entry.reasons)}
+    return rewrites
+
+
 def _chained(scenes: Sequence[Scene], texts: Mapping[tuple[str, str], str]) -> list[Scene]:
     """Starts each line that has a base text from that text, the English every stage then reads."""
     return [
@@ -1116,6 +1140,7 @@ def run(
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
     vanilla_hashes = {ref: vanilla_hash(line.english) for ref, line in _first_lines(scenes).items()}
     base_texts = {} if lens.base is None else _base(root / "dialog" / lens.base, lens.base, scenes)
+    base_rewrites = {} if lens.base is None else _base_rewrites(root, lens.base, base_texts)
     game_scenes = scoped(scenes, scene_table=scene_table)
     scenes = _chained(game_scenes, base_texts)
     redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
@@ -1150,6 +1175,7 @@ def run(
         redo=redo,
         vanilla_hashes=vanilla_hashes,
         base_hashes={ref: vanilla_hash(text) for ref, text in base_texts.items()},
+        base_rewrites=base_rewrites,
         marking=_marking(built, in_scope) if selecting else None,
     )
     progress = threading.Lock()

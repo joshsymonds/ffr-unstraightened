@@ -28,6 +28,7 @@ from ffrd.pipeline.run import (
     _Context,
     _record,
     cmd_run,
+    opaque_label,
     register,
     run,
     write_dialog,
@@ -1036,8 +1037,34 @@ def _seed_base(tmp_path: Path, bibles: dict[int, dict[str, Any] | Unfinished | R
     assert isinstance(built, list)
 
 
+BASE_STALE = "Made-up base text the ledger no longer holds. Not game text."
+BASE_REASON = "made-up-base-reason"
+
+
+def _base_ledger(tmp_path: Path, rewrites: Sequence[tuple[str, str, str, str]]) -> None:
+    # The base lens's ledger entries for the lines it rewrote, each (namespace, key, english, text), as a base run appends them. Not game text.
+    entries = [
+        ledger.Entry(
+            run=RUN,
+            lens=BASE,
+            base=None,
+            namespace=namespace,
+            key=key,
+            vanilla_hash=vanilla_hash(english),
+            base_hash=None,
+            text_hash=vanilla_hash(text),
+            reasons=(BASE_REASON,),
+            writer="opus",
+            plan=None,
+        )
+        for namespace, key, english, text in rewrites
+    ]
+    ledger.append(tmp_path / "repo", BASE, entries)
+
+
 def test_base_rewrite_is_the_starting_english_of_every_prompt(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
     _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     claude = _claude()
     jev = FakeJev(JEV_HIGH)
@@ -1050,6 +1077,7 @@ def test_base_rewrite_is_the_starting_english_of_every_prompt(tmp_path: Path) ->
 
 def test_changed_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
     _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
     dialog = tmp_path / "repo" / "dialog" / LENS
@@ -1103,6 +1131,7 @@ def test_malformed_base_record_fails_naming_the_file_and_key_before_any_claude_c
 
 def test_base_record_for_a_key_outside_the_passed_scenes_is_neither_checked_nor_used(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1) + f'[{NS_A}.9]\nvanilla = "stale"\n')
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
     _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     outcomes = _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
     assert outcomes == EXPECTED_OUTCOMES
@@ -1136,6 +1165,7 @@ def test_change_with_a_base_writes_base_directly_after_vanilla(tmp_path: Path) -
 
 def test_scene_pass_change_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
+    _base_ledger(tmp_path, [(NS_A, "2", EN_A2, BASE_A2)])
     claude = _scene_claude()
     _seed_base(tmp_path, claude.bible, (TABLE_SCENE,))
     # The plan quotes the carrier from the base text, the English the scene pass now reads.
@@ -1158,6 +1188,7 @@ def test_scene_pass_change_started_from_a_base_rewrite_records_the_game_hash_and
 
 def test_base_rewrite_draft_equal_to_the_game_line_is_never_judged_or_written_and_the_run_completes(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
     _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     claude = _claude()
     claude.drafts[(NS_A, "1")] = [EN_A1, OPUS_A1]
@@ -1170,6 +1201,7 @@ def test_base_rewrite_draft_equal_to_the_game_line_is_never_judged_or_written_an
 
 def test_base_rewrite_whose_only_draft_is_the_game_line_completes_the_run_and_writes_no_game_line(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
     _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     claude = _claude()
     claude.drafts[(NS_A, "1")] = [EN_A1]
@@ -1182,6 +1214,7 @@ def test_base_rewrite_whose_only_draft_is_the_game_line_completes_the_run_and_wr
 
 def test_chained_run_makes_no_bible_call_and_its_prompts_carry_the_seeded_whole_game_bible(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
     _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
     # The run's own claude answers no bible, so a bible call would leave the prompts without the seeded callback. Not game text.
     claude = _claude()
@@ -1205,6 +1238,50 @@ def test_chained_run_with_the_chapter_two_record_missing_fails_naming_it_before_
     assert printed == ["bible: chapter 2 bible is not stored"]
     assert claude.calls == []
     assert claude.batches == 0
+
+
+def test_base_rewrite_context_reaches_intent_draft_and_judge_of_every_line_of_its_scene(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, base=BASE))
+    rewrites = [{"namespace": NS_A, "key": "1", "lens": BASE, "reasons": [BASE_REASON]}]
+    scene_a = {(line.namespace, line.key) for line in SCENE_A.lines}
+    line_calls = [
+        (schema, target, context) for _, parts, schema in claude.calls if schema in LINE_SCHEMAS for target, context in _line_targets(parts)
+    ]
+    reached = [schema for schema, target, _ in line_calls if target == (NS_A, "1")]
+    assert all(any(schema is expected for schema in reached) for expected in (INTENT_SCHEMA, DRAFT_SCHEMA, JUDGE_SCHEMA))
+    for _, target, context in line_calls:
+        if target in scene_a:
+            assert context["base_rewrites"] == rewrites
+        else:
+            assert "base_rewrites" not in context
+
+
+@pytest.mark.parametrize(
+    "rewrites",
+    [
+        pytest.param([], id="no-entry"),
+        pytest.param([(NS_A, "1", EN_A1, BASE_STALE)], id="stale-text-hash"),
+    ],
+)
+def test_base_rewrite_without_its_latest_ledger_entry_fails_naming_the_line_before_any_claude_call(
+    tmp_path: Path, rewrites: Sequence[tuple[str, str, str, str]]
+) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, rewrites)
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE})
+    claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    with pytest.raises(Fail) as raised:
+        _run(tmp_path, claude, [], jev=jev, lens=replace(LENS_OBJ, base=BASE))
+    line = opaque_label(f"{NS_A}/1")
+    assert str(raised.value) == f"ledger/{BASE}.jsonl: line {line} has no entry for its base rewrite; run ffrd run --lens {BASE} first"
+    assert claude.calls == []
+    assert claude.batches == 0
+    assert jev.calls == []
 
 
 def _note_drafts(claude: FakeClaude) -> list[tuple[list[tuple[str, str]], str]]:
@@ -2107,6 +2184,57 @@ def test_no_arc_and_no_changed_arc_line_makes_no_arc_call(tmp_path: Path) -> Non
     assert _arc_calls(claude) == []
 
 
+# Made-up base rewrite of scene d's line one, the base text a chained coherence run starts from. Not game text.
+BASE_D1 = "Made-up base rewrite of d one. Not game text."
+
+
+def _base_rewrites_of(parts: Sequence[str]) -> list[dict[str, Any]] | None:
+    """The base rewrites a coherence or arc prompt lists, or None when the prompt has no such part."""
+    found = [part for part in parts if part.startswith("Base lens rewrites (")]
+    return json.loads(found[0].partition("):\n")[2]) if found else None
+
+
+def test_coherence_prompt_lists_the_base_rewrite_of_its_scene_line(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_C, "2", EN_D1, BASE_D1))
+    _base_ledger(tmp_path, [(NS_C, "2", EN_D1, BASE_D1)])
+    _seed_base(tmp_path, {3: EMPTY_BIBLE}, (SCENE_D,))
+    claude = _coherence_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=replace(LENS_OBJ, base=BASE))
+    calls = _coherence_calls(claude)
+    assert calls
+    for parts in calls:
+        assert _base_rewrites_of(parts) == [{"namespace": NS_C, "key": "2", "lens": BASE, "reasons": [BASE_REASON]}]
+
+
+def test_arc_judge_lists_the_base_rewrite_of_its_arc_line(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
+    _seed_base(tmp_path, {1: ARC_BIBLE, 2: EMPTY_BIBLE}, ARC_SCENES)
+    claude = _arc_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=ARC_SCENES, lens=replace(LENS_OBJ, base=BASE))
+    calls = _first_pass_arc_calls(claude)
+    assert calls
+    for parts in calls:
+        assert _base_rewrites_of(parts) == [{"namespace": NS_A, "key": "1", "lens": BASE, "reasons": [BASE_REASON]}]
+
+
+def test_unbased_runs_give_no_stage_coherence_or_arc_prompt_a_base_rewrites_key_or_part(tmp_path: Path) -> None:
+    line_claude = _claude()
+    jev = FakeJev(JEV_HIGH)
+    _run(tmp_path / "lines", line_claude, [], jev=jev)
+    coherence_claude = _coherence_claude()
+    _run(tmp_path / "coherence", coherence_claude, [], jev=None, scenes=(SCENE_D,))
+    arc_claude = _arc_claude()
+    _run(tmp_path / "arcs", arc_claude, [], jev=None, scenes=ARC_SCENES)
+    assert any(schema in LINE_SCHEMAS for _, _, schema in line_claude.calls)
+    assert _coherence_calls(coherence_claude)
+    assert _arc_calls(arc_claude)
+    prompts = _all_prompts(line_claude, jev) + [
+        part for claude in (coherence_claude, arc_claude) for _, parts, _ in claude.calls for part in parts
+    ]
+    assert not any("base_rewrites" in part or part.startswith("Base lens rewrites (") for part in prompts)
+
+
 # Made-up scenes whose lines share one English text, and a made-up table scene for the scene pass. Not game text.
 EN_SHARED = "Made-up shared English. Not game text."
 SHARED_X = Scene("made-up-scene-x", (_line(NS_A, "1", "made-up-speaker-a", EN_SHARED, 1), _line(NS_A, "2", "made-up-speaker-c", EN_A2, 1)))
@@ -2939,6 +3067,7 @@ def _plan_context(tmp_path: Path, bibles: Sequence[Mapping[str, Any]] = (), lens
         redo={},
         vanilla_hashes={},
         base_hashes={},
+        base_rewrites={},
     )
 
 
@@ -4327,6 +4456,7 @@ def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_has
     tmp_path: Path, every_line_queer: None
 ) -> None:
     _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
+    _base_ledger(tmp_path, [(NS_A, "2", EN_A2, BASE_A2)])
     claude = _phase_claude()
     _seed_base(tmp_path, claude.bible, PHASE_SCENES)
     outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=replace(QUEER_LENS, base=BASE))
