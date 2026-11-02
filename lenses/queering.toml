@@ -1,0 +1,95 @@
+# Queering lens. Makes a minor character's romance queer, and splits the party flirt's running gag.
+# Keeps the core cast's sexuality and romances as written, and keeps the sincere threads.
+# Each screen criterion and each intent/judge paragraph starts with its [label].
+
+[[triage]]
+id = "minor-partner"
+question = "A minor character in this scene talks about their own romantic partner, and the pairing reads as a cisgender man and a cisgender woman."
+
+[[triage]]
+id = "minor-attraction"
+question = "A minor character in this scene talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex."
+
+[[triage]]
+id = "flirt-at-woman"
+question = "The party member whose running gag is flirting aims a running-gag flirt in this scene only at a woman or at women."
+
+[screen]
+criteria = [
+    "[minor-partner] Flag minor-partner when a minor character talks about their own romantic partner, and the pairing reads as a cisgender man and a cisgender woman. Flag only the minor character's own lines.",
+    "[minor-attraction] Flag minor-attraction when a minor character talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex. Flag only the minor character's own lines.",
+    "[not-core-cast] Never flag a core-cast line. The core cast is the recurring party members, not a minor character.",
+    "[already-queer] Do not flag a line whose pairing is already same-sex. This also covers a speaker, partner or crush who is already trans or nonbinary.",
+]
+
+[intent]
+rule = """
+You rewrite only the lines you are given: a minor character's line the screen marked, in its speaker's queer or trans bucket, or a line in the flirt's redirect half. Change only what the bucket or the flirt rule asks, and keep the story. Keep a line unchanged only for a reason from this keep list: no-hit when the line is not the shape its label names, protection when a protect rule below covers it, or plot when the edit needs a plot change.
+
+[minimal-fix] Change only the words the edit needs. Leave the rest of the line as written. Do not rewrite a whole line when one word or one clause carries the change.
+
+[same-partner] When a speaker has several bucketed lines, they are drafted together. Use the same partner in every line, with one gender, one set of pronouns and the same details.
+
+[queer-bucket] For the queer bucket, swap the gender of the partner or crush so the pairing is same-sex. Keep everything else: the feeling, the bond and the details.
+
+[trans-bucket] For the trans bucket, by default, make the partner a nonbinary partner who uses they/them. Instead, and only where the line naturally allows it, use a light detail that the speaker is trans. Never write a "she's trans" aside.
+
+[flirt-redirect] For a line in the flirt's redirect half, redirect the flirt to a man present in the scene. Which of his running-gag lines are in that half is decided before drafting, by key hash.
+
+[generalize-when-reaction] When the woman's reaction is in the same scene, generalize the address instead, for example to all genders.
+
+[protect-sincere-thread] Never touch the flirt's sincere thread.
+
+[protect-minor-target] Never touch a flirt aimed at a minor or a child-looking character.
+
+[protect-core-cast] Do not change the core cast's sexuality or romances beyond the flirt's split.
+
+[no-gender-joke-or-menace] The queerness is never the joke or the threat. Do not write a line whose humor or menace rests on a character's gender or queerness.
+
+[no-explaining] Do not explain the change in the line, and do not add a tokenistic detail.
+
+[keep-voice] Keep the speaker's voice: their word choice, rhythm and manner.
+
+[no-new-detail] Add no name, object or motive the original line lacks.
+
+[no-contradiction] Keep the rewrite consistent with the speaker's other lines.
+
+[protect-plot] Keep every plot fact: what happens, who does what, and the decisions made. Leave a line alone when fixing it needs a plot change.
+"""
+
+[judge]
+rubric = """
+You judge one rewritten line against its original and the label it was drafted under. Reject the rewrite when it breaks any label below.
+
+[meaning] meaning protects the bond, not the gender. The same partner, feeling and details stay. The partner's or crush's gender, or the flirt's target, changes only as the bucket asks.
+
+[minimal-fix] Reject a rewrite that changes more than its edit needs.
+
+[same-partner] Reject a rewrite that changes the partner's gender, pronouns or details from one of the speaker's lines to another.
+
+[queer-bucket] Reject a rewrite that changes more than the partner's or crush's gender, or that leaves the pairing other than same-sex.
+
+[trans-bucket] Reject a "she's trans" aside. A light detail that the speaker is trans, where the line naturally allows it, is the bucket's edit, not a new or tokenistic detail.
+
+[flirt-redirect] Reject a rewrite that redirects the flirt to anyone but a man present in the scene, unless generalize-when-reaction applies.
+
+[generalize-when-reaction] Reject a rewrite that does not generalize the address when the woman's reaction is in the same scene.
+
+[protect-sincere-thread] Reject a rewrite that touches the flirt's sincere thread.
+
+[protect-minor-target] Reject a rewrite that touches a flirt aimed at a minor or a child-looking character.
+
+[protect-core-cast] Reject a rewrite that changes the core cast's sexuality or romances beyond the flirt's split.
+
+[no-gender-joke-or-menace] Reject a rewrite whose humor or menace rests on the target's or partner's gender or queerness.
+
+[no-explaining] Reject a rewrite that explains the change or adds a tokenistic detail.
+
+[keep-voice] Reject a rewrite that breaks the speaker's voice.
+
+[no-new-detail] Reject a rewrite that adds a name, object or motive the original line lacks.
+
+[no-contradiction] Reject a rewrite that contradicts the speaker's other lines.
+
+[protect-plot] Reject a rewrite that changes a plot fact, or that changes the scene's meaning to fit a label.
+"""
