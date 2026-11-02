@@ -164,11 +164,36 @@ def test_u7_covers_a_plainly_implied_gender_rule(lens: Lens, stage: Stage, label
 
 # The scene pass: the [scene] section, its labels, and the doc page that describes it.
 SCENE_PATTERNS: tuple[str, ...] = ("s1-manhood-performance", "s2-conquest-fixation", "s3-bechdel-fail")
-SCENE_CRITERIA: frozenset[str] = frozenset({*SCENE_PATTERNS, "recurring", "own-stance", "presence-not-hit", "plot-actor-exempt"})
-SCENE_PLAN: frozenset[str] = frozenset(
-    {"plan-budget", "required-optional", "line-pass-final", "keep-facts", "no-invented-topic", "named-keep"}
+SCENE_CRITERIA: frozenset[str] = frozenset(
+    {
+        *SCENE_PATTERNS,
+        "recurring",
+        "own-stance",
+        "male-warmth",
+        "presence-not-hit",
+        "trait-density",
+        "conquest-coaching",
+        "minor-flirt",
+        "slapstick-rejection",
+        "scene-not-line",
+        "plot-actor-exempt",
+        "own-goal-exempt",
+    }
 )
-SCENE_RUBRIC: frozenset[str] = frozenset({"reduce-pattern", "keep-flirt-beat", "protections-hold"})
+SCENE_PLAN: frozenset[str] = frozenset(
+    {
+        "plan-budget",
+        "required-optional",
+        "line-pass-final",
+        "keep-facts",
+        "male-warmth",
+        "trait-density",
+        "own-line",
+        "no-invented-topic",
+        "named-keep",
+    }
+)
+SCENE_RUBRIC: frozenset[str] = frozenset({"reduce-pattern", "keep-flirt-beat", "no-wiser-women", "protections-hold"})
 SCENE_LABELS: frozenset[str] = SCENE_CRITERIA | SCENE_PLAN | SCENE_RUBRIC
 # SHA-256 of each existing stage_text at the base commit. The scene pass must not change them.
 PINNED_SHA256: dict[Stage, str] = {
@@ -244,6 +269,40 @@ def test_named_keep_names_every_keep_reason(scene: SceneSection, reason: str) ->
 def test_protections_hold_names_each_protection_unbracketed(scene: SceneSection, protection: str) -> None:
     text = scene_paragraph(scene.rubric, "protections-hold")
     assert re.search(rf"(?<![\[\w-]){re.escape(protection)}(?![\]\w-])", text)
+
+
+def scene_part(scene: SceneSection, part: str) -> str:
+    return {"criteria": "\n\n".join(scene.criteria), "plan": scene.plan, "rubric": scene.rubric}[part]
+
+
+# The DL64 wording, pinned by the phrase each paragraph must carry.
+SCENE_PHRASES: tuple[tuple[str, str, str], ...] = (
+    ("criteria", "s1-manhood-performance", "real men"),
+    ("criteria", "s1-manhood-performance", "be a man"),
+    ("criteria", "male-warmth", "friendship"),
+    ("criteria", "presence-not-hit", "conquest-coaching"),
+    ("criteria", "presence-not-hit", "minor-flirt"),
+    ("criteria", "presence-not-hit", "slapstick-rejection"),
+    ("criteria", "trait-density", "density"),
+    ("criteria", "conquest-coaching", "coach"),
+    ("criteria", "minor-flirt", "hit"),
+    ("criteria", "minor-flirt", "even when not recurring"),
+    ("criteria", "slapstick-rejection", "slapstick"),
+    ("criteria", "scene-not-line", "single line"),
+    ("criteria", "s3-bechdel-fail", "mainly"),
+    ("criteria", "own-goal-exempt", "Mako Mori"),
+    ("plan", "male-warmth", "warmth"),
+    ("plan", "trait-density", "density"),
+    ("plan", "own-line", "line of her own"),
+    ("plan", "no-invented-topic", "Every fix"),
+    ("rubric", "keep-flirt-beat", "flirt beat"),
+    ("rubric", "no-wiser-women", "Women Are Wiser"),
+)
+
+
+@pytest.mark.parametrize(("part", "label", "phrase"), SCENE_PHRASES)
+def test_scene_paragraph_carries_its_dl64_phrase(scene: SceneSection, part: str, label: str, phrase: str) -> None:
+    assert phrase in scene_paragraph(scene_part(scene, part), label)
 
 
 def test_doc_has_a_scene_pass_section() -> None:
