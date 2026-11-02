@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from ffrd.find import BARE_KEY, toml_string
 from ffrd.game import Fail, natural, repo_root, vanilla_hash
-from ffrd.pipeline import arcs, bible, claude, coherence, scene_pass, stages
+from ffrd.pipeline import arcs, bible, claude, coherence, queering, scene_pass, stages
 from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
@@ -52,6 +52,7 @@ class Outcome:
     keep_reason: str | None = None
     plan: str | None = None
     redo: bool = False
+    bucket: queering.Selection | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,8 @@ def _outcome_line(o: Outcome) -> str:
         "plan": o.plan,
         "redo": o.redo,
     }
+    if o.bucket is not None:
+        record["bucket"] = o.bucket
     return json.dumps(record, ensure_ascii=False) + "\n"
 
 
@@ -180,6 +183,15 @@ def write_dialog(directory: Path, changes: Sequence[Change]) -> None:
 
 
 @dataclass(frozen=True)
+class _Marking:
+    """The queering cast of a run, read from the whole game: the core cast and antagonists that stay vanilla, and the flirt."""
+
+    core: frozenset[str]
+    antagonists: frozenset[str]
+    flirt: str | None
+
+
+@dataclass(frozen=True)
 class _Context:
     lens: Lens
     store: Store
@@ -194,6 +206,7 @@ class _Context:
     redo: Mapping[tuple[str, str], str]
     vanilla_hashes: Mapping[tuple[str, str], str]
     base_hashes: Mapping[tuple[str, str], str]
+    marking: _Marking | None = None
 
 
 @dataclass
@@ -763,7 +776,39 @@ def _from_table(ctx: _Context, scene: Scene) -> bool:
     return all((line.namespace, line.key) in ctx.table_lines for line in scene.lines)
 
 
+def _marking(bibles: Sequence[Mapping[str, Any]], scenes: Sequence[Scene]) -> _Marking:
+    """The queering cast from the whole game: each speaker's distinct in-scope lines, the bible's antagonists and its flirt."""
+    counts = Counter(line.speaker for line in _first_lines(scenes).values() if line.speaker is not None)
+    return _Marking(queering.core_cast(bibles, counts), queering.antagonists(bibles), queering.flirt(bibles))
+
+
+def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
+    """Phase 1 of queering: one Haiku screen over the scene's markable lines. Each marked line is recorded untouched with its reasons and its bucket, and every other line untouched. A scene with no markable line makes no call."""
+    eligible = {
+        (line.namespace, line.key)
+        for line in scene.lines
+        if queering.markable(line.speaker, marking.core, marking.antagonists, marking.flirt)
+    }
+    if not eligible:
+        return _every_line(scene, "untouched"), [], _Recall(), _PassRecord()
+    cast = arcs.cast(ctx.bibles, _speakers(scene))
+    marked = stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=claude.HAIKU, eligible=eligible)
+    if not isinstance(marked, dict):
+        return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
+    outcomes: list[Outcome] = []
+    for line in scene.lines:
+        reasons = marked.get((line.namespace, line.key))
+        if reasons is None:
+            outcomes.append(_outcome(line, (), "untouched"))
+            continue
+        bucket = queering.select(line.namespace, line.key, line.speaker, marking.core, marking.antagonists, marking.flirt)
+        outcomes.append(replace(_outcome(line, reasons, "untouched"), bucket=bucket))
+    return outcomes, [], _Recall(), _PassRecord()
+
+
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
+    if ctx.marking is not None:
+        return _marked(ctx, scene, ctx.marking, ask)
     cast = arcs.cast(ctx.bibles, _speakers(scene))
 
     def screen() -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
@@ -985,11 +1030,11 @@ def run(
     scenes = _chained(scenes, base_texts)
     scenes = scoped(scenes, scene_table=scene_table)
     redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
-    if through is not None:
-        scenes = _limited(scenes, through)
-    scenes = sorted(scenes, key=_chapter_order)
+    in_scope = sorted(scenes, key=_chapter_order)
+    scenes = in_scope if through is None else _limited(in_scope, through)
+    selecting = lens.selection == "queering"
     bible_ask = batch()
-    built = bible.build(store, _chapters(scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema))
+    built = bible.build(store, _chapters(in_scope if selecting else scenes), lambda parts, schema: bible_ask(claude.OPUS, parts, schema))
     if not isinstance(built, list):
         out(f"bible: unfinished ({built.detail})")
         raise Fail("story bible unfinished; rerun ffrd run")
@@ -1007,6 +1052,7 @@ def run(
         redo=redo,
         vanilla_hashes=vanilla_hashes,
         base_hashes={ref: vanilla_hash(text) for ref, text in base_texts.items()},
+        marking=_marking(built, in_scope) if selecting else None,
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
@@ -1037,7 +1083,8 @@ def run(
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
     outcomes, changes = _unified(ctx, outcomes, changes)
-    outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
+    if not selecting:
+        outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
