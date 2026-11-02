@@ -15,6 +15,7 @@ from ffrd.pipeline import accounts
 
 OPUS = "opus"
 SONNET = "sonnet"
+HAIKU = "haiku"
 SYSTEM_PROMPT = "You follow the instructions in the user message and answer only through the structured output."
 DEFAULT_CONCURRENCY = 8
 
