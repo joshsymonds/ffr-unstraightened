@@ -191,9 +191,20 @@ SCENE_PLAN: frozenset[str] = frozenset(
         "own-line",
         "no-invented-topic",
         "named-keep",
+        "carries-pattern",
     }
 )
-SCENE_RUBRIC: frozenset[str] = frozenset({"reduce-pattern", "keep-flirt-beat", "no-wiser-women", "protections-hold"})
+SCENE_RUBRIC: frozenset[str] = frozenset(
+    {
+        "reduce-pattern",
+        "keep-flirt-beat",
+        "no-wiser-women",
+        "protections-hold",
+        "carries-pattern",
+        "no-added-content",
+        "grammatical",
+    }
+)
 SCENE_LABELS: frozenset[str] = SCENE_CRITERIA | SCENE_PLAN | SCENE_RUBRIC
 # SHA-256 of each existing stage_text at the base commit. The scene pass must not change them.
 PINNED_SHA256: dict[Stage, str] = {
@@ -372,3 +383,36 @@ DL76_DOC_SENTENCE = (
 def test_doc_named_keep_bullet_carries_the_dl76_sentence() -> None:
     (bullet,) = re.findall(r"^- `named-keep`:.*(?:\n  .*)*", DOC.read_text(encoding="utf-8"), re.M)
     assert DL76_DOC_SENTENCE in " ".join(bullet.split())
+
+
+# The carrier rule: a planned or rewritten line must itself carry the flagged pattern.
+CARRIER_PHRASES: tuple[tuple[str, str, str], ...] = (
+    ("plan", "carries-pattern", "Never plan a line that does not itself carry the flagged pattern"),
+    ("plan", "carries-pattern", "Do not fill the budget"),
+    ("plan", "carries-pattern", "carrier quote from the line"),
+    ("rubric", "carries-pattern", "Reject a rewrite of a line that does not itself carry the flagged pattern"),
+    ("rubric", "no-added-content", "Reject a rewrite that adds content the scene does not offer"),
+    ("rubric", "grammatical", "Reject a rewrite that leaves a line ungrammatical"),
+)
+
+
+@pytest.mark.parametrize(("part", "label", "phrase"), CARRIER_PHRASES)
+def test_carrier_paragraph_carries_its_phrase(scene: SceneSection, part: str, label: str, phrase: str) -> None:
+    assert phrase in scene_paragraph(scene_part(scene, part), label)
+
+
+CARRIER_DOC_SENTENCE = (
+    "never plan a line that does not itself carry the flagged pattern. Do not fill the budget with lines that only sit near the pattern."
+)
+
+
+def test_doc_carries_pattern_bullet_carries_the_carrier_sentence() -> None:
+    plan_rules = DOC.read_text(encoding="utf-8").split("### Plan rules", 1)[1].split("### Rubric", 1)[0]
+    (bullet,) = re.findall(r"^- `carries-pattern`:.*(?:\n  .*)*", plan_rules, re.M)
+    assert CARRIER_DOC_SENTENCE in " ".join(bullet.split())
+
+
+def test_doc_names_opus_as_the_screen_model() -> None:
+    doc = DOC.read_text(encoding="utf-8")
+    assert "The screen is Opus." in doc
+    assert "The screen is Sonnet" not in doc

@@ -174,6 +174,8 @@ criteria = [
 plan = """
 [plan-budget] Plan at most 4 changed lines per conversation. Count each line you plan to change, across the whole conversation, and stop planning once 4 lines are planned. A plan with 5 or more changed lines is out of budget and fails.
 
+[carries-pattern] Never plan a line that does not itself carry the flagged pattern. Do not fill the budget with lines that only sit near the pattern. For each planned line, give its carrier quote from the line: the words in that line that carry the flagged pattern. A line with no carrier quote is not planned.
+
 [required-optional] Mark each planned line required or optional. A required line is one the flagged pattern cannot be reduced without. An optional line would reduce the pattern further but is not needed to reduce it. Plan every required line first, and spend any budget left over on optional lines.
 
 [line-pass-final] Never plan a line that the line pass changed or kept, for any reason. The line pass has decided those lines, and they stay as the line pass left them. Plan only from lines the line pass did not change or keep.
@@ -198,6 +200,12 @@ rubric = """
 [no-wiser-women] Reject a plan that fills removed banter by turning the women into eye-rolling straight men for the men, the unbothered foils who sit out the men's jokes. This is the Women Are Wiser double standard: the women are made the sensible ones while the men keep the jokes. Reject that move whatever pattern the plan reduces.
 
 [protections-hold] Every line-pass protection and exclusion still holds under the plan. Check protect-love-and-couples, protect-mutual-support, protect-plot, protect-traits, protect-operatic-stakes, protect-earned-declarations, protect-affectionate-teasing, exclude-queer-additions and exclude-clumsy-lines. Reject a plan that breaks any one of them, whatever pattern it reduces.
+
+[carries-pattern] Reject a rewrite of a line that does not itself carry the flagged pattern. Only a line that carries the pattern may be rewritten.
+
+[no-added-content] Reject a rewrite that adds content the scene does not offer. The rewrite draws only on what the scene already holds.
+
+[grammatical] Reject a rewrite that leaves a line ungrammatical. Each rewritten line must read as a grammatical sentence.
 """
 
 [[scene.patterns]]
