@@ -19,8 +19,8 @@ SCENE = "Made-up gate line with a non-chapter segment. Not game text."
 NO_PROGRESS = "no progress recorded; run `ffrd progress <chapter>`"
 
 
-def toml_entry(namespace: str, key: str, vanilla: str, text: str) -> str:
-    return f'["{namespace}".{key}]\nvanilla = "{vanilla}"\ntext = "{text}"\n\n'
+def toml_entry(namespace: str, key: str, vanilla: str, text: str, base_line: str = "") -> str:
+    return f'["{namespace}".{key}]\nvanilla = "{vanilla}"\ntext = "{text}"\n{base_line}\n'
 
 
 def main_toml() -> str:
@@ -46,10 +46,55 @@ def _run(lens: str) -> None:
     args.fn(args)
 
 
-def _write_lens(repo: Path, name: str, body: str) -> None:
-    path = repo / "dialog" / "demo" / name
+def _write_lens(repo: Path, name: str, body: str, lens: str = "demo") -> None:
+    path = repo / "dialog" / lens / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
+
+
+# Made-up example lens from lenses/README.md. Not game text.
+LENS_TOML = """# Made-up example lens. Not game text.
+
+[[triage]]
+id = "made-up-first-id"
+question = "Made-up question one. Does the line mention a made-up thing?"
+
+[[triage]]
+id = "made-up-second-id"
+question = "Made-up question two. Is the line a made-up greeting?"
+
+[screen]
+criteria = ["Made-up criterion one.", "Made-up criterion two."]
+
+[intent]
+rule = "Made-up intent rule."
+
+[judge]
+rubric = "Made-up judge rubric."
+
+[scene]
+criteria = ["Made-up scene criterion one.", "Made-up scene criterion two."]
+plan = "Made-up scene plan."
+rubric = "Made-up scene rubric."
+
+[[scene.patterns]]
+id = "made-up-scene-first-pattern"
+question = "Made-up scene question one. Does the scene show a made-up pattern?"
+
+[[scene.patterns]]
+id = "made-up-scene-second-pattern"
+question = "Made-up scene question two. Does the scene repeat a made-up pattern?"
+"""
+
+BASE_LENS = "made-up-base"
+BASE = "Made-up base rewrite chapter one. Not game text."
+BASE_ONLY = "Made-up base-only sub-event line chapter two. Not game text."
+
+
+def _write_lens_file(repo: Path, base_line: str) -> None:
+    path = repo / "lenses" / "demo.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{base_line}\n{LENS_TOML}", encoding="utf-8")
 
 
 @pytest.fixture
@@ -221,6 +266,121 @@ def test_shown_entry_errors_name_the_file_and_key(body: str, expected: str, repo
         _run("demo")
     assert str(exc.value) == expected
     assert "Made-up echo line" not in str(exc.value)
+
+
+GOOD_BASE = f'base = "{vanilla_hash(BASE)}"\n'
+BAD_BASE = f'base = "{"0" * 16}"\n'
+
+
+def test_chained_lens_shows_each_record_beside_its_vanilla_line(
+    repo: Path, progress: Callable[[int], None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(
+        repo,
+        "rewrites.toml",
+        toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), "Made-up rewrite chapter one. Not game text.", GOOD_BASE)
+        + toml_entry("ST_C02_001_01", "1", vanilla_hash(C02), "Made-up rewrite chapter two. Not game text."),
+    )
+    _write_lens(
+        repo,
+        "base.toml",
+        toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), BASE) + toml_entry("ST_SubEv_004_C2_01", "1", vanilla_hash(SUB_C2), BASE_ONLY),
+        lens=BASE_LENS,
+    )
+    _run("demo")
+    out, err = capsys.readouterr()
+    assert out == (
+        '["ST_C01_001_01".1]\n'
+        '- "Made-up gate line chapter one. Not game text."\n'
+        '+ "Made-up rewrite chapter one. Not game text."\n'
+        "\n"
+        '["ST_C02_001_01".1]\n'
+        '- "Made-up gate line chapter two. Not game text."\n'
+        '+ "Made-up rewrite chapter two. Not game text."\n'
+        "\n"
+    )
+    assert BASE not in out
+    assert BASE_ONLY not in out
+    assert err == "# 2 shown, 0 withheld, 0 without a chapter\n"
+
+
+@pytest.mark.parametrize("base_line", ["", BAD_BASE], ids=["base-missing", "base-differs"])
+def test_base_hash_mismatch_fails_naming_the_file_and_key(base_line: str, repo: Path, progress: Callable[[int], None]) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(
+        repo, "rewrites.toml", toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), "Made-up rewrite chapter one. Not game text.", base_line)
+    )
+    _write_lens(repo, "base.toml", toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), BASE), lens=BASE_LENS)
+    with pytest.raises(Fail) as exc:
+        _run("demo")
+    assert str(exc.value) == f"dialog/demo/rewrites.toml: ST_C01_001_01,1 does not match its base in dialog/{BASE_LENS}/"
+    assert BASE not in str(exc.value)
+
+
+def test_base_declared_but_not_edited_fails_naming_the_file_and_key(repo: Path, progress: Callable[[int], None]) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(
+        repo, "rewrites.toml", toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), "Made-up rewrite chapter one. Not game text.", GOOD_BASE)
+    )
+    _write_lens(repo, "base.toml", toml_entry("ST_C02_001_01", "1", vanilla_hash(C02), BASE), lens=BASE_LENS)
+    with pytest.raises(Fail) as exc:
+        _run("demo")
+    assert str(exc.value) == f"dialog/demo/rewrites.toml: ST_C01_001_01,1 has a base but dialog/{BASE_LENS}/ does not edit it"
+
+
+def test_non_string_base_fails_naming_the_file_and_key(repo: Path, progress: Callable[[int], None]) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(
+        repo,
+        "rewrites.toml",
+        toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), "Made-up rewrite chapter one. Not game text.", "base = 7\n"),
+    )
+    _write_lens(repo, "base.toml", toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), BASE), lens=BASE_LENS)
+    with pytest.raises(Fail) as exc:
+        _run("demo")
+    assert str(exc.value) == 'dialog/demo/rewrites.toml: ST_C01_001_01,1 needs a string "base"'
+
+
+def test_missing_base_directory_fails(repo: Path, progress: Callable[[int], None]) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(repo, "rewrites.toml", main_toml())
+    with pytest.raises(Fail) as exc:
+        _run("demo")
+    assert str(exc.value) == f"no dialog/{BASE_LENS}/ directory"
+
+
+def test_base_structural_errors_name_the_base_file(repo: Path, progress: Callable[[int], None]) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(repo, "rewrites.toml", toml_entry("ST_C01_001_01", "1", vanilla_hash(C01), "Made-up rewrite chapter one. Not game text."))
+    _write_lens(repo, "base.toml", '["ST_C01_001_01"]\n1 = "Made-up echo line. Not game text."\n', lens=BASE_LENS)
+    with pytest.raises(Fail) as exc:
+        _run("demo")
+    assert str(exc.value) == f"dialog/{BASE_LENS}/base.toml: ST_C01_001_01,1 must be a table with vanilla and text"
+    assert "Made-up echo line" not in str(exc.value)
+
+
+def test_withheld_records_are_not_checked_against_the_base(
+    repo: Path, progress: Callable[[int], None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    progress(2)
+    _write_lens_file(repo, f'base = "{BASE_LENS}"')
+    _write_lens(
+        repo,
+        "rewrites.toml",
+        toml_entry("ST_C03_001_01", "1", vanilla_hash(C03), "Made-up later rewrite chapter three. Not game text.", BAD_BASE),
+    )
+    _write_lens(repo, "base.toml", toml_entry("ST_C03_001_01", "1", vanilla_hash(C03), BASE), lens=BASE_LENS)
+    _run("demo")
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == "# 0 shown, 1 withheld, 0 without a chapter\n"
 
 
 def test_lens_is_required_and_has_help(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
