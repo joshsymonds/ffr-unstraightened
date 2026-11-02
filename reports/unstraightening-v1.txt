@@ -27,7 +27,7 @@ chapter 6: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 860 untouche
   kept earned: 1
   kept no-invented-motive: 5
   kept own-wish: 2
-chapter 7: 0 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 530 untouched
+chapter 7: 0 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 529 untouched
   kept no-hit: 10
   kept earned: 2
   kept plot: 1
@@ -38,7 +38,7 @@ chapter 8: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 935 untouche
   kept gender-rule-narrow: 2
   kept protection: 1
 chapter 9: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 269 untouched
-unattributed: 5 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 7385 untouched
+unattributed: 5 changed, 2 kept for plot, 4 gate failed, 0 unfinished, 7383 untouched
   reason u1-presumed-opposite-sex: 3
   reason u7-gender-rule: 2
   kept no-hit: 14
@@ -52,7 +52,7 @@ unattributed: 5 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 7385 unto
   character 92: 1
   character 194: 2
   gate classifier: 4
-total: 8 changed, 0 kept for plot, 6 gate failed, 0 unfinished, 15956 untouched
+total: 8 changed, 3 kept for plot, 6 gate failed, 0 unfinished, 15953 untouched
   reason u1-presumed-opposite-sex: 4
   reason u7-gender-rule: 4
   kept no-hit: 43
