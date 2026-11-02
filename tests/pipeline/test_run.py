@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import fcntl
 import json
 import re
 import subprocess
@@ -1931,6 +1933,58 @@ def test_run_command_with_no_jev_never_calls_jev_and_writes_zero_recall(
     _assert_printed(capsys.readouterr().out.splitlines())
     assert (lens_repo / "work" / LENS / report.OUTCOMES).is_file()
     assert json.loads((lens_repo / "work" / LENS / report.RECALL).read_text(encoding="utf-8")) == NO_RECALL
+
+
+# Made-up second lens for run-lock tests. Not game text.
+OTHER_LENS = "made-up-other-lens"
+
+
+@contextlib.contextmanager
+def _held(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def test_run_command_refuses_a_lens_whose_run_lock_is_held_before_any_model_call(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    _bind(monkeypatch, claude, FakeJev(JEV_HIGH))
+    args = _parse(["run", "--lens", LENS])
+
+    with _held(lens_repo / "work" / LENS / ".run.lock"), pytest.raises(Fail) as raised:
+        args.fn(args)
+
+    assert str(raised.value) == f"another ffrd run holds work/{LENS}/; stop it first"
+    assert claude.calls == []
+    assert claude.batches == 0
+
+
+def test_run_command_ignores_a_run_lock_held_on_another_lens(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    claude = _claude()
+    _bind(monkeypatch, claude, FakeJev(JEV_HIGH))
+    args = _parse(["run", "--lens", LENS])
+
+    with _held(lens_repo / "work" / OTHER_LENS / ".run.lock"):
+        args.fn(args)
+
+    _assert_printed(capsys.readouterr().out.splitlines())
+    assert (lens_repo / "work" / LENS / report.OUTCOMES).is_file()
+
+
+def test_run_command_releases_the_run_lock_when_the_run_raises(lens_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude = _claude()
+    claude.bible[1] = Unfinished("Made-up bible failure. Not game text.")
+    _bind(monkeypatch, claude, FakeJev(JEV_HIGH))
+    args = _parse(["run", "--lens", LENS])
+
+    with pytest.raises(Fail, match="story bible unfinished; rerun ffrd run"):
+        args.fn(args)
+
+    with (lens_repo / "work" / LENS / ".run.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 # Made-up story line outside the fallback allowlist. Not game text.
