@@ -1,0 +1,77 @@
+chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1778 untouched
+  reason u1-presumed-opposite-sex: 1
+  kept no-hit: 3
+  kept protection: 1
+  character 92: 1
+chapter 2: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 727 untouched
+chapter 3: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1214 untouched
+  kept no-hit: 5
+  kept earned: 6
+  kept protection: 1
+chapter 4: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1096 untouched
+  reason u7-gender-rule: 1
+  kept no-hit: 4
+  kept own-wish: 1
+  character 50: 1
+chapter 5: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1162 untouched
+  reason u7-gender-rule: 1
+  kept no-hit: 3
+  kept earned: 1
+  kept no-invented-motive: 1
+  kept own-wish: 2
+  kept protection: 1
+  character 50: 1
+  gate classifier: 1
+chapter 6: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 860 untouched
+  kept no-hit: 4
+  kept earned: 1
+  kept no-invented-motive: 5
+  kept own-wish: 2
+chapter 7: 0 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 530 untouched
+  kept no-hit: 10
+  kept earned: 2
+  kept plot: 1
+  gate classifier: 1
+chapter 8: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 935 untouched
+  kept earned: 12
+  kept no-invented-motive: 2
+  kept gender-rule-narrow: 2
+  kept protection: 1
+chapter 9: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 269 untouched
+unattributed: 5 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 7385 untouched
+  reason u1-presumed-opposite-sex: 3
+  reason u7-gender-rule: 2
+  kept no-hit: 14
+  kept earned: 5
+  kept no-invented-motive: 6
+  kept own-wish: 4
+  kept protection: 3
+  kept plot: 2
+  character 9: 1
+  character 50: 1
+  character 92: 1
+  character 194: 2
+  gate classifier: 4
+total: 8 changed, 0 kept for plot, 6 gate failed, 0 unfinished, 15956 untouched
+  reason u1-presumed-opposite-sex: 4
+  reason u7-gender-rule: 4
+  kept no-hit: 43
+  kept earned: 27
+  kept no-invented-motive: 14
+  kept gender-rule-narrow: 2
+  kept own-wish: 9
+  kept protection: 7
+  kept plot: 3
+  character 9: 1
+  character 50: 3
+  character 92: 2
+  character 194: 2
+  gate classifier: 6
+arcs: 169, 129 with changes
+recall u1-presumed-opposite-sex: 7 disagreements, 0 confirmed
+recall u2-romance-outranks: 13 disagreements, 7 confirmed
+recall u3-devotion-as-vow: 1 disagreements, 1 confirmed
+recall u4-stake-through-other: 88 disagreements, 9 confirmed
+recall u5-rivalry-over-one-person: 2 disagreements, 0 confirmed
+recall u6-overwrought-declaration: 1 disagreements, 1 confirmed
+recall u7-gender-rule: 481 disagreements, 4 confirmed
