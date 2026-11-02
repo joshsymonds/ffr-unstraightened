@@ -60,7 +60,11 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
         "minor-attraction",
         "Flag minor-attraction when a minor character talks about their own romantic attraction or crush",
     ),
-    ("screen", "not-core-cast", "Never flag a core-cast line."),
+    ("screen", "not-core-cast", "Never flag a core-cast line, with one exception"),
+    ("screen", "not-core-cast", '"flirt": true'),
+    ("screen", "not-core-cast", "Flag the flirt's running-gag flirts aimed only at a woman or women under flirt-at-woman."),
+    ("screen", "not-core-cast", "Never flag the flirt's sincere thread."),
+    ("screen", "not-core-cast", "Never flag a flirt aimed at a minor or a child-looking character."),
     ("screen", "already-queer", "Do not flag a line whose pairing is already same-sex"),
     ("screen", "already-queer", "a speaker, partner or crush who is already trans or nonbinary"),
     ("intent", "minimal-fix", "Change only the words the edit needs"),
@@ -131,12 +135,12 @@ DOC_SENTENCES: tuple[str, ...] = (
     'The trans bucket never adds a "she\'s trans" aside.',
     "The core cast's sexuality and romances stay as written, except the flirt's split.",
     "The lens chains onto the unstraightening rewrites: it starts from their output in `dialog/unstraightening/`, and the build applies the lenses in order.",
-    "The lens runs under the queering selection: a Haiku marker, per-speaker buckets, one draft call per speaker, and no Jev.",
+    "The lens runs under the queering selection: an Opus marker, per-speaker buckets, one draft call per speaker, and no Jev.",
 )
 HOW_IT_IS_CHECKED: tuple[str, ...] = (
     "used only for counts",
     "no Jev recheck",
-    "reads only minor characters' lines",
+    "reads minor characters' lines and the flirt's",
 )
 
 
