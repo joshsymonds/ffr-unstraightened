@@ -1098,3 +1098,172 @@ def test_scene_character_numbers_are_the_outcome_numbers() -> None:
     assert "  character 1: 1" in lines
     assert "  scene character 2: 1" in lines
     assert not any(line.startswith("  scene character 1:") for line in lines)
+
+
+# Made-up usage run ids. Not game text. Ids sort as text, so run-9 is the latest although run-10 is numerically greater.
+RUN_LATEST = "made-up-run-9"
+RUN_EARLIER = "made-up-run-10"
+STAGE_A = "made-up-stage-a"
+STAGE_B = "made-up-stage-b"
+MODEL_X = "made-up-model-x"
+MODEL_Y = "made-up-model-y"
+
+
+def _usage_line(**fields: object) -> dict[str, object]:
+    # Made-up usage entry. Not game text.
+    entry: dict[str, object] = {
+        "run": RUN_LATEST,
+        "stage": STAGE_A,
+        "model": MODEL_X,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "duration_ms": 0,
+        "cost_usd": 0.0,
+    }
+    entry.update(fields)
+    return entry
+
+
+def _usage_without(field: str) -> bytes:
+    return _bytes({k: v for k, v in _usage_line().items() if k != field})
+
+
+def _write_usage(repo: Path, content: bytes) -> Path:
+    path = repo / "work" / LENS / "usage.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path.resolve()
+
+
+USAGE = (
+    _usage_line(
+        run=RUN_EARLIER,
+        stage=STAGE_A,
+        model=MODEL_X,
+        input_tokens=999,
+        output_tokens=999,
+        cache_read_tokens=999,
+        cache_creation_tokens=999,
+        duration_ms=999,
+        cost_usd=99.0,
+    ),
+    _usage_line(
+        run=RUN_LATEST,
+        stage=STAGE_B,
+        model=MODEL_Y,
+        input_tokens=10,
+        output_tokens=5,
+        cache_read_tokens=2,
+        cache_creation_tokens=1,
+        duration_ms=100,
+        cost_usd=1.5,
+    ),
+    _usage_line(
+        run=RUN_LATEST,
+        stage=STAGE_A,
+        model=MODEL_X,
+        input_tokens=7,
+        output_tokens=3,
+        cache_read_tokens=0,
+        cache_creation_tokens=4,
+        duration_ms=50,
+        cost_usd=0.25,
+    ),
+    _usage_line(
+        run=RUN_LATEST,
+        stage=STAGE_A,
+        model=MODEL_X,
+        input_tokens=1,
+        output_tokens=2,
+        cache_read_tokens=3,
+        cache_creation_tokens=0,
+        duration_ms=5,
+        cost_usd=0.5,
+    ),
+    _usage_line(
+        run=RUN_EARLIER,
+        stage=STAGE_B,
+        model=MODEL_Y,
+        input_tokens=999,
+        output_tokens=999,
+        cache_read_tokens=999,
+        cache_creation_tokens=999,
+        duration_ms=999,
+        cost_usd=99.0,
+    ),
+)
+
+# Sums for the latest run only. Not game text.
+EXPECTED_USAGE = (
+    f"usage run {RUN_LATEST}\n"
+    f"usage {STAGE_A} {MODEL_X}: 2 calls, 8 input, 5 output, 3 cache read, 4 cache write, $0.75\n"
+    f"usage {STAGE_B} {MODEL_Y}: 1 calls, 10 input, 5 output, 2 cache read, 1 cache write, $1.50\n"
+    "usage total: 3 calls, 18 input, 10 output, 5 cache read, 5 cache write, $2.25\n"
+)
+
+
+def test_usage_block_after_recall_prints_latest_run_only_with_sums_per_stage_and_model(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _write_usage(repo, _lines(*USAGE))
+    _invoke()
+    assert capsys.readouterr().out == EXPECTED_MULTI + EXPECTED_USAGE
+
+
+@pytest.mark.parametrize("usage", [pytest.param(None, id="no-file"), pytest.param(b"", id="no-entry")])
+def test_no_usage_file_or_entry_prints_the_same_output_as_before(
+    repo: Path, capsys: pytest.CaptureFixture[str], usage: bytes | None
+) -> None:
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    _write_recall(repo)
+    if usage is not None:
+        _write_usage(repo, usage)
+    _invoke()
+    assert capsys.readouterr().out == EXPECTED_MULTI
+
+
+BAD_USAGE = [
+    pytest.param(b"SENTINEL-NOT-JSON {\n", "is not valid JSON", id="not-json"),
+    pytest.param(b'["SENTINEL-ARRAY"]\n', "is not a JSON object", id="not-object"),
+    pytest.param(b'"\xff"\n', "is not valid UTF-8", id="not-utf8"),
+    pytest.param(_usage_without("run"), "field run is missing", id="run-missing"),
+    pytest.param(_usage_without("cost_usd"), "field cost_usd is missing", id="cost-missing"),
+    pytest.param(_bytes(_usage_line(stage=3)), "field stage must be a string", id="stage-number"),
+    pytest.param(_bytes(_usage_line(model=None)), "field model must be a string", id="model-null"),
+    pytest.param(_bytes(_usage_line(input_tokens=-1)), "field input_tokens must be a non-negative integer", id="input-negative"),
+    pytest.param(_bytes(_usage_line(output_tokens=1.5)), "field output_tokens must be a non-negative integer", id="output-float"),
+    pytest.param(
+        _bytes(_usage_line(cache_read_tokens=True)), "field cache_read_tokens must be a non-negative integer", id="cache-read-bool"
+    ),
+    pytest.param(
+        _bytes(_usage_line(cache_creation_tokens="SENTINEL-TOKENS")),
+        "field cache_creation_tokens must be a non-negative integer",
+        id="cache-write-string",
+    ),
+    pytest.param(_bytes(_usage_line(duration_ms=-5)), "field duration_ms must be a non-negative integer", id="duration-negative"),
+    pytest.param(_bytes(_usage_line(cost_usd="SENTINEL-COST")), "field cost_usd must be a non-negative number", id="cost-string"),
+    pytest.param(_bytes(_usage_line(cost_usd=True)), "field cost_usd must be a non-negative number", id="cost-bool"),
+    pytest.param(_bytes(_usage_line(cost_usd=-0.5)), "field cost_usd must be a non-negative number", id="cost-negative"),
+    pytest.param(_bytes(_usage_line(cost_usd=float("nan"))), "field cost_usd must be a non-negative number", id="cost-nan"),
+]
+
+
+@pytest.mark.parametrize(("bad", "fragment"), BAD_USAGE)
+def test_invalid_usage_line_fails_naming_file_line_and_field_but_not_the_value(repo: Path, bad: bytes, fragment: str) -> None:
+    # Line 1 is valid, so the bad line is line 2.
+    path = _write_usage(repo, _lines(_usage_line()) + bad)
+    _write(repo, _lines(*MULTI))
+    _write_arcs(repo)
+    _write_recall(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert f"{path}:2" in message
+    assert fragment in message
+    assert "SENTINEL" not in message
