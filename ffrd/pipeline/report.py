@@ -2,9 +2,10 @@
 
 import argparse
 import json
+import math
 import re
 import statistics
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from ffrd.pipeline.store import work_dir
 OUTCOMES = "outcomes.jsonl"
 ARCS = "arcs.json"
 RECALL = "recall.json"
+USAGE = "usage.jsonl"
 RECALL_FIELDS = frozenset({"disagreements", "confirmed"})
 OUTCOME_LABELS = {
     "changed": "changed",
@@ -204,6 +206,70 @@ def _count(obj: dict[str, object], name: str, where: str) -> int:
     return value
 
 
+@dataclass(frozen=True)
+class Usage:
+    run: str
+    stage: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    cost_usd: float
+
+
+def _cost(obj: dict[str, object], where: str) -> float:
+    value = _require(obj, "cost_usd", where)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise Fail(f"{where}: field cost_usd must be a non-negative number")
+    return float(value)
+
+
+def _usage_entry(text: str, where: str) -> Usage:
+    try:
+        obj = json.loads(text)
+    except ValueError as e:
+        raise Fail(f"{where}: is not valid JSON") from e
+    if not isinstance(obj, dict):
+        raise Fail(f"{where}: is not a JSON object")
+    _text(obj, "run", where)
+    _text(obj, "stage", where)
+    _text(obj, "model", where)
+    _count(obj, "duration_ms", where)
+    return Usage(
+        run=obj["run"],
+        stage=obj["stage"],
+        model=obj["model"],
+        input_tokens=_count(obj, "input_tokens", where),
+        output_tokens=_count(obj, "output_tokens", where),
+        cache_read_tokens=_count(obj, "cache_read_tokens", where),
+        cache_creation_tokens=_count(obj, "cache_creation_tokens", where),
+        cost_usd=_cost(obj, where),
+    )
+
+
+def _usage(path: Path) -> list[Usage]:
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise Fail(f"cannot read usage {path}: {e.strerror}") from e
+    entries: list[Usage] = []
+    with handle:
+        try:
+            for lineno, raw in enumerate(handle, 1):
+                where = f"{path}:{lineno}"
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    raise Fail(f"{where}: is not valid UTF-8") from e
+                entries.append(_usage_entry(text, where))
+        except OSError as e:
+            raise Fail(f"cannot read usage {path}: {e.strerror}") from e
+    return entries
+
+
 def _arcs(path: Path) -> tuple[int, int]:
     try:
         raw = path.read_bytes()
@@ -385,6 +451,28 @@ def _queering_lines(records: list[Record]) -> list[str]:
     return lines
 
 
+def _usage_totals(entries: list[Usage]) -> str:
+    return (
+        f"{len(entries)} calls, {sum(e.input_tokens for e in entries)} input, {sum(e.output_tokens for e in entries)} output, "
+        f"{sum(e.cache_read_tokens for e in entries)} cache read, {sum(e.cache_creation_tokens for e in entries)} cache write, "
+        f"${sum(e.cost_usd for e in entries):.2f}"
+    )
+
+
+def _usage_lines(entries: list[Usage]) -> list[str]:
+    if not entries:
+        return []
+    latest = max(e.run for e in entries)
+    current = [e for e in entries if e.run == latest]
+    groups: defaultdict[tuple[str, str], list[Usage]] = defaultdict(list)
+    for e in current:
+        groups[(e.stage, e.model)].append(e)
+    lines = [f"usage run {latest}"]
+    lines += [f"usage {stage} {model}: {_usage_totals(groups[(stage, model)])}" for stage, model in sorted(groups)]
+    lines.append(f"usage total: {_usage_totals(current)}")
+    return lines
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     lens_dir = work_dir(args.lens)
     lens = load_lens(repo_root() / "lenses" / f"{args.lens}.toml")
@@ -394,6 +482,7 @@ def cmd_report(args: argparse.Namespace) -> None:
     keys = _keys(lens_dir / OUTCOMES)
     arcs, with_changes = _arcs(lens_dir / ARCS)
     recall = _recall(lens_dir / RECALL, triage_ids)
+    usage = _usage(lens_dir / USAGE)
     scenes_path = lens_dir / SCENES
     scenes = read_scenes(scenes_path) if scenes_path.exists() else None
     if scenes is not None:
@@ -410,6 +499,8 @@ def cmd_report(args: argparse.Namespace) -> None:
     for rid in triage_ids:
         disagreements, confirmed = recall[rid]
         print(f"recall {rid}: {disagreements} disagreements, {confirmed} confirmed")
+    for line in _usage_lines(usage):
+        print(line)
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

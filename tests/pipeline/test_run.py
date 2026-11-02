@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import tomllib
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +54,7 @@ from ffrd.pipeline.store import Store
 
 LENS = "made-up-lens"
 RUN = "made-up-run-id"
+OTHER_RUN = "made-up-other-run-id"
 TRIAGE_ORDER = ["made-up-first-id", "made-up-second-id"]
 TRIAGE = frozenset(TRIAGE_ORDER)
 OUTCOME_KEYS = {"namespace", "key", "chapter", "speaker", "reasons", "outcome", "gate", "writer", "keep_reason", "plan", "redo"}
@@ -529,7 +531,23 @@ class FakeClaude:
 
     def start_batch(self) -> Ask:
         self.batches += 1
-        return self.ask
+        return self._handing_reading
+
+    def _handing_reading(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
+        answer = self.ask(model, parts, schema)
+        # Made-up usage numbers. Not game text.
+        claude_module.record(
+            claude_module.Reading(
+                model=model,
+                input_tokens=1,
+                output_tokens=2,
+                cache_read_tokens=3,
+                cache_creation_tokens=4,
+                cost_usd=0.5,
+                duration_ms=6,
+            )
+        )
+        return answer
 
     def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
         self.calls.append((model, list(parts), schema))
@@ -726,6 +744,55 @@ def _run(
 
 def _all_prompts(claude: FakeClaude, jev: FakeJev) -> list[str]:
     return [part for _, parts, _ in claude.calls for part in parts] + [scene for scene, _ in jev.calls]
+
+
+def _usage_entries(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "work" / LENS / report.USAGE
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _stored_stages(tmp_path: Path) -> set[str]:
+    results = (tmp_path / "work" / LENS / "results").glob("*.json")
+    return {json.loads(path.read_text(encoding="utf-8"))["stage"] for path in results}
+
+
+def test_each_model_call_appends_one_usage_entry_under_its_run_and_stage(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    entries = _usage_entries(tmp_path)
+    assert len(entries) == len(claude.calls)
+    assert {entry["run"] for entry in entries} == {RUN}
+    stages_used = {entry["stage"] for entry in entries}
+    assert {"screen", "intent", "draft", "judge"} <= stages_used <= _stored_stages(tmp_path)
+    assert all(
+        (entry["input_tokens"], entry["output_tokens"], entry["cache_read_tokens"], entry["cache_creation_tokens"]) == (1, 2, 3, 4)
+        and entry["cost_usd"] == 0.5
+        and entry["duration_ms"] == 6
+        for entry in entries
+    )
+    assert Counter(entry["model"] for entry in entries) == Counter(model for model, _, _ in claude.calls)
+
+
+def test_rerun_on_stored_results_appends_no_entries(tmp_path: Path) -> None:
+    claude = _claude()
+    # Every stage must finish on the first run, or the rerun would ask again for the unfinished line.
+    claude.intents = {}
+    claude.drafts[(NS_B, "2")] = [OPUS_B2]
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    entries = _usage_entries(tmp_path)
+    calls = len(claude.calls)
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), run_id=OTHER_RUN)
+    assert len(claude.calls) == calls
+    assert _usage_entries(tmp_path) == entries
+
+
+def test_unwritable_usage_file_raises_fail_naming_path_and_reason(tmp_path: Path) -> None:
+    usage = tmp_path / "work" / LENS / report.USAGE
+    usage.mkdir(parents=True)
+    with pytest.raises(Fail) as exc:
+        _run(tmp_path, _claude(), [], jev=FakeJev(JEV_HIGH))
+    assert str(usage) in str(exc.value)
+    assert "Is a directory" in str(exc.value)
 
 
 def test_each_outcome_kind_and_writer_is_recorded(tmp_path: Path) -> None:
@@ -2712,13 +2779,19 @@ def test_a_scene_that_raises_keeps_the_other_scenes_results_and_a_rerun_calls_on
     claude.raising = set()
     claude.screen_gate = None
     before = len(claude.calls)
+    entries_before = len(_usage_entries(tmp_path / "resumed"))
     _run(tmp_path / "resumed", claude, [], jev=FakeJev(JEV_HIGH))
     rerun = [(parts, schema) for _, parts, schema in claude.calls[before:]]
+    assert len(_usage_entries(tmp_path / "resumed")) - entries_before == len(rerun)
     assert sum(1 for _, schema in rerun if schema is SCREEN_SCHEMA) == 1
     assert not any(EN_A1 in part or EN_C1 in part for parts, schema in rerun if schema is not arcs.SCHEMA for part in parts)
 
     _run(tmp_path / "clean", _claude(), [], jev=FakeJev(JEV_HIGH))
-    assert _snapshot(tmp_path / "resumed") == _snapshot(tmp_path / "clean")
+    # The usage log records the model calls each run made, so a resumed run's log differs from a clean run's by design.
+    usage = f"work/{LENS}/{report.USAGE}"
+    resumed = {path: text for path, text in _snapshot(tmp_path / "resumed").items() if path != usage}
+    clean = {path: text for path, text in _snapshot(tmp_path / "clean").items() if path != usage}
+    assert resumed == clean
 
 
 def test_a_transport_failed_scene_stays_unfinished_while_the_others_change(tmp_path: Path) -> None:
