@@ -424,6 +424,10 @@ after a game update to re-check.
 The tag defaults to `v1.0.0`. The recipe runs `ffrd build`, then `ffrd probe`, then
 `python3 -m ffrd.release <tag>`. A failing step stops the recipe.
 
+Commit `dialog/<lens>/` and the reports before you run it. The dirty-tree check comes
+after the build and the probe, so an uncommitted run output costs a full build and probe
+before the release refuses.
+
 `ffrd.release` refuses a dirty working tree, an invalid tag name, or a tag that already
 exists, before it writes anything. It then writes `dist/FFRS-Unstraightened-<tag>.zip`
 with the three paks and a `NEXUS.md` built from `docs/nexus/description.md`, which takes
