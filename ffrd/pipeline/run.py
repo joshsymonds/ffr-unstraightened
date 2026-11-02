@@ -449,10 +449,9 @@ def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: lis
     verdict = coherence.check(ctx.store, ctx.lens, scene, rewrites, _scene_arcs(ctx, scene), ask)
     if isinstance(verdict, Unfinished | Rejected):
         return [replace(o, outcome="unfinished", writer=None) if (o.namespace, o.key) in rewrites else o for o in outcomes], []
-    reverted = _with_plans(verdict, changes)
     return (
-        [replace(o, outcome="gate_failed", gate="scene", writer=None) if (o.namespace, o.key) in reverted else o for o in outcomes],
-        [change for change in changes if (change.namespace, change.key) not in reverted],
+        [replace(o, outcome="gate_failed", gate="scene", writer=None) if (o.namespace, o.key) in verdict else o for o in outcomes],
+        [change for change in changes if (change.namespace, change.key) not in verdict],
     )
 
 
@@ -731,12 +730,12 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
     gated = claude.fan_out(gate, scene.lines)
     outcomes = [outcome for outcome, _ in gated]
     changes = [change for _, change in gated if change is not None]
+    outcomes, changes = _coherent(ctx, scene, outcomes, changes, ask)
     section = ctx.lens.scene
     passed = _PassRecord()
     if section is not None and _from_table(ctx, scene):
         outcomes, scene_changes, passed = _scene_pass(ctx, scene, section, cast, flagged, outcomes, ask)
         changes += scene_changes
-    outcomes, changes = _coherent(ctx, scene, outcomes, changes, ask)
     return outcomes, changes, recall, passed
 
 
