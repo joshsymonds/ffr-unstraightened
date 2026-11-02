@@ -164,12 +164,75 @@ def test_u7_covers_a_plainly_implied_gender_rule(lens: Lens, stage: Stage, label
 
 # The scene pass: the [scene] section, its labels, and the doc page that describes it.
 SCENE_PATTERNS: tuple[str, ...] = ("s1-manhood-performance", "s2-conquest-fixation", "s3-bechdel-fail")
-SCENE_CRITERIA: frozenset[str] = frozenset({*SCENE_PATTERNS, "recurring", "own-stance", "presence-not-hit", "plot-actor-exempt"})
-SCENE_PLAN: frozenset[str] = frozenset(
-    {"plan-budget", "required-optional", "line-pass-final", "keep-facts", "no-invented-topic", "named-keep"}
+SCENE_CRITERIA: frozenset[str] = frozenset(
+    {
+        *SCENE_PATTERNS,
+        "recurring",
+        "own-stance",
+        "presence-not-hit",
+        "plot-actor-exempt",
+        "friendship-exempt",
+        "flirt-trait",
+        "coaching",
+        "minor-flirt",
+        "rejection-gag",
+        "own-goal-exempt",
+    }
 )
-SCENE_RUBRIC: frozenset[str] = frozenset({"reduce-pattern", "keep-flirt-beat", "protections-hold"})
+SCENE_PLAN: frozenset[str] = frozenset(
+    {
+        "plan-budget",
+        "required-optional",
+        "line-pass-final",
+        "keep-facts",
+        "no-invented-topic",
+        "named-keep",
+        "cut-density",
+        "her-own-line",
+    }
+)
+SCENE_RUBRIC: frozenset[str] = frozenset({"reduce-pattern", "keep-flirt-beat", "protections-hold", "no-eye-roll-fill"})
 SCENE_LABELS: frozenset[str] = SCENE_CRITERIA | SCENE_PLAN | SCENE_RUBRIC
+# The words each label's paragraph must use to state its rule.
+CRITERION_PHRASES: tuple[tuple[str, str], ...] = (
+    ("s1-manhood-performance", "insufficiently manly"),
+    ("s3-bechdel-fail", "mainly about"),
+    ("s3-bechdel-fail", "never by one line"),
+    ("friendship-exempt", "Male friendship"),
+    ("friendship-exempt", "affection"),
+    ("friendship-exempt", "camaraderie"),
+    ("friendship-exempt", "brotherhood"),
+    ("flirt-trait", "characterization"),
+    ("coaching", "how to get women"),
+    ("minor-flirt", "a minor"),
+    ("minor-flirt", "child-looking"),
+    ("minor-flirt", "an s2 hit"),
+    ("minor-flirt", "without recurring"),
+    ("rejection-gag", "slapstick rejection"),
+    ("rejection-gag", "only part"),
+    ("own-goal-exempt", "her own goal"),
+)
+PLAN_PHRASES: tuple[tuple[str, str], ...] = (
+    ("cut-density", "keep the trait"),
+    ("cut-density", "cut density"),
+    ("her-own-line", "drawn from the scene's existing content"),
+    ("her-own-line", "never a new topic"),
+    ("named-keep", "not-recurring never keeps a minor-flirt hit"),
+)
+RUBRIC_PHRASES: tuple[tuple[str, str], ...] = (
+    ("no-eye-roll-fill", "Women Are Wiser"),
+    ("no-eye-roll-fill", "eye-rolling"),
+)
+# The words each pattern question must use to state its refined trigger.
+QUESTION_PHRASES: tuple[tuple[str, str], ...] = (
+    ("s1-manhood-performance", "insufficiently manly"),
+    ("s1-manhood-performance", "recurs"),
+    ("s2-conquest-fixation", "coach"),
+    ("s2-conquest-fixation", "minor"),
+    ("s2-conquest-fixation", "child-looking"),
+    ("s2-conquest-fixation", "slapstick rejection"),
+    ("s3-bechdel-fail", "mainly about"),
+)
 # SHA-256 of each existing stage_text at the base commit. The scene pass must not change them.
 PINNED_SHA256: dict[Stage, str] = {
     "triage": "881bf79ed55b88ee4321b7950b9f9d8bbd95c3779dcbf8469a8e5f4ef30de2e4",
@@ -197,6 +260,16 @@ def paragraphs(text: str) -> list[str]:
 
 def scene_paragraph(text: str, label: str) -> str:
     (found,) = [p for p in paragraphs(text) if p.startswith(f"[{label}]")]
+    return found
+
+
+def criterion(scene: SceneSection, label: str) -> str:
+    (found,) = [c for c in scene.criteria if c.startswith(f"[{label}]")]
+    return found
+
+
+def pattern_question(scene: SceneSection, pattern_id: str) -> str:
+    (found,) = [p.question for p in scene.patterns if p.id == pattern_id]
     return found
 
 
@@ -253,3 +326,23 @@ def test_doc_has_a_scene_pass_section() -> None:
 @pytest.mark.parametrize("label", sorted(SCENE_LABELS))
 def test_scene_label_appears_in_doc_in_backticks(label: str) -> None:
     assert f"`{label}`" in DOC.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("pattern_id", "phrase"), QUESTION_PHRASES)
+def test_scene_pattern_question_states_its_refined_trigger(scene: SceneSection, pattern_id: str, phrase: str) -> None:
+    assert phrase in pattern_question(scene, pattern_id)
+
+
+@pytest.mark.parametrize(("label", "phrase"), CRITERION_PHRASES)
+def test_scene_criterion_states_its_rule(scene: SceneSection, label: str, phrase: str) -> None:
+    assert phrase in criterion(scene, label)
+
+
+@pytest.mark.parametrize(("label", "phrase"), PLAN_PHRASES)
+def test_scene_plan_paragraph_states_its_rule(scene: SceneSection, label: str, phrase: str) -> None:
+    assert phrase in scene_paragraph(scene.plan, label)
+
+
+@pytest.mark.parametrize(("label", "phrase"), RUBRIC_PHRASES)
+def test_scene_rubric_paragraph_states_its_rule(scene: SceneSection, label: str, phrase: str) -> None:
+    assert phrase in scene_paragraph(scene.rubric, label)
