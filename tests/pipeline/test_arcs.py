@@ -31,6 +31,7 @@ from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.stages import Ask, Scene, SceneLine
 from ffrd.pipeline.store import Store
+from ffrd.pipeline.store import key as result_key
 
 # Made-up bibles and arcs. Not game text.
 BIBLE_ONE = {
@@ -737,3 +738,162 @@ def test_judge_saved_keys_are_the_same_with_or_without_a_scene_section(tmp_path:
         assert result is not None
         stages.add(result.stage)
     assert stages == {STAGE}
+
+
+# Made-up base rewrites, one judged line of ARC and one line ARC does not judge. Not game text.
+ASH_BASE = {"lens": "made-up-base-lens", "reasons": ["Made-up base reason one. Not game text."]}
+BRIN_BASE = {"lens": "made-up-base-lens", "reasons": ["Made-up base reason two. Not game text."]}
+BASE_REWRITES = {_ref(LINE_ASH_ONE): ASH_BASE, _ref(LINE_BRIN_ONE): BRIN_BASE}
+BASE_TEXT = "Base lens rewrites (the arc describes these lines as they read before the base lens rewrote them):\n"
+ARC_LINE_DICTS = _line_dicts([LINE_ASH_ONE, LINE_ASH_BEAT, LINE_ASH_TWO, LINE_NARRATION], REWRITES)
+SCENE_LENS_TEXT = f"{SCENE_LENS.stage_text('judge')}\n{SCENE_LENS.stage_text('scene')}"
+ASH_BASE_ENTRY = {"namespace": "ST_C01_001_01", "key": "1", "lens": "made-up-base-lens", "reasons": ASH_BASE["reasons"]}
+# Literal keys computed at the base commit, before the base_rewrites parameter existed.
+ARC_JUDGE_KEY = "221eb8b102fb1084dc65b30436730d05208b8d99976ceccf8b039314dabae119"
+SCENE_ARC_KEY = "f8a1cfb2cbcd4e4665fe046e38cfe6deffed079f4ebd357deebcbb698ffd33d0"
+
+
+def test_base_rewrites_list_only_the_judged_line_in_first_pass_prompt(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge(Store(tmp_path), LENS, [ARC], SCENES, REWRITES, ask, base_rewrites=BASE_REWRITES)
+
+    _, parts, _ = ask.calls[0]
+    assert parts == [
+        INSTRUCTIONS,
+        "Judge rubric:\n" + LENS.stage_text("judge"),
+        "Arc:\n" + _j(ARC),
+        "Arc lines:\n" + _j(ARC_LINE_DICTS),
+        BASE_TEXT + _j([ASH_BASE_ENTRY]),
+    ]
+
+
+def test_base_rewrites_part_sits_before_proposed_reverts_in_recheck_prompt(tmp_path: Path) -> None:
+    ask = Fake(_answer(False, LINE_ASH_ONE), _answer(True))
+
+    judge(Store(tmp_path), LENS, [ARC], SCENES, REWRITES, ask, base_rewrites=BASE_REWRITES)
+
+    _, parts, _ = ask.calls[1]
+    assert parts == [
+        RECHECK_INSTRUCTIONS,
+        "Judge rubric:\n" + LENS.stage_text("judge"),
+        "Arc:\n" + _j(ARC),
+        "Arc lines:\n" + _j(ARC_LINE_DICTS),
+        BASE_TEXT + _j([ASH_BASE_ENTRY]),
+        "Proposed reverts:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+    ]
+
+
+def test_base_rewrites_are_stored_as_arc_judge_inputs(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+
+    judge(store, LENS, [ARC], SCENES, REWRITES, Fake(_answer(False, LINE_ASH_ONE), _answer(True)), base_rewrites=BASE_REWRITES)
+
+    first = {"arc": ARC, "lines": ARC_LINE_DICTS, "base_rewrites": [ASH_BASE_ENTRY]}
+    recheck = {**first, "proposed": [_ref_dict(LINE_ASH_ONE)]}
+    assert store.finished() == sorted(
+        [result_key(STAGE, first, LENS.stage_text("judge")), result_key(STAGE, recheck, LENS.stage_text("judge"))]
+    )
+
+
+def test_base_rewrites_part_follows_arc_lines_in_scene_first_pass_prompt(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge_scene(Store(tmp_path), SCENE_LENS, [ARC], SCENES, REWRITES, SCENE_REFS, ask, base_rewrites=BASE_REWRITES)
+
+    _, parts, _ = ask.calls[0]
+    assert parts == [
+        SCENE_INSTRUCTIONS,
+        "Judge rubric:\n" + SCENE_LENS.stage_text("judge"),
+        "Scene rubric:\n" + SCENE_LENS.stage_text("scene"),
+        "Arc:\n" + _j(ARC),
+        "Arc lines:\n" + _j(ARC_LINE_DICTS),
+        BASE_TEXT + _j([ASH_BASE_ENTRY]),
+        "Scene-pass lines:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+    ]
+
+
+def test_base_rewrites_reach_both_scene_arc_passes_and_their_stored_inputs(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    ask = Fake(_answer(False, LINE_ASH_ONE), _answer(True))
+
+    judge_scene(store, SCENE_LENS, [ARC], SCENES, REWRITES, SCENE_REFS, ask, base_rewrites=BASE_REWRITES)
+
+    _, parts, _ = ask.calls[1]
+    assert parts == [
+        SCENE_RECHECK_INSTRUCTIONS,
+        "Judge rubric:\n" + SCENE_LENS.stage_text("judge"),
+        "Scene rubric:\n" + SCENE_LENS.stage_text("scene"),
+        "Arc:\n" + _j(ARC),
+        "Arc lines:\n" + _j(ARC_LINE_DICTS),
+        BASE_TEXT + _j([ASH_BASE_ENTRY]),
+        "Scene-pass lines:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+        "Proposed reverts:\n" + _j([_ref_dict(LINE_ASH_ONE)]),
+    ]
+    first = {"arc": ARC, "lines": ARC_LINE_DICTS, "base_rewrites": [ASH_BASE_ENTRY], "scene_refs": [_ref_dict(LINE_ASH_ONE)]}
+    recheck = {**first, "proposed": [_ref_dict(LINE_ASH_ONE)]}
+    assert store.finished() == sorted([result_key(SCENE_STAGE, first, SCENE_LENS_TEXT), result_key(SCENE_STAGE, recheck, SCENE_LENS_TEXT)])
+
+
+def test_arc_without_a_listed_line_keeps_its_base_prompt_under_judge(tmp_path: Path) -> None:
+    ask = ArcFake({ARC["id"]: [_answer(True)], ARC_BRIN["id"]: [_answer(True)]})
+
+    judge(Store(tmp_path), LENS, [ARC, ARC_BRIN], SCENES, REWRITES, ask, base_rewrites={_ref(LINE_ASH_ONE): ASH_BASE})
+
+    assert ask.parts_for(ARC_BRIN) == [
+        [
+            INSTRUCTIONS,
+            "Judge rubric:\n" + LENS.stage_text("judge"),
+            "Arc:\n" + _j(ARC_BRIN),
+            "Arc lines:\n" + _j(_line_dicts([LINE_BRIN_ONE], REWRITES)),
+        ]
+    ]
+    assert ask.parts_for(ARC)[0][-1] == BASE_TEXT + _j([ASH_BASE_ENTRY])
+
+
+def test_arc_without_a_listed_line_keeps_its_base_prompt_under_judge_scene(tmp_path: Path) -> None:
+    ask = ArcFake({ARC["id"]: [_answer(True)], ARC_BRIN["id"]: [_answer(True)]})
+
+    judge_scene(
+        Store(tmp_path),
+        SCENE_LENS,
+        [ARC, ARC_BRIN],
+        SCENES,
+        REWRITES,
+        {_ref(LINE_ASH_ONE), _ref(LINE_BRIN_ONE)},
+        ask,
+        base_rewrites={_ref(LINE_ASH_ONE): ASH_BASE},
+    )
+
+    assert ask.parts_for(ARC_BRIN) == [
+        [
+            SCENE_INSTRUCTIONS,
+            "Judge rubric:\n" + SCENE_LENS.stage_text("judge"),
+            "Scene rubric:\n" + SCENE_LENS.stage_text("scene"),
+            "Arc:\n" + _j(ARC_BRIN),
+            "Arc lines:\n" + _j(_line_dicts([LINE_BRIN_ONE], REWRITES)),
+            "Scene-pass lines:\n" + _j([_ref_dict(LINE_BRIN_ONE)]),
+        ]
+    ]
+
+
+@pytest.mark.parametrize("base_rewrites", [None, {}], ids=["none", "empty"])
+def test_arc_judge_stored_key_is_unchanged_without_base_rewrites(
+    tmp_path: Path, base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None
+) -> None:
+    store = Store(tmp_path)
+
+    judge(store, LENS, [ARC], SCENES, REWRITES, Fake(_answer(True)), base_rewrites=base_rewrites)
+
+    assert store.finished() == [ARC_JUDGE_KEY]
+
+
+@pytest.mark.parametrize("base_rewrites", [None, {}], ids=["none", "empty"])
+def test_scene_arc_stored_key_is_unchanged_without_base_rewrites(
+    tmp_path: Path, base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None
+) -> None:
+    store = Store(tmp_path)
+
+    judge_scene(store, SCENE_LENS, [ARC], SCENES, REWRITES, SCENE_REFS, Fake(_answer(True)), base_rewrites=base_rewrites)
+
+    assert store.finished() == [SCENE_ARC_KEY]

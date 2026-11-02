@@ -12,6 +12,8 @@ from ffrd.pipeline.store import Store
 
 STAGE = "arc_judge"
 
+BASE_LABEL = "Base lens rewrites (the arc describes these lines as they read before the base lens rewrote them):"
+
 INSTRUCTIONS = (
     "Judge the arc's lines in story order, each vanilla English beside its rewrite where one is given, against the judge "
     "rubric. Return JSON with holds, true only if the arc holds together with the rewrites applied, and revert, the "
@@ -66,7 +68,7 @@ class Verdicts:
 
 @dataclass(frozen=True)
 class _Stage:
-    """One arc judge pass for one arc: its store stage and lens text, its prompt parts, and the refs it may revert."""
+    """One arc judge pass for one arc: its store stage and lens text, its prompt parts, the judged lines the base lens rewrote, and the refs it may revert."""
 
     stage: str
     lens_text: str
@@ -74,6 +76,7 @@ class _Stage:
     recheck: str
     rubric: tuple[str, ...]
     allowed: frozenset[tuple[str, str]]
+    base: list[dict[str, Any]]
     after_lines: tuple[str, ...]
     extra_inputs: Mapping[str, Any]
 
@@ -158,8 +161,12 @@ def judge(
     scenes: Sequence[Scene],
     rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> Verdicts:
-    verdicts = claude.fan_out(lambda arc: _judge_arc(store, lens, arc, scenes, rewrites, ask), arcs)
+    verdicts = claude.fan_out(
+        lambda arc: _judge_arc(store, lens, arc, scenes, rewrites, ask, base_rewrites),
+        arcs,
+    )
     return _combine(verdicts)
 
 
@@ -171,9 +178,10 @@ def judge_scene(
     rewrites: Mapping[tuple[str, str], str],
     scene_refs: Collection[tuple[str, str]],
     ask: Ask,
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> Verdicts:
     verdicts = claude.fan_out(
-        lambda arc: _judge_scene_arc(store, lens, arc, scenes, rewrites, scene_refs, ask),
+        lambda arc: _judge_scene_arc(store, lens, arc, scenes, rewrites, scene_refs, ask, base_rewrites),
         arcs,
     )
     return _combine(verdicts)
@@ -193,6 +201,7 @@ def _judge_arc(
     scenes: Sequence[Scene],
     rewrites: Mapping[tuple[str, str], str],
     ask: Ask,
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None,
 ) -> Verdicts:
     arc_lines = lines(arc, scenes, rewrites)
     changed = frozenset(_ref(line) for line in arc_lines if _ref(line) in rewrites)
@@ -206,6 +215,7 @@ def _judge_arc(
         recheck=RECHECK_INSTRUCTIONS,
         rubric=(f"Judge rubric:\n{judge_text}",),
         allowed=changed,
+        base=_base_lines(arc_lines, base_rewrites),
         after_lines=(),
         extra_inputs={},
     )
@@ -220,6 +230,7 @@ def _judge_scene_arc(
     rewrites: Mapping[tuple[str, str], str],
     scene_refs: Collection[tuple[str, str]],
     ask: Ask,
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None,
 ) -> Verdicts:
     arc_lines = lines(arc, scenes, rewrites)
     scene_pass = frozenset(_ref(line) for line in arc_lines if _ref(line) in scene_refs)
@@ -235,6 +246,7 @@ def _judge_scene_arc(
         recheck=SCENE_RECHECK_INSTRUCTIONS,
         rubric=(f"Judge rubric:\n{judge_text}", f"Scene rubric:\n{scene_text}"),
         allowed=scene_pass,
+        base=_base_lines(arc_lines, base_rewrites),
         after_lines=(f"Scene-pass lines:\n{_json(refs)}",),
         extra_inputs={"scene_refs": refs},
     )
@@ -290,14 +302,18 @@ def _pass(
 ) -> tuple[bool, frozenset[tuple[str, str]]] | Unfinished | Rejected:
     line_dicts = _line_dicts(arc_lines, rewrites)
     instructions = stage.instructions if proposed is None else stage.recheck
+    base_parts = [f"{BASE_LABEL}\n{_json(stage.base)}"] if stage.base else []
     parts = [
         instructions,
         *stage.rubric,
         f"Arc:\n{_json(arc)}",
         f"Arc lines:\n{_json(line_dicts)}",
+        *base_parts,
         *stage.after_lines,
     ]
     inputs: dict[str, Any] = {"arc": arc, "lines": line_dicts, **stage.extra_inputs}
+    if stage.base:
+        inputs["base_rewrites"] = stage.base
     if proposed is not None:
         parts.append(f"Proposed reverts:\n{_json(_ref_list(proposed))}")
         inputs["proposed"] = _ref_list(proposed)
@@ -320,6 +336,25 @@ def _pass(
 
 def _ref(line: SceneLine) -> tuple[str, str]:
     return (line.namespace, line.key)
+
+
+def _base_lines(
+    arc_lines: Sequence[SceneLine],
+    base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The judged lines the base lens rewrote, in arc-line order, each with the base lens and its reasons."""
+    if not base_rewrites:
+        return []
+    return [
+        {
+            "namespace": line.namespace,
+            "key": line.key,
+            "lens": base_rewrites[_ref(line)]["lens"],
+            "reasons": base_rewrites[_ref(line)]["reasons"],
+        }
+        for line in arc_lines
+        if _ref(line) in base_rewrites
+    ]
 
 
 def _story_position(line: SceneLine) -> tuple[bool, int]:
