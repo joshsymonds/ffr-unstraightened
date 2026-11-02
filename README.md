@@ -207,7 +207,11 @@ Third, after all scenes, the arc judge reads each arc that has a changed line, i
 in story order, with the rewrites applied. The arcs are judged at the same time. Each
 check works the same way. Opus names the lines it would revert. If it finds a problem, a
 recheck sees those proposals and names only the ones that must revert. A line reverts
-only when both passes name it.
+only when both passes name it. The arc judge reads only the line-pass rewrites, so adding a scene pass never
+changes what it is given. Then a second arc judge reads each arc that holds a surviving
+scene-pass rewrite, with the line-pass rewrites that survived, against both the judge
+rubric and the lens's scene rubric, the scene rubric winning for scene-pass lines. It
+may revert only scene-pass lines, and each revert takes the whole plan.
 
 Each changed line goes to `dialog/<name>/chapter-NN.toml`, or to
 `dialog/<name>/unattributed.toml` when it names no chapter. Each table records the vanilla
@@ -293,6 +297,10 @@ stage cross_judge: 3
 stage scene_coherence: 1 (exercised)
 stage arc_judge: 1
 stage selection: 9
+stage scene_screen: 1
+stage scene_plan: 0
+stage scene_judge: 0
+stage scene_arc: 0
 ```
 
 Some stages depend on model answers that no lens can force: `rescreen`, `classifier`,
@@ -302,7 +310,11 @@ recorded. It stores that result under `work/smoke/` and changes no outcome. Its 
 line then says `(exercised)`. The screen, intent, draft and render stages run as usual,
 because smoke's lens makes the screen flag the first two spoken lines.
 
-Smoke exits 0 only when every stage above has a result. A scene whose lines all stay
+The four scene stages print after the required ones. A scene with no scene pattern hit
+makes no plan, so only `scene_screen` must have a result, and only when the scene comes
+from the game's scene table.
+
+Smoke exits 0 only when every required stage has a result. A scene whose lines all stay
 vanilla still passes, because `selection` counts a result when every line has an outcome
 and none is unfinished. When a stage has no result, smoke still prints every stage line,
 then fails with `ffrd: smoke: no result from <stage>, ...` and exits 1.

@@ -59,7 +59,7 @@ REQUIRED_STAGES: tuple[str, ...] = (
     SELECTION,
 )
 # Printed after the required stages. Only the screen is required, and only when the picked scene came from the scene table.
-SCENE_STAGES: tuple[str, ...] = (scene_pass.SCREEN_STAGE, scene_pass.PLAN_STAGE, scene_pass.JUDGE_STAGE)
+SCENE_STAGES: tuple[str, ...] = (scene_pass.SCREEN_STAGE, scene_pass.PLAN_STAGE, scene_pass.JUDGE_STAGE, arcs.SCENE_STAGE)
 
 # Guards the shared counts and returned lists: stage calls run concurrently, and each update is a read-modify-write.
 _COUNTS_LOCK = threading.Lock()

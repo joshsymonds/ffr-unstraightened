@@ -218,6 +218,7 @@ FULL_STAGE_LINES = [
     "stage scene_screen: 0",
     "stage scene_plan: 0",
     "stage scene_judge: 0",
+    "stage scene_arc: 0",
 ]
 
 
@@ -477,6 +478,7 @@ def test_stages_a_run_leaves_empty_are_exercised_and_change_no_outcome(
         "stage scene_screen: 0",
         "stage scene_plan: 0",
         "stage scene_judge: 0",
+        "stage scene_arc: 0",
     ]
     work = smoke_repo / "work" / "smoke"
     outcomes = [json.loads(line) for line in (work / "outcomes.jsonl").read_text(encoding="utf-8").splitlines()]
