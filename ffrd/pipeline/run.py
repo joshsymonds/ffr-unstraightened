@@ -25,12 +25,12 @@ from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
 from ffrd.pipeline.lens import Lens, SceneSection, load_lens
-from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, Record, render
+from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, USAGE, Record, render
 from ffrd.pipeline.scene_record import SCENES, SceneRecord, write_scenes
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose, distance
 from ffrd.pipeline.stages import Ask, Classifier, Renderer, Scene, SceneLine, Triage
-from ffrd.pipeline.store import Store, work_dir
+from ffrd.pipeline.store import Result, Store, work_dir
 
 CHAPTER_FILE = re.compile(r"chapter-\d{2,}\.toml")
 UNATTRIBUTED_FILE = "unattributed.toml"
@@ -1140,6 +1140,45 @@ def _redo(path: Path, scenes: Sequence[Scene]) -> dict[tuple[str, str], str]:
     return redo
 
 
+class _Metered(Store):
+    """The run's store, appending each model call's usage reading to the run's usage file under the stage whose computation made the call."""
+
+    def __init__(self, inner: Store, run_id: str) -> None:
+        super().__init__(inner.root)
+        self._inner = inner
+        self._run_id = run_id
+        self._lock = threading.Lock()
+
+    def run(self, stage: str, inputs: Any, lens: str | None, call: Callable[[], Any]) -> Result:
+        def metered() -> Any:
+            with claude.usage_sink(lambda reading: self._append(stage, reading)):
+                return call()
+
+        return self._inner.run(stage, inputs, lens, metered)
+
+    def _append(self, stage: str, reading: claude.Reading) -> None:
+        entry = {
+            "run": self._run_id,
+            "stage": stage,
+            "model": reading.model,
+            "input_tokens": reading.input_tokens,
+            "output_tokens": reading.output_tokens,
+            "cache_read_tokens": reading.cache_read_tokens,
+            "cache_creation_tokens": reading.cache_creation_tokens,
+            "duration_ms": reading.duration_ms,
+            "cost_usd": reading.cost_usd,
+        }
+        line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+        path = self.root / USAGE
+        with self._lock:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line)
+            except OSError as e:
+                raise Fail(f"cannot write usage {path}: {e.strerror}") from e
+
+
 def run(
     root: Path,
     lens: Lens,
@@ -1157,6 +1196,7 @@ def run(
 ) -> list[Outcome]:
     if through is not None and through < 1:
         raise Fail("through must be at least 1")
+    store = _Metered(store, run_id)
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
     vanilla_hashes = {ref: vanilla_hash(line.english) for ref, line in _first_lines(scenes).items()}
     base_texts = {} if lens.base is None else _base(root / "dialog" / lens.base, lens.base, scenes)
