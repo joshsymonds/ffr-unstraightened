@@ -152,6 +152,56 @@ A change that touches a protection is rejected by the judge.
 - The report counts arc-judge and scene-coherence reverts as the `arc` and `scene`
   gate counts.
 
+## Scene pass
+
+The scene pass reads each scene as a whole, after the line stages. It screens the
+scene for three patterns. When a pattern is present, the planner proposes at most
+four changed lines. A plan that reduces the pattern is accepted. When no plan
+within the budget reduces it, the scene is kept and the reason is recorded. The
+lens file holds the scene text in its `[scene]` section.
+
+### Patterns
+
+- `s1-manhood-performance`: a character polices or mocks another character's
+  manhood, and this recurs in the scene.
+- `s2-conquest-fixation`: the banter is dominated by getting with women, with women
+  as prizes or scores and the ladies as the default topic.
+- `s3-bechdel-fail`: two or more women talk with each other only about a man's
+  desirability, attention, approval or whom he favors.
+
+### Screen criteria
+
+- `s1-manhood-performance`, `s2-conquest-fixation`, `s3-bechdel-fail`: each restates
+  its pattern. The screen flags a scene for a pattern, not a line.
+- `recurring`: s1 needs the policing to recur within the scene. One line does not
+  flag it.
+- `own-stance`: a speaker's own stance about their own manhood is protected when the
+  bible records it as a trait or an arc.
+- `presence-not-hit`: for s2, women being present or mentioned is not a hit. The
+  banter must be dominated by conquest.
+- `plot-actor-exempt`: for s3, talk about a man as a plot actor is exempt. Only talk
+  about his desirability, attention, approval or favor is flagged.
+
+### Plan rules
+
+- `plan-budget`: at most 4 changed lines per conversation.
+- `required-optional`: each planned line is marked required or optional. Required
+  lines are planned first.
+- `line-pass-final`: a line the line pass changed or kept is never planned.
+- `keep-facts`: plot facts, relationships and traits are kept.
+- `no-invented-topic`: an s3 fix never invents a topic the scene does not offer.
+- `named-keep`: when no in-budget plan fixes the scene, the scene is kept and one
+  reason is named: `protection`, `plot`, `trait`, `earned-arc` or `not-recurring`.
+
+### Rubric
+
+- `reduce-pattern`: the plan as a whole reduces the pattern without flattening the
+  speaker.
+- `keep-flirt-beat`: an s2 plan keeps at least one flirt beat where the bible records
+  flirting as a trait.
+- `protections-hold`: every line-pass protection and exclusion still holds under the
+  plan.
+
 ## What the lens never does
 
 These are Josh's Must Not Ship rules. Each is a hard limit.
