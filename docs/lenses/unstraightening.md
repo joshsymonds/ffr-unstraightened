@@ -189,7 +189,8 @@ lens file holds the scene text in its `[scene]` section.
 - `conquest-coaching`: for s2, a man coaching another man on how to get women is a
   hit.
 - `minor-flirt`: for s2, flirting aimed at a minor or a child-looking character is a
-  hit even when not recurring.
+  hit even when not recurring. A minor-flirt hit counts even once and wins over every
+  flirt-trait or characterization carve-out.
 - `slapstick-rejection`: for s2, a scene where a woman's only part is the slapstick
   rejection of a flirt is a hit. The fix gives her a line of her own.
 - `scene-not-line`: each pattern is judged by the whole scene, never by a single

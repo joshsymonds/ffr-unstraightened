@@ -165,7 +165,7 @@ criteria = [
     "[presence-not-hit] For s2-conquest-fixation, women being present or mentioned is not a hit. A scene with women in it, or a line that names a woman, does not flag the pattern. Flag s2-conquest-fixation when getting with women is the scene's main subject, or when conquest-coaching, minor-flirt or slapstick-rejection applies.",
     "[trait-density] For s2-conquest-fixation, crush hints and flirting that the bible records as a trait are characterization, not a hit, unless they take over a conversation that has another purpose. Flag the scene only when they take over that conversation. Then the fix keeps the trait and cuts its density.",
     "[conquest-coaching] For s2-conquest-fixation, a man coaching another man on how to get women is a hit, even when the coaching takes up only part of the scene.",
-    "[minor-flirt] For s2-conquest-fixation, flirting aimed at a minor or a child-looking character is a hit even when not recurring. One such line flags the pattern.",
+    "[minor-flirt] For s2-conquest-fixation, flirting aimed at a minor or a child-looking character is a hit even when not recurring. One such line flags the pattern. It wins over trait-density and over every flirt-trait or characterization carve-out, and a recorded flirting trait never exempts it.",
     "[slapstick-rejection] For s2-conquest-fixation, a scene where a woman's only part is the slapstick rejection of a flirt is a hit. The fix gives her a line of her own, drawn from the scene's existing content (see own-line).",
     "[scene-not-line] Judge each pattern by the scene as a whole, never by a single line, except where a criterion names a single line as a hit (see minor-flirt). Flag the scene for the pattern, not the line that shows it.",
     "[plot-actor-exempt] For s3-bechdel-fail, talk about a man as a plot actor is exempt. Women discussing what a man did, chose, must do or is doing in the story is not the pattern. Flag s3-bechdel-fail only when the talk is about his desirability, attention, approval or whom he favors.",
@@ -182,18 +182,18 @@ plan = """
 
 [male-warmth] A planned change never strips warmth between men. Lines that show male friendship, affection, camaraderie or brotherhood stay as written. The plan works only on the ranking or policing of a man as insufficiently manly.
 
-[trait-density] Where the bible records flirting or a crush as a trait, the plan keeps the trait and cuts its density. It softens or removes the flirt lines that take over a conversation with another purpose, and it leaves the trait visible elsewhere in the scene. The plan never removes the trait itself.
+[trait-density] Where the bible records flirting or a crush as a trait, the plan keeps the trait and cuts its density. It softens or removes the flirt lines that take over a conversation with another purpose, and it leaves the trait visible elsewhere in the scene. The plan never removes the trait itself. This keep-the-trait rule never applies to a minor-flirt hit.
 
 [own-line] An s2-conquest-fixation slapstick-rejection fix gives the woman a line of her own. The line is drawn from the scene's existing content and invents no topic (see no-invented-topic).
 
 [no-invented-topic] Every fix, for every pattern, never invents a topic the scene does not offer. For s3-bechdel-fail, when the women talk mainly about a man, the fix may turn the talk toward a topic already present in the scene. It must not introduce a topic the scene does not offer. The same holds for the line of her own in an own-line fix.
 
-[named-keep] When no plan within the budget reduces the flagged pattern, keep the scene unchanged and name one reason from exactly these five: protection, plot, trait, earned-arc, not-recurring. Name protection when a protection in the lens applies to the fix. Name plot when the fix needs a plot change. Name trait when a character trait holds the pattern. Name earned-arc when the arc beats earn the stance. Name not-recurring when the pattern does not recur in the scene.
+[named-keep] When no plan within the budget reduces the flagged pattern, keep the scene unchanged and name one reason from exactly these five: protection, plot, trait, earned-arc, not-recurring. Name protection when a protection in the lens applies to the fix. Name plot when the fix needs a plot change. Name trait when a character trait holds the pattern. Name earned-arc when the arc beats earn the stance. Name not-recurring when the pattern does not recur in the scene. For a minor-flirt hit, not-recurring never keeps it, because that hit counts even once, and trait never keeps it either.
 """
 rubric = """
 [reduce-pattern] Judge the plan as a whole. Pass a plan that reduces the flagged pattern while each speaker stays recognizable, with the same traits, voice and place in the story. Reject a plan that removes the pattern by flattening a speaker, making them bland, or changing who they are.
 
-[keep-flirt-beat] For an s2-conquest-fixation plan, keep at least one flirt beat where the bible records flirting as a trait. A flirt beat is a line in which a character the bible records as flirting flirts. Reject an s2-conquest-fixation plan that leaves no flirt beat for such a character in the scene.
+[keep-flirt-beat] For an s2-conquest-fixation plan, keep at least one flirt beat where the bible records flirting as a trait. A flirt beat is a line in which a character the bible records as flirting flirts. Reject an s2-conquest-fixation plan that leaves no flirt beat for such a character in the scene. A flirt aimed at a minor or a child-looking character never counts as the kept flirt beat.
 
 [no-wiser-women] Reject a plan that fills removed banter by turning the women into eye-rolling straight men for the men, the unbothered foils who sit out the men's jokes. This is the Women Are Wiser double standard: the women are made the sensible ones while the men keep the jokes. Reject that move whatever pattern the plan reduces.
 
