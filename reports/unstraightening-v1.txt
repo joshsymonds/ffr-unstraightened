@@ -3,42 +3,141 @@ chapter 1: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1778 untouch
   kept no-hit: 3
   kept protection: 1
   character 92: 1
+  scene eligible: 119
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 0
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
 chapter 2: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 727 untouched
+  scene eligible: 37
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 0
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
 chapter 3: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1214 untouched
   kept no-hit: 5
   kept earned: 6
   kept protection: 1
-chapter 4: 1 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1096 untouched
+  scene eligible: 89
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 0
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 4: 4 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1093 untouched
   reason u7-gender-rule: 1
   kept no-hit: 4
   kept own-wish: 1
-  character 50: 1
-chapter 5: 1 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1162 untouched
+  character 50: 3
+  character 184: 1
+  scene eligible: 57
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 1
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 1
+  scene planned lines: 3 (required 1)
+  scene changed lines: 3
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 3, median 3
+  scene character 50: 2
+  scene character 184: 1
+chapter 5: 7 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1156 untouched
   reason u7-gender-rule: 1
   kept no-hit: 3
   kept earned: 1
   kept no-invented-motive: 1
   kept own-wish: 2
   kept protection: 1
-  character 50: 1
+  character 40: 1
+  character 50: 5
+  character 90: 1
   gate classifier: 1
+  scene eligible: 74
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 3
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 3
+  scene planned lines: 6 (required 5)
+  scene changed lines: 6
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 3, median 2
+  scene character 40: 1
+  scene character 50: 4
+  scene character 90: 1
 chapter 6: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 860 untouched
   kept no-hit: 4
   kept earned: 1
   kept no-invented-motive: 5
   kept own-wish: 2
+  scene eligible: 42
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 1
+  scene flagged s3-bechdel-fail: 1
+  scene plans: 0
+  scene kept trait: 2
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
 chapter 7: 0 changed, 1 kept for plot, 1 gate failed, 0 unfinished, 529 untouched
   kept no-hit: 10
   kept earned: 2
   kept plot: 1
   gate classifier: 1
+  scene eligible: 25
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 0
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
 chapter 8: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 935 untouched
   kept earned: 12
   kept no-invented-motive: 2
   kept gender-rule-narrow: 2
   kept protection: 1
+  scene eligible: 30
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 0
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
 chapter 9: 0 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 269 untouched
-unattributed: 5 changed, 2 kept for plot, 4 gate failed, 0 unfinished, 7383 untouched
+  scene eligible: 20
+  scene flagged s1-manhood-performance: 0
+  scene flagged s2-conquest-fixation: 0
+  scene flagged s3-bechdel-fail: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+unattributed: 10 changed, 2 kept for plot, 12 gate failed, 0 unfinished, 7370 untouched
   reason u1-presumed-opposite-sex: 3
   reason u7-gender-rule: 2
   kept no-hit: 14
@@ -48,11 +147,31 @@ unattributed: 5 changed, 2 kept for plot, 4 gate failed, 0 unfinished, 7383 unto
   kept protection: 3
   kept plot: 2
   character 9: 1
-  character 50: 1
+  character 50: 4
   character 92: 1
+  character 131: 1
+  character 165: 1
   character 194: 2
+  gate arc: 5
   gate classifier: 4
-total: 8 changed, 3 kept for plot, 6 gate failed, 0 unfinished, 15953 untouched
+  gate scene: 3
+  scene eligible: 326
+  scene flagged s1-manhood-performance: 1
+  scene flagged s2-conquest-fixation: 5
+  scene flagged s3-bechdel-fail: 2
+  scene plans: 6
+  scene kept plot: 1
+  scene kept trait: 1
+  scene planned lines: 14 (required 8)
+  scene changed lines: 5
+  scene replanned: 0
+  scene reverted lines: 8
+  scene gate classifier: 1
+  scene changed per scene: max 2, median 0.5
+  scene character 50: 3
+  scene character 131: 1
+  scene character 165: 1
+total: 22 changed, 3 kept for plot, 14 gate failed, 0 unfinished, 15931 untouched
   reason u1-presumed-opposite-sex: 4
   reason u7-gender-rule: 4
   kept no-hit: 43
@@ -63,12 +182,38 @@ total: 8 changed, 3 kept for plot, 6 gate failed, 0 unfinished, 15953 untouched
   kept protection: 7
   kept plot: 3
   character 9: 1
-  character 50: 3
+  character 40: 1
+  character 50: 12
+  character 90: 1
   character 92: 2
+  character 131: 1
+  character 165: 1
+  character 184: 1
   character 194: 2
+  gate arc: 5
   gate classifier: 6
+  gate scene: 3
+  scene eligible: 819
+  scene flagged s1-manhood-performance: 1
+  scene flagged s2-conquest-fixation: 10
+  scene flagged s3-bechdel-fail: 3
+  scene plans: 10
+  scene kept plot: 1
+  scene kept trait: 3
+  scene planned lines: 23 (required 14)
+  scene changed lines: 14
+  scene replanned: 0
+  scene reverted lines: 8
+  scene gate classifier: 1
+  scene changed per scene: max 3, median 1.5
+  scene character 40: 1
+  scene character 50: 9
+  scene character 90: 1
+  scene character 131: 1
+  scene character 165: 1
+  scene character 184: 1
 scenes: 819 of 819 from the scene table, 3 outside it
-arcs: 169, 129 with changes
+arcs: 169, 140 with changes
 recall u1-presumed-opposite-sex: 7 disagreements, 0 confirmed
 recall u2-romance-outranks: 13 disagreements, 7 confirmed
 recall u3-devotion-as-vow: 1 disagreements, 1 confirmed
