@@ -23,14 +23,18 @@ The lens chains onto the unstraightening rewrites: it starts from their output i
 ## The marker
 
 The marker finds throwaway romance lines: lines where a minor character talks about their
-own partner, attraction or crush. It is a model judgment, not a regex. It reads only minor
-characters' lines, and it flags them under these labels:
+own partner, attraction or crush. It is a model judgment, not a regex. It reads minor
+characters' lines and the flirt's, and it flags them under these labels:
 
 - `minor-partner`: a minor character talks about their own romantic partner, and the
   pairing reads as a cisgender man and a cisgender woman.
 - `minor-attraction`: a minor character talks about their own romantic attraction or
   crush, and it is aimed at a cisgender person of the opposite sex.
-- `not-core-cast`: the marker never flags a core-cast line.
+- `not-core-cast`: the marker never flags a core-cast line, with one exception: the flirt,
+  the one speaker whose cast entry carries `"flirt": true`. It flags the flirt's
+  running-gag flirts aimed only at a woman or women under `flirt-at-woman`. It never
+  flags the flirt's sincere thread, or a flirt aimed at a minor or a child-looking
+  character.
 - `already-queer`: the marker does not flag a line whose pairing is already same-sex.
   This also covers a speaker, partner or crush who is already trans or nonbinary.
 
@@ -109,9 +113,9 @@ The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 
 ## How it is checked
 
-The lens runs under the queering selection: a Haiku marker, per-speaker buckets, one draft call per speaker, and no Jev.
+The lens runs under the queering selection: an Opus marker, per-speaker buckets, one draft call per speaker, and no Jev.
 
-The triage questions are used only for counts, with no Jev recheck. The marker reads only
-minor characters' lines. The lens test, `tests/lenses/test_queering.py`, pins the triage
+The triage questions are used only for counts, with no Jev recheck. The marker reads minor
+characters' lines and the flirt's. The lens test, `tests/lenses/test_queering.py`, pins the triage
 questions, the label sets of each stage, the key sentences of this page and the sections
 of this page. It fails when any of those is altered or removed.

@@ -21,7 +21,7 @@ question = "The party member whose running gag is flirting aims a running-gag fl
 criteria = [
     "[minor-partner] Flag minor-partner when a minor character talks about their own romantic partner, and the pairing reads as a cisgender man and a cisgender woman. Flag only the minor character's own lines.",
     "[minor-attraction] Flag minor-attraction when a minor character talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex. Flag only the minor character's own lines.",
-    "[not-core-cast] Never flag a core-cast line. The core cast is the recurring party members, not a minor character.",
+    "[not-core-cast] Never flag a core-cast line, with one exception: the flirt, the one speaker whose cast entry carries \"flirt\": true. Flag the flirt's running-gag flirts aimed only at a woman or women under flirt-at-woman. Never flag the flirt's sincere thread. Never flag a flirt aimed at a minor or a child-looking character. The core cast is the recurring party members, not a minor character.",
     "[already-queer] Do not flag a line whose pairing is already same-sex. This also covers a speaker, partner or crush who is already trans or nonbinary.",
 ]
 
