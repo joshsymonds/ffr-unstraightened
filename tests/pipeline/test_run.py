@@ -462,6 +462,10 @@ def _target(parts: Sequence[str]) -> tuple[str, str]:
 
 
 def _draft_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
+    """The lines a draft call is about: a speaker draft names them under its scenes, a scene draft under its targets."""
+    if any(part.startswith("Scenes:\n") for part in parts):
+        scenes = json.loads(_part(parts, "Scenes:\n"))
+        return [(target["namespace"], target["key"]) for scene in scenes for target in scene["targets"]]
     return [(target["namespace"], target["key"]) for target in json.loads(_part(parts, "Targets:\n"))]
 
 
@@ -3887,7 +3891,7 @@ EXPECTED_QUEER_OUTCOMES = [
     Outcome(NS_A, "3", 1, "made-up-speaker-c", (BETA,), "untouched", None, None, bucket="not-redirected"),
     Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "untouched", None, None, bucket="untouched"),
     Outcome(NS_B, "2", 2, None, (), "untouched", None, None),
-    Outcome(NS_C, "1", None, None, (ALPHA,), "untouched", None, None, bucket="queer"),
+    Outcome(NS_C, "1", None, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
 ]
 QUEER_FLAGS = {(NS_A, "2"): [ALPHA], (NS_A, "3"): [BETA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
 SCREEN_ELIGIBLE = "Eligible lines, flag only these:\n"
@@ -3897,6 +3901,7 @@ def _queer_claude() -> FakeClaude:
     claude = FakeClaude()
     claude.bible = {1: QUEER_BIBLE}
     claude.flags = dict(QUEER_FLAGS)
+    claude.drafts = {(NS_C, "1"): [OPUS_C1]}
     return claude
 
 
@@ -3906,7 +3911,7 @@ def _screens(claude: FakeClaude) -> list[tuple[str, list[dict[str, str]]]]:
     return sorted(calls, key=lambda call: [(ref["namespace"], ref["key"]) for ref in call[1]])
 
 
-def test_queering_screens_only_markable_lines_on_haiku_and_records_each_marked_line_untouched_with_its_bucket(tmp_path: Path) -> None:
+def test_queering_screens_only_markable_lines_on_haiku_and_writes_each_marked_line_with_its_bucket(tmp_path: Path) -> None:
     claude = _queer_claude()
     jev = FakeJev(JEV_HIGH)
     outcomes = _run(tmp_path, claude, [], jev=jev, scenes=QUEER_SCENES, lens=QUEER_LENS)
@@ -3917,9 +3922,9 @@ def test_queering_screens_only_markable_lines_on_haiku_and_records_each_marked_l
     ]
     assert outcomes == EXPECTED_QUEER_OUTCOMES
     assert jev.calls == []
-    allowed = (bible.SCHEMA, bible.SETUP_SCHEMA, SCREEN_SCHEMA)
-    assert all(any(schema is kind for kind in allowed) for _, _, schema in claude.calls)
-    assert claude.batches == 1 + len(QUEER_SCENES)
+    assert all(schema is SCREEN_SCHEMA for model, _, schema in claude.calls if model == claude_module.HAIKU)
+    # The bible, one batch per scene, the speakerless draft of scene c, and the arc judge.
+    assert claude.batches == 3 + len(QUEER_SCENES)
     records = [json.loads(line) for line in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()]
     assert ["bucket" in record for record in records] == [outcome.bucket is not None for outcome in EXPECTED_QUEER_OUTCOMES]
 
@@ -3943,6 +3948,258 @@ def test_queering_failed_screen_leaves_every_line_of_its_scene_unfinished(tmp_pa
         Outcome(NS_A, "3", 1, "made-up-speaker-c", (), "unfinished", None, None),
         *EXPECTED_QUEER_OUTCOMES[3:],
     ]
+
+
+# Queering phase 2 fixtures. Made-up speakers, notes, lines and redo note. Not game text.
+PHASE_SPEAKER = "made-up-speaker-d"
+PHASE_NOTE = "Made-up phase redo note. Not game text."
+NOTES_PHASE = {"speaker": PHASE_SPEAKER, "notes": "Made-up notes of speaker d. Not game text.", "gender": "made-up-gender-d"}
+# A chapter's bible names only the speakers that speak in that chapter.
+PHASE_BIBLE_ONE: dict[str, Any] = {**QUEER_BIBLE, "characters": [NOTES_FLIRT, NOTES_PHASE]}
+PHASE_BIBLE_TWO: dict[str, Any] = {**QUEER_BIBLE, "characters": [NOTES_VILLAIN, NOTES_PHASE]}
+PHASE_SCENES = (
+    Scene(
+        "made-up-scene-a",
+        (_line(NS_A, "1", PHASE_SPEAKER, EN_A1, 1), _line(NS_A, "2", None, EN_A2, 1), _line(NS_A, "3", "made-up-speaker-c", EN_A3, 1)),
+    ),
+    Scene(
+        "made-up-scene-b",
+        (_line(NS_B, "1", PHASE_SPEAKER, EN_B1, 2), _line(NS_B, "2", None, EN_B2, 2), _line(NS_B, "3", "made-up-speaker-a", EN_A4, 2)),
+    ),
+)
+PHASE_FLAGS = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [ALPHA], (NS_A, "3"): [BETA], (NS_B, "1"): [ALPHA], (NS_B, "2"): [ALPHA]}
+PHASE_DRAFTS = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1], (NS_B, "2"): [OPUS_B2]}
+PHASE_OUTCOMES = [
+    Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "3", 1, "made-up-speaker-c", (BETA,), "untouched", None, None, bucket="not-redirected"),
+    Outcome(NS_B, "1", 2, PHASE_SPEAKER, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_B, "2", 2, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_B, "3", 2, "made-up-speaker-a", (), "untouched", None, None),
+]
+
+
+@pytest.fixture
+def every_line_queer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every line outside the core cast and the antagonists lands in the queer bucket, so these fixtures need no hash value. Not game text.
+    monkeypatch.setattr(queering, "QUEER_PERCENT", 100)
+
+
+def _phase_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.bible = {1: PHASE_BIBLE_ONE, 2: PHASE_BIBLE_TWO}
+    claude.flags = dict(PHASE_FLAGS)
+    claude.drafts = dict(PHASE_DRAFTS)
+    return claude
+
+
+def _phase(tmp_path: Path, claude: FakeClaude) -> list[Outcome]:
+    # FakeRenderer({}) voices nothing, so each draft is its own candidate and every shipped text is the opus draft.
+    return _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=QUEER_LENS)
+
+
+def _speaker_draft_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and any(part.startswith("Scenes:\n") for part in parts)]
+
+
+def _scene_draft_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and any(part.startswith("Targets:\n") for part in parts)]
+
+
+def _dialog_records(tmp_path: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in (tmp_path / "repo" / "dialog" / LENS).iterdir():
+        for namespace, table in tomllib.loads(path.read_text(encoding="utf-8")).items():
+            records.update({(namespace, key): record for key, record in table.items()})
+    return records
+
+
+def test_queering_drafts_a_speakers_selected_lines_across_scenes_in_one_call(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    _phase(tmp_path, claude)
+    speaker_calls = _speaker_draft_calls(claude)
+    assert len(speaker_calls) == 1
+    assert len(json.loads(_part(speaker_calls[0], "Scenes:\n"))) == 2
+    assert _draft_refs(speaker_calls[0]) == [(NS_A, "1"), (NS_B, "1")]
+
+
+def test_queering_drafts_a_speakerless_selected_line_once_per_scene(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    _phase(tmp_path, claude)
+    assert sorted(_draft_refs(parts) for parts in _scene_draft_calls(claude)) == [[(NS_A, "2")], [(NS_B, "2")]]
+
+
+def test_queering_intent_carries_each_selected_lines_bucket_and_untouched_or_not_redirected_lines_get_none(
+    tmp_path: Path, every_line_queer: None
+) -> None:
+    claude = _phase_claude()
+    _phase(tmp_path, claude)
+    intents = sorted(
+        (_target(parts), json.loads(_part(parts, "Target line:\n"))["bucket"])
+        for _, parts, schema in claude.calls
+        if schema is INTENT_SCHEMA
+    )
+    assert intents == [((NS_A, "1"), "queer"), ((NS_A, "2"), "queer"), ((NS_B, "1"), "queer"), ((NS_B, "2"), "queer")]
+
+
+def test_queering_gates_and_writes_each_selected_line_to_dialog_with_its_vanilla_hash(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    outcomes = _phase(tmp_path, claude)
+    assert outcomes == PHASE_OUTCOMES
+    assert {ref: (record["text"], record["vanilla"]) for ref, record in _dialog_records(tmp_path).items()} == {
+        (NS_A, "1"): (OPUS_A1, vanilla_hash(EN_A1)),
+        (NS_A, "2"): (OPUS_A2, vanilla_hash(EN_A2)),
+        (NS_B, "1"): (OPUS_B1, vanilla_hash(EN_B1)),
+        (NS_B, "2"): (OPUS_B2, vanilla_hash(EN_B2)),
+    }
+
+
+def test_queering_redo_listed_selected_line_is_redrafted_with_its_note(tmp_path: Path, every_line_queer: None) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{PHASE_NOTE}"\n')
+    claude = _phase_claude()
+    claude.redrafts = {(NS_A, "1"): [REDRAFT_A1]}
+    outcomes = _phase(tmp_path, claude)
+    noted = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and f"Reviewer note:\n{PHASE_NOTE}" in parts]
+    assert [_draft_refs(parts) for parts in noted] == [[(NS_A, "1")]]
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
+        NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "changed", None, "opus", redo=True, bucket="queer"
+    )
+    assert _dialog_records(tmp_path)[(NS_A, "1")]["text"] == REDRAFT_A1
+
+
+def test_queering_intent_keep_stays_unchanged_and_keeps_its_bucket(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    claude.keeps = {(NS_A, "1"): "plot"}
+    outcomes = _phase(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
+        NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "kept_for_plot", None, None, keep_reason="plot", bucket="queer"
+    )
+    assert [_draft_refs(parts) for parts in _speaker_draft_calls(claude)] == [[(NS_B, "1")]]
+    assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
+
+
+def test_queering_arc_revert_fails_a_selected_line_and_keeps_its_bucket(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    claude.bible = {1: PHASE_BIBLE_ONE, 2: {**PHASE_BIBLE_TWO, "arcs": [ARC_A_ENTRY]}}
+    claude.arc = [_arc_verdict(False, (NS_A, "1")), _arc_verdict(False, (NS_A, "1"))]
+    outcomes = _phase(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "gate_failed", "arc", None, bucket="queer")
+    assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
+
+
+def test_queering_chapter_one_report_is_written_after_phase_two_and_counts_its_changes(tmp_path: Path, every_line_queer: None) -> None:
+    _phase(tmp_path, _phase_claude())
+    lines = _c01_path(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "chapter 1: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched"
+    assert "total: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched" in lines
+
+
+def test_queering_failed_speaker_draft_leaves_each_of_its_lines_unfinished_with_its_bucket(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    claude.drafts[(NS_A, "1")] = Unfinished("Made-up draft failure. Not game text.")
+    outcomes = _phase(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "unfinished", None, None, bucket="queer")
+    assert _outcome_of(outcomes, (NS_B, "1")) == Outcome(NS_B, "1", 2, PHASE_SPEAKER, (ALPHA,), "unfinished", None, None, bucket="queer")
+    assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "2")}
+
+
+# Queering phase 2 coherence, judge and base tests, on the phase fixtures above. Made-up lines. Not game text.
+def _queer_coherence_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.flags = {D1: [ALPHA], D2: [ALPHA]}
+    claude.drafts = {D1: [OPUS_D1], D2: [OPUS_D2]}
+    return claude
+
+
+def test_queering_scene_with_two_selected_changes_reverts_a_line_the_coherence_check_names_on_both_passes(
+    tmp_path: Path, every_line_queer: None
+) -> None:
+    claude = _queer_coherence_claude()
+    claude.coherence = [_verdict(False, D1), _verdict(False, D1)]
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=QUEER_LENS)
+    assert len(_coherence_calls(claude)) == 2
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, bucket="queer"),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    ]
+    assert _dialog_entries(tmp_path) == {D2}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up coherence failure. Not game text."), Rejected("Made-up coherence rejection. Not game text.")],
+)
+def test_queering_scene_with_two_selected_changes_leaves_both_unfinished_when_coherence_fails(
+    tmp_path: Path, every_line_queer: None, failure: Unfinished | Rejected
+) -> None:
+    claude = _queer_coherence_claude()
+    claude.coherence = [failure]
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=QUEER_LENS)
+    assert outcomes == [
+        Outcome(NS_C, "2", 3, None, (ALPHA,), "unfinished", None, None, bucket="queer"),
+        Outcome(NS_C, "3", 3, None, (ALPHA,), "unfinished", None, None, bucket="queer"),
+    ]
+    assert _dialog_entries(tmp_path) == set()
+
+
+def test_queering_selected_line_candidates_are_judged_before_they_ship(tmp_path: Path, every_line_queer: None) -> None:
+    claude = _phase_claude()
+    _phase(tmp_path, claude)
+    judged = _judged(claude, JUDGE_SCHEMA)
+    assert {(ref, candidate) for ref, candidate in judged} >= {
+        ((NS_A, "1"), OPUS_A1),
+        ((NS_A, "2"), OPUS_A2),
+        ((NS_B, "1"), OPUS_B1),
+        ((NS_B, "2"), OPUS_B2),
+    }
+
+
+@pytest.mark.parametrize(
+    ("failed", "kind", "gate"),
+    [("minimal_change", "gate_failed", "minimal_change"), ("plot", "kept_for_plot", "plot")],
+)
+def test_queering_selected_line_whose_first_candidate_fails_the_judge_is_retried_once_through_its_scene_then_fails_its_gate(
+    tmp_path: Path, every_line_queer: None, failed: str, kind: Literal["gate_failed", "kept_for_plot"], gate: str
+) -> None:
+    claude = _phase_claude()
+    claude.judgments = {**claude.judgments, OPUS_A1: _judgment(**{failed: False})}
+    outcomes = _phase(tmp_path, claude)
+    line_calls = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and (NS_A, "1") in _draft_refs(parts)]
+    speaker_calls = [parts for parts in line_calls if any(part.startswith("Scenes:\n") for part in parts)]
+    retries = [parts for parts in line_calls if any(part.startswith("The previous candidates failed") for part in parts)]
+    assert len(line_calls) == 2
+    assert len(speaker_calls) == 1
+    assert len(retries) == 1
+    assert any(part.startswith("Targets:\n") for part in retries[0])
+    assert _draft_refs(retries[0]) == [(NS_A, "1")]
+    assert any(part == f"The previous candidates failed the {failed} gate. Write candidates that pass it." for part in retries[0])
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), kind, gate, None, bucket="queer")
+    assert (NS_A, "1") not in _dialog_records(tmp_path)
+    assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
+
+
+def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(
+    tmp_path: Path, every_line_queer: None
+) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
+    claude = _phase_claude()
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=replace(QUEER_LENS, base=BASE))
+    prompts = [part for _, parts, _ in claude.calls for part in parts]
+    assert not any(EN_A2 in text for text in prompts)
+    assert any(BASE_A2 in text for text in prompts)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer")
+    chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
+    assert list(chapter_one[NS_A]["2"]) == BASE_FIELD_ORDER
+    assert chapter_one[NS_A]["2"] == {
+        "vanilla": vanilla_hash(EN_A2),
+        "base": vanilla_hash(BASE_A2),
+        "text": OPUS_A2,
+        "lens": LENS,
+        "reason": [ALPHA],
+        "writer": "opus",
+        "verdict": "passed",
+        "run": RUN,
+    }
 
 
 THROUGH_SCENES = (

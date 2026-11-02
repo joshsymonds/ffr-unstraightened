@@ -369,9 +369,10 @@ def _intend(
     line: SceneLine,
     reasons: tuple[str, ...],
     ask: Ask,
+    bucket: str | None = None,
 ) -> stages.Target | Outcome:
     callbacks, context = _neighbourhood(ctx, scene, line)
-    intended = stages.intent(ctx.store, ctx.lens, scene, line, reasons, callbacks, context, ask)
+    intended = stages.intent(ctx.store, ctx.lens, scene, line, reasons, callbacks, context, ask, bucket=bucket)
     if not isinstance(intended, stages.Intent):
         return _outcome(line, reasons, "unfinished")
     if intended.keep:
@@ -460,6 +461,18 @@ def _redraft(
     if outcome.outcome == "unfinished":
         return outcome, None
     return _outcome(line, reasons, "gate_failed", gate="redo"), None
+
+
+def _gated(
+    ctx: _Context, scene: Scene, target: stages.Target, reasons: tuple[str, ...], first: tuple[str, ...] | Unfinished | Rejected, ask: Ask
+) -> tuple[Outcome, Change | None]:
+    """Gates one drafted target through the line pass, then redrafts it under its note when the redo list names it."""
+    outcome, change = _line(ctx, scene, target, reasons, first, ask)
+    line = target.line
+    note = ctx.redo.get((line.namespace, line.key))
+    if note is None or outcome.outcome != "changed":
+        return outcome, change
+    return _redraft(ctx, scene, target, reasons, note, ask)
 
 
 def _join(
@@ -854,11 +867,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         plan = planned[ref]
         if isinstance(plan, Outcome):
             return plan, None
-        outcome, change = _line(ctx, scene, plan, reasons, first[ref], ask)
-        note = ctx.redo.get(ref)
-        if note is None or outcome.outcome != "changed":
-            return outcome, change
-        return _redraft(ctx, scene, plan, reasons, note, ask)
+        return _gated(ctx, scene, plan, reasons, first[ref], ask)
 
     gated = claude.fan_out(gate, scene.lines)
     outcomes = [outcome for outcome, _ in gated]
@@ -871,6 +880,86 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         outcomes, scene_changes, passed = _scene_pass(ctx, scene, section, cast, flagged, outcomes, line_rewrites, ask)
         changes += scene_changes
     return outcomes, changes, recall, passed
+
+
+def _queered(
+    ctx: _Context, scenes: Sequence[tuple[Scene, Ask]], outcomes: Sequence[list[Outcome]], batch: Callable[[], Ask]
+) -> list[tuple[list[Outcome], list[Change]]]:
+    """Phase 2 of queering, once every scene's screen has marked its lines. Each line in a rewritten bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Every target then gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
+    intents = [
+        (index, scene, ask, line, marked)
+        for index, ((scene, ask), scene_outcomes) in enumerate(zip(scenes, outcomes, strict=True))
+        for line, marked in zip(scene.lines, scene_outcomes, strict=True)
+        if marked.bucket in queering.REWRITTEN
+    ]
+
+    def intend(item: tuple[int, Scene, Ask, SceneLine, Outcome]) -> stages.Target | Outcome:
+        _, scene, ask, line, marked = item
+        return _intend(ctx, scene, line, marked.reasons, ask, marked.bucket)
+
+    intended = claude.fan_out(intend, intents)
+    targets: dict[str | None, dict[int, list[stages.Target]]] = {}
+    for (index, *_), plan in zip(intents, intended, strict=True):
+        if isinstance(plan, stages.Target):
+            targets.setdefault(plan.line.speaker, {}).setdefault(index, []).append(plan)
+    units: list[tuple[str | None, dict[int, list[stages.Target]], Ask]] = []
+    for speaker, by_scene in targets.items():
+        if speaker is None:
+            units.extend((None, {index: group}, batch()) for index, group in by_scene.items())
+        else:
+            units.append((speaker, by_scene, batch()))
+
+    def draft(
+        unit: tuple[str | None, dict[int, list[stages.Target]], Ask],
+    ) -> dict[tuple[int, str, str], tuple[str, ...] | Unfinished | Rejected]:
+        speaker, by_scene, ask = unit
+        if speaker is None:
+            index, group = next(iter(by_scene.items()))
+            return {
+                (index, namespace, key): drafted for (namespace, key), drafted in _first_drafts(ctx, scenes[index][0], group, ask).items()
+            }
+        answer = stages.draft_speaker(ctx.store, ctx.lens, [(scenes[index][0], group) for index, group in by_scene.items()], ask)
+        return {
+            (index, target.line.namespace, target.line.key): _drafted_for(answer, target.line)
+            for index, group in by_scene.items()
+            for target in group
+        }
+
+    firsts: dict[tuple[int, str, str], tuple[str, ...] | Unfinished | Rejected] = {}
+    for drafted in claude.fan_out(draft, units):
+        firsts.update(drafted)
+
+    def gate(item: tuple[int, Scene, Ask, SceneLine, Outcome, stages.Target | Outcome]) -> tuple[Outcome, Change | None]:
+        index, scene, ask, line, marked, plan = item
+        if isinstance(plan, Outcome):
+            outcome, change = plan, None
+        else:
+            outcome, change = _gated(ctx, scene, plan, marked.reasons, firsts[(index, line.namespace, line.key)], ask)
+        return replace(outcome, bucket=marked.bucket), change
+
+    gated = dict(
+        zip(
+            [(index, line.namespace, line.key) for index, _, _, line, _ in intents],
+            claude.fan_out(gate, [(*intent, plan) for intent, plan in zip(intents, intended, strict=True)]),
+            strict=True,
+        )
+    )
+
+    def settle(index: int) -> tuple[list[Outcome], list[Change]]:
+        scene, ask = scenes[index]
+        settled: list[Outcome] = []
+        changes: list[Change] = []
+        for line, marked in zip(scene.lines, outcomes[index], strict=True):
+            result = gated.get((index, line.namespace, line.key))
+            if result is None:
+                settled.append(marked)
+                continue
+            settled.append(result[0])
+            if result[1] is not None:
+                changes.append(result[1])
+        return _coherent(ctx, scene, settled, changes, ask)
+
+    return claude.fan_out(settle, list(range(len(scenes))))
 
 
 def _record(outcome: Outcome) -> Record:
@@ -1064,14 +1153,28 @@ def run(
         scene_outcomes, scene_changes, scene_recall, passed = _scene(ctx, scene, ask)
         with progress:
             out(f"scene {position}/{len(scenes)} {opaque_label(scene.key)}: {_counts(scene_outcomes)}")
-            if _holds_chapter_one(scene):
+            if not selecting and _holds_chapter_one(scene):
                 chapter_one.append((position, scene, passed, scene_outcomes))
                 waiting -= 1
                 if waiting == 0:
                     _write_provisional(root, ctx, chapter_one)
         return scene_outcomes, scene_changes, scene_recall, passed
 
-    scene_results = claude.fan_out(scene_pass, [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)])
+    scene_items = [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)]
+    scene_results = claude.fan_out(scene_pass, scene_items)
+    if selecting:
+        phase_two = _queered(ctx, [(scene, ask) for _, scene, ask in scene_items], [result[0] for result in scene_results], batch)
+        scene_results = [
+            (scene_outcomes, scene_changes, recall, passed)
+            for (scene_outcomes, scene_changes), (_, _, recall, passed) in zip(phase_two, scene_results, strict=True)
+        ]
+        done = [
+            (position, scene, passed, scene_outcomes)
+            for (position, scene, _), (scene_outcomes, _, _, passed) in zip(scene_items, scene_results, strict=True)
+            if _holds_chapter_one(scene)
+        ]
+        if done:
+            _write_provisional(root, ctx, done)
     outcomes: list[Outcome] = []
     changes: list[Change] = []
     passes: list[_PassRecord] = []
@@ -1083,8 +1186,7 @@ def run(
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
     outcomes, changes = _unified(ctx, outcomes, changes)
-    if not selecting:
-        outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
+    outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
     outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
