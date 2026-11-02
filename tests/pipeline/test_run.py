@@ -795,6 +795,17 @@ def test_a_kept_line_is_untouched_with_its_reasons_and_never_drafted_or_judged(t
     assert (NS_A, "1") not in judged
 
 
+def test_a_line_kept_for_plot_is_kept_for_plot_with_its_reason_and_never_drafted_or_judged(tmp_path: Path) -> None:
+    claude = _claude()
+    claude.keeps = {(NS_A, "1"): "plot"}
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "kept_for_plot", None, None, keep_reason="plot")
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
+    judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
+    assert (NS_A, "1") not in judged
+
+
 @pytest.mark.parametrize(
     "failure",
     [Unfinished("Made-up bible failure. Not game text."), Rejected("Made-up bible rejection. Not game text.")],

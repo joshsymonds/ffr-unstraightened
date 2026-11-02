@@ -342,7 +342,8 @@ def _intend(
     if not isinstance(intended, stages.Intent):
         return _outcome(line, reasons, "unfinished")
     if intended.keep:
-        return _outcome(line, reasons, "untouched", keep_reason=intended.keep_reason)
+        kind: OutcomeKind = "kept_for_plot" if intended.keep_reason == "plot" else "untouched"
+        return _outcome(line, reasons, kind, keep_reason=intended.keep_reason)
     return stages.Target(line, intended.text, callbacks, context)
 
 
