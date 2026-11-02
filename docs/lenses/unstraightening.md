@@ -162,40 +162,42 @@ lens file holds the scene text in its `[scene]` section.
 
 ### Patterns
 
-- `s1-manhood-performance`: a man is ranked, policed or put down as insufficiently
-  manly by another character, and this recurs in the scene.
+- `s1-manhood-performance`: a character ranks, polices or puts down a man as
+  insufficiently manly, such as telling him to be a man, and this recurs in the
+  scene.
 - `s2-conquest-fixation`: the banter is dominated by getting with women, with women
-  as prizes or scores and the ladies as the default topic. A man coaching another
-  man on how to get women, flirting aimed at a minor or a child-looking character,
-  and a woman whose only part is the slapstick rejection of a flirt also count.
+  as prizes or scores and the ladies as a man's default topic.
 - `s3-bechdel-fail`: two or more women talk with each other mainly about a man's
   desirability, attention, approval or whom he favors.
 
 ### Screen criteria
 
 - `s1-manhood-performance`, `s2-conquest-fixation`, `s3-bechdel-fail`: each restates
-  its pattern. The screen flags a scene for a pattern, not a line. An s3 hit is
-  judged by the scene, never by one line.
+  its pattern. The screen flags a scene for a pattern, not a line.
 - `recurring`: s1 needs the policing to recur within the scene. One line does not
   flag it.
 - `own-stance`: a speaker's own stance about their own manhood is protected when the
   bible records it as a trait or an arc.
+- `male-warmth`: male friendship, affection, camaraderie and brotherhood are exempt
+  from s1. Warmth between men is never stripped from a scene.
 - `presence-not-hit`: for s2, women being present or mentioned is not a hit. The
-  banter must be dominated by conquest.
+  banter must be dominated by conquest, unless `conquest-coaching`, `minor-flirt` or
+  `slapstick-rejection` applies.
+- `trait-density`: for s2, crush hints and flirting recorded as a trait are
+  characterization unless they take over a conversation with another purpose. Then
+  the trait is kept and its density is cut.
+- `conquest-coaching`: for s2, a man coaching another man on how to get women is a
+  hit.
+- `minor-flirt`: for s2, flirting aimed at a minor or a child-looking character is a
+  hit even when not recurring.
+- `slapstick-rejection`: for s2, a scene where a woman's only part is the slapstick
+  rejection of a flirt is a hit. The fix gives her a line of her own.
+- `scene-not-line`: each pattern is judged by the whole scene, never by a single
+  line, except where a criterion names a single line as a hit, as `minor-flirt` does.
 - `plot-actor-exempt`: for s3, talk about a man as a plot actor is exempt. Only talk
   about his desirability, attention, approval or favor is flagged.
-- `friendship-exempt`: male friendship, affection, camaraderie and brotherhood are
-  not s1.
-- `flirt-trait`: crush hints and flirting the bible records as a trait are
-  characterization, not s2, unless they take over a conversation that has another
-  purpose.
-- `coaching`: a man coaching another man on how to get women is s2. Presence-not-hit
-  does not apply to it.
-- `minor-flirt`: flirting aimed at a minor or a child-looking character is an s2 hit
-  even without recurring. Presence-not-hit does not apply to it.
-- `rejection-gag`: a woman whose only part in the scene is the slapstick rejection of
-  a flirt is s2. Presence-not-hit does not apply to it.
-- `own-goal-exempt`: s3 talk that advances her own goal is exempt.
+- `own-goal-exempt`: for s3, talk that advances her own goal is exempt. This is the
+  Mako Mori carve-out.
 
 ### Plan rules
 
@@ -204,14 +206,15 @@ lens file holds the scene text in its `[scene]` section.
   lines are planned first.
 - `line-pass-final`: a line the line pass changed or kept is never planned.
 - `keep-facts`: plot facts, relationships and traits are kept.
-- `no-invented-topic`: an s3 fix never invents a topic the scene does not offer.
+- `male-warmth`: a planned change never strips warmth between men.
+- `trait-density`: a recorded flirting or crush trait is kept, and the flirt lines
+  that take over a conversation are softened or removed.
+- `own-line`: the s2 slapstick-rejection fix gives the woman a line of her own, drawn
+  from the scene's existing content.
+- `no-invented-topic`: every fix, for every pattern, never invents a topic the scene
+  does not offer. An s3 fix may turn the talk toward a topic already in the scene.
 - `named-keep`: when no in-budget plan fixes the scene, the scene is kept and one
   reason is named: `protection`, `plot`, `trait`, `earned-arc` or `not-recurring`.
-  Under `minor-flirt`, `not-recurring` never keeps a minor-flirt hit.
-- `cut-density`: where `flirt-trait` applies and the flirting takes over a
-  conversation with another purpose, keep the trait and cut density.
-- `her-own-line`: for `rejection-gag`, the rejected woman gets a line of her own,
-  drawn from the scene's existing content. Never a new topic.
 
 ### Rubric
 
@@ -219,10 +222,10 @@ lens file holds the scene text in its `[scene]` section.
   speaker.
 - `keep-flirt-beat`: an s2 plan keeps at least one flirt beat where the bible records
   flirting as a trait.
+- `no-wiser-women`: a plan never fills removed banter by turning the women into
+  eye-rolling straight men for the men. That is the Women Are Wiser double standard.
 - `protections-hold`: every line-pass protection and exclusion still holds under the
   plan.
-- `no-eye-roll-fill`: rejects a plan that fills removed banter by turning the women
-  into eye-rolling straight men, the Women Are Wiser double standard.
 
 ## What the lens never does
 
