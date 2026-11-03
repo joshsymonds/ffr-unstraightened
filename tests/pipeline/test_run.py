@@ -5262,6 +5262,54 @@ def test_coherence_revert_of_a_repeated_trans_ref_in_its_first_scene_fails_every
     assert _dialog_entries(tmp_path) == {(NS_C, "1")}
 
 
+# One trans pick whose ref repeats twice in one scene. Not game text.
+SAME_SCENE_REPEATED_TRANS_SCENES = (
+    Scene("made-up-scene-x-repeat", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "1", REFILL_X, EN_A1, 1))),
+)
+
+
+def test_a_trans_pick_whose_ref_repeats_within_one_scene_keeps_its_change_for_every_occurrence(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=SAME_SCENE_REPEATED_TRANS_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, trans_share=100),
+    )
+    assert [(outcome.speaker, outcome.outcome, outcome.bucket) for outcome in outcomes] == [(REFILL_X, "changed", "trans")] * 2
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+    assert _side(tmp_path, "trans")["achieved"] == 1
+
+
+# The same ref twice in its first scene and once in a later scene, so one change serves all three occurrences. Not game text.
+TWICE_THEN_ONCE_TRANS_SCENES = (
+    Scene(
+        "made-up-scene-x-early",
+        (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "1", REFILL_X, EN_A1, 1)),
+    ),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2),)),
+)
+
+
+def test_a_trans_pick_repeated_twice_in_its_first_scene_and_once_later_keeps_one_change_for_all_three(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=TWICE_THEN_ONCE_TRANS_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, trans_share=100),
+    )
+    assert [(outcome.speaker, outcome.outcome, outcome.bucket) for outcome in outcomes] == [(REFILL_X, "changed", "trans")] * 3
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+    assert _side(tmp_path, "trans")["achieved"] == 1
+
+
 # One speaker with two trans-candidate lines in one scene, so one trans pick holds both lines. Not game text.
 PAIR_SCENES = (Scene("made-up-scene-pair", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_X, EN_A2, 1))),)
 

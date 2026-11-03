@@ -1068,7 +1068,7 @@ def _pick_unit(
             ref = (line.namespace, line.key)
             if ref in gated:
                 first, _ = gated[ref]
-                results[(index, *ref)] = (replace(first, chapter=line.chapter, reasons=marked.reasons), None)
+                results.setdefault((index, *ref), (replace(first, chapter=line.chapter, reasons=marked.reasons), None))
                 continue
             outcome, change = _pick_line(ctx, scene, line, marked, answer, ask)
             gated[ref] = (replace(outcome, bucket=marked.bucket), change)
@@ -1160,13 +1160,15 @@ def _queered(
         scene, ask = scenes[index]
         settled: list[Outcome] = []
         changes: list[Change] = []
+        recorded: set[tuple[str, str]] = set()
         for line, marked in zip(scene.lines, outcomes[index], strict=True):
             result = gated.get((index, line.namespace, line.key))
             if result is None:
                 settled.append(marked)
                 continue
             settled.append(result[0])
-            if result[1] is not None:
+            if result[1] is not None and (line.namespace, line.key) not in recorded:
+                recorded.add((line.namespace, line.key))
                 changes.append(result[1])
         return _coherent(ctx, scene, settled, changes, ask)
 
