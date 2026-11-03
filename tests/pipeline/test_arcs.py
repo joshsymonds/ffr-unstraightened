@@ -27,6 +27,7 @@ from ffrd.pipeline.arcs import (
     line_context,
     lines,
     scene_arcs,
+    scene_cast,
     with_changes,
 )
 from ffrd.pipeline.claude import Rejected, Unfinished
@@ -1263,3 +1264,65 @@ def test_unbased_lens_arc_judge_prompt_keeps_every_beat_of_the_arc(tmp_path: Pat
 
     _, parts, _ = ask.calls[0]
     assert "Arc:\n" + _j(WINDOW_ARC) in parts
+
+
+# Made-up chapter four bible, narration and scenes for the scene cast windows. Not game text.
+BIBLE_FOUR = {
+    "chapter": 4,
+    "characters": [
+        {"speaker": "Ash", "notes": "Made-up note about Ash in chapter four. Not game text."},
+    ],
+    "arcs": [],
+}
+CAST_BIBLES = [*WINDOW_BIBLES, BIBLE_FOUR]
+LINE_NARRATION_FOUR = SceneLine(
+    "ST_C04_001_01", "7", None, "Made-up narration four. Not game text.", "Made-up Japanese fourteen. Not game text.", 4
+)
+SCENE_CAST_THREE = Scene("made-up-scene-cast-three", (LINE_ASH_THREE, LINE_BRIN_THREE))
+SCENE_CAST_SPAN = Scene("made-up-scene-cast-span", (LINE_ASH_TWO, LINE_BRIN_TWO, LINE_ASH_THREE))
+SCENE_CAST_UNPLACED = Scene("made-up-scene-cast-unplaced", (LINE_ASH_UNPLACED, LINE_BRIN_UNPLACED, LINE_SPEAKERLESS))
+
+
+def test_scene_cast_takes_each_speaker_window_and_skips_chapter_four() -> None:
+    assert scene_cast(CAST_BIBLES, SCENE_CAST_THREE) == [
+        {"speaker": "Ash", "notes": "Made-up note about Ash in chapter one. Not game text.", "chapter": 1},
+        {"speaker": "Brin", "notes": "Made-up note about Brin in chapter two. Not game text.", "chapter": 2},
+        {"speaker": "Ash", "notes": "Made-up note about Ash in chapter three. Not game text.", "chapter": 3},
+    ]
+
+
+def test_scene_cast_spanning_two_chapters_gets_each_window_once() -> None:
+    assert scene_cast(CAST_BIBLES, SCENE_CAST_SPAN) == [
+        {"speaker": "Ash", "notes": "Made-up note about Ash in chapter one. Not game text.", "chapter": 1},
+        {"speaker": "Brin", "notes": "Made-up note about Brin in chapter one. Not game text.", "chapter": 1},
+        {"speaker": "Brin", "notes": "Made-up note about Brin in chapter two. Not game text.", "chapter": 2},
+        {"speaker": "Ash", "notes": "Made-up note about Ash in chapter three. Not game text.", "chapter": 3},
+    ]
+
+
+def test_unplaced_scene_gets_the_last_bible_in_list_order_holding_each_speaker() -> None:
+    assert scene_cast(UNPLACED_LAST_BIBLES, SCENE_CAST_UNPLACED) == [
+        {"speaker": "Brin", "notes": "Made-up note about Brin in chapter two. Not game text.", "chapter": 2},
+        {
+            "speaker": "Ash",
+            "notes": "Made-up note about Ash, unplaced. Not game text.",
+            "gender": "Made-up gender value. Not game text.",
+            "chapter": None,
+        },
+    ]
+
+
+def test_speakerless_lines_add_no_entries_and_no_chapter() -> None:
+    assert scene_cast(CAST_BIBLES, Scene("made-up-scene-narration-only", (LINE_SPEAKERLESS,))) == []
+    assert scene_cast(CAST_BIBLES, Scene("made-up-scene-narration-placed", (LINE_ASH_THREE, LINE_BRIN_THREE, LINE_NARRATION_FOUR))) == (
+        scene_cast(CAST_BIBLES, SCENE_CAST_THREE)
+    )
+
+
+def test_scene_cast_leaves_inputs_unchanged() -> None:
+    bibles = copy.deepcopy(CAST_BIBLES)
+    snapshot = copy.deepcopy(CAST_BIBLES)
+
+    scene_cast(bibles, SCENE_CAST_SPAN)
+
+    assert bibles == snapshot

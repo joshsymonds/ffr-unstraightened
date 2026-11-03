@@ -128,6 +128,23 @@ def cast(bibles: Sequence[Mapping[str, Any]], speakers: Collection[str | None]) 
     ]
 
 
+def scene_cast(bibles: Sequence[Mapping[str, Any]], scene: Scene) -> list[dict[str, Any]]:
+    """The scene speakers' character entries from each placed chapter's window (see _line_notes), or with no placed line the last bible holding one, in bible order, each with its speaker and chapter."""
+    speaking = [line for line in scene.lines if line.speaker is not None]
+    speakers = {line.speaker for line in speaking if line.speaker is not None}
+    chapters = {line.chapter for line in speaking if line.chapter is not None}
+    windows: dict[str, set[int]] = {speaker: set() for speaker in speakers}
+    for speaker in speakers:
+        for chapter in chapters or {None}:
+            windows[speaker].update(_window(bibles, speaker, chapter))
+    return [
+        {**entry, "chapter": bible["chapter"]}
+        for index, bible in enumerate(bibles)
+        for entry in bible["characters"]
+        if entry["speaker"] in windows and index in windows[entry["speaker"]]
+    ]
+
+
 def line_context(
     arcs: Sequence[Mapping[str, Any]],
     bibles: Sequence[Mapping[str, Any]],
@@ -178,15 +195,22 @@ def _state(states: Sequence[Mapping[str, Any]], chapter: int) -> Mapping[str, An
 
 def _line_notes(bibles: Sequence[Mapping[str, Any]], speaker: str, chapter: int | None) -> list[dict[str, Any]]:
     """The speaker's entries from the chapter's bibles, preceded by the latest earlier bible holding one; unplaced, the last bible in list order holding one."""
+    return [entry for index in _window(bibles, speaker, chapter) for entry in _entries(bibles[index], speaker)]
+
+
+def _window(bibles: Sequence[Mapping[str, Any]], speaker: str, chapter: int | None) -> list[int]:
+    """Indices of the bibles _line_notes reads for the speaker: the chapter's bibles, preceded by the latest earlier bible holding one; unplaced, the last one in list order holding one."""
     if chapter is None:
-        chosen = [bible for bible in bibles if _entries(bible, speaker)][-1:]
-    else:
-        earlier = [bible for bible in bibles if bible["chapter"] is not None and bible["chapter"] < chapter and _entries(bible, speaker)]
-        chosen = [
-            *sorted(earlier, key=lambda bible: bible["chapter"])[-1:],
-            *(bible for bible in bibles if bible["chapter"] == chapter),
-        ]
-    return [entry for bible in chosen for entry in _entries(bible, speaker)]
+        return [index for index, bible in enumerate(bibles) if _entries(bible, speaker)][-1:]
+    earlier = [
+        index
+        for index, bible in enumerate(bibles)
+        if bible["chapter"] is not None and bible["chapter"] < chapter and _entries(bible, speaker)
+    ]
+    return [
+        *sorted(earlier, key=lambda index: bibles[index]["chapter"])[-1:],
+        *(index for index, bible in enumerate(bibles) if bible["chapter"] == chapter),
+    ]
 
 
 def _notes(bibles: Sequence[Mapping[str, Any]], speaker: str) -> list[dict[str, Any]]:
