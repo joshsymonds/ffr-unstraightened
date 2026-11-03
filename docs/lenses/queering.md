@@ -32,7 +32,7 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   interest of any sort: a partner, a crush, someone they are attracted to, flirting or
   romantic pursuit.
 - `gender-roles`: a line about what men or women are, may do or should do. Tracking only:
-  a gender-roles flag never selects a speaker or a line.
+  a gender-roles flag never selects a queer line, though its named speaker can be a trans pick.
 - `not-core-cast`: the marker never flags a core-cast line, with one exception: the flirt,
   the one speaker whose cast entry carries `"flirt": true`. It flags the flirt's
   running-gag flirts aimed only at a woman or women under `flirt-at-woman`. It never
@@ -59,14 +59,17 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   as no-hit.
 
 Selection: the queer and trans picks come from salted seeded orders, and the two are
-disjoint. Queer is round(queer_share% of the romance pool), where the romance pool is the
-eligible speakers with a romance line plus each speakerless romance line. Trans is
-round(trans_share% of every eligible character). Eligible means not core cast, not an
-antagonist, and not the flirt. Each pool is sorted by a salted SHA-256 of its unit id, and
-the queer and trans salts keep the two orders apart. Picks that end with no surviving change
-are refilled from the order until the target or the pool runs out. Every romance line of a
-queer pick converts, drafted together, and every line of a trans pick is drafted together.
-The gender-roles marks never select.
+disjoint. Queer takes queer_count of the romance pool, where the romance pool is the
+eligible speakers with a romance line plus each speakerless romance line. Trans takes
+trans_count of the trans pool, where the trans pool is the eligible speakers with a romance
+or gender-roles line. Speakerless lines are never trans picks. Eligible means not core cast,
+not an antagonist, and not the flirt. Each count is a whole number or `all`: a count above
+the pool takes the whole pool and is reported exhausted, and a count of `all` takes the whole
+pool. Each pool is sorted by a salted SHA-256 of its unit id, and the queer and trans salts
+keep the two orders apart. Picks that end with no surviving change are refilled from the
+order until the target or the pool runs out. Every romance line of a queer pick converts,
+drafted together, and every line of a trans pick is drafted together. A gender-roles mark
+never puts a unit in the queer pool.
 
 ## The flirt
 
@@ -133,7 +136,7 @@ The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 
 ## How it is checked
 
-The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible characters as trans, one draft call per pick, and no Jev.
+The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible speakers with a romance or gender-roles line as trans, one draft call per pick, and no Jev.
 
 The triage questions are used only for counts, with no Jev recheck. The marker reads the lines of characters outside the core cast who are not antagonists, and the flirt's. The lens test, `tests/lenses/test_queering.py`, pins the triage
 questions, the label sets of each stage, the key sentences of this page and the sections

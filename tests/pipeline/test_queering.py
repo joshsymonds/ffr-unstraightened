@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -189,11 +189,16 @@ def test_unit_is_speaker_or_namespace_and_key() -> None:
 
 
 @pytest.mark.parametrize(
-    ("share", "size", "expected"),
-    [(15, 20, 3), (15, 10, 2), (15, 3, 0), (5, 10, 1), (50, 1, 1), (100, 37, 37), (0, 37, 0)],
+    ("count", "size", "expected"),
+    [(10, 20, 10), (10, 3, 3), (1, 3, 1), (0, 37, 0), (5, 0, 0), ("all", 37, 37), ("all", 0, 0)],
 )
-def test_target_rounds_share_of_size_half_up(share: int, size: int, expected: int) -> None:
-    assert queering.target(share, size) == expected
+def test_target_is_the_count_capped_at_the_pool_or_the_whole_pool_for_all(count: int | Literal["all"], size: int, expected: int) -> None:
+    assert queering.target(count, size) == expected
+
+
+@pytest.mark.parametrize(("count", "size", "expected"), [(10, 3, 10), (0, 37, 0), ("all", 37, 37)])
+def test_requested_is_the_count_or_the_pool_for_all(count: int | Literal["all"], size: int, expected: int) -> None:
+    assert queering.requested(count, size) == expected
 
 
 SYNTH_UNITS = [f"Synth-{i}" for i in range(21)] + ["Made-up-ns/3", "Made-up-ns/4"]

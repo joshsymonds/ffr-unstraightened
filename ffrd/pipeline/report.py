@@ -333,7 +333,7 @@ class Round:
 
 @dataclass(frozen=True)
 class Side:
-    share: int
+    count: int | str
     pool: int
     target: int
     rounds: tuple[Round, ...]
@@ -366,6 +366,15 @@ def _selection_count(obj: dict[str, object], name: str, prefix: str, path: Path)
     return value
 
 
+def _side_count(side: dict[str, object], prefix: str, path: Path) -> int | str:
+    value = _selection_field(side, "count", prefix, path)
+    if value == "all":
+        return "all"
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Fail(f'{path}: field {prefix}count must be a non-negative integer or "all"')
+    return value
+
+
 def _selection_object(obj: dict[str, object], name: str, prefix: str, path: Path) -> dict[str, object]:
     value = _selection_field(obj, name, prefix, path)
     if not isinstance(value, dict):
@@ -392,7 +401,7 @@ def _side(obj: dict[str, object], name: str, path: Path) -> Side:
     if not isinstance(exhausted, bool):
         raise Fail(f"{path}: field {prefix}exhausted must be true or false")
     return Side(
-        share=_selection_count(side, "share", prefix, path),
+        count=_side_count(side, prefix, path),
         pool=_selection_count(side, "pool", prefix, path),
         target=_selection_count(side, "target", prefix, path),
         rounds=tuple(_round(entry, f"{prefix}rounds.{index}", path) for index, entry in enumerate(rounds)),
@@ -541,8 +550,7 @@ def _redo_line(records: list[Record]) -> str:
 
 
 def _side_lines(label: str, side: Side) -> list[str]:
-    exact = side.share * side.pool / 100
-    lines = [f"queering {label} target: {side.target} ({side.share}% of {side.pool} = {exact:.2f})"]
+    lines = [f"queering {label} target: {side.target} (count {side.count}, pool {side.pool})"]
     lines += [f"queering {label} round {n}: tried {r.tried}, passed {r.passed}" for n, r in enumerate(side.rounds, 1)]
     exhausted = ", pool exhausted" if side.exhausted else ""
     lines.append(f"queering {label} achieved: {side.achieved} of {side.target}{exhausted}")
