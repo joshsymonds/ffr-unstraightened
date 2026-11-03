@@ -93,12 +93,11 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
     ),
     ("intent", "world-bucket", "Put it in one short clause, with no labels and no explaining."),
     ("intent", "nonbinary-bucket", "For a nonbinary pick, change one candidate line of the speaker"),
-    (
-        "intent",
-        "nonbinary-bucket",
-        "a short mention of a specific partner, consistently called they/them wherever gender would otherwise show",
-    ),
+    ("intent", "nonbinary-bucket", "a short mention of a specific partner"),
+    ("intent", "nonbinary-bucket", 'either "my partner" or a name the line already allows'),
+    ("intent", "nonbinary-bucket", "consistently called they/them wherever gender would otherwise show"),
     ("intent", "nonbinary-bucket", "worked into a line already about the speaker's home, family, work or daily life"),
+    ("intent", "nonbinary-bucket", "a line where the partner's gender would otherwise show"),
     ("intent", "nonbinary-bucket", "The partner must carry the line's point, so that deleting the mention would lose something."),
     ("intent", "nonbinary-bucket", "Put it in one short clause, with no labels and no explaining."),
     ("intent", "nonbinary-bucket", "Change no other line."),
@@ -168,12 +167,13 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
     (
         "judge",
         "nonbinary-bucket",
-        "Reject a rewrite whose partner's gender is unspecified rather than consistently they/them wherever gender would otherwise show.",
+        "Reject a rewrite whose they/them reads as merely unspecified gender",
     ),
+    ("judge", "nonbinary-bucket", "the partner is not a specific person"),
     (
         "judge",
         "nonbinary-bucket",
-        "Reject a rewrite that uses a modern label (trans, transgender, transition, nonbinary, deadname) in the setting.",
+        "Reject a rewrite that uses the word nonbinary or any modern label (trans, transgender, transition, deadname) in the setting.",
     ),
     ("judge", "nonbinary-bucket", "Reject a rewrite whose partner mention could be deleted without loss."),
     ("judge", "nonbinary-bucket", "Reject a rewrite that is not one short clause, or that puts a label or an explanation in the line."),
@@ -219,8 +219,16 @@ REJECT_RULES: tuple[str, ...] = (
 
 # Wording that the brief retires from the lens and the doc: the plot rule's screen clause.
 RETIRED_PHRASES: tuple[str, ...] = ("shown on screen",)
-# Nonbinary-partner wording that the trans bucket never carries: the nonbinary edit is its own bucket.
-TRANS_RETIRED_PHRASES: tuple[str, ...] = ("nonbinary partner", "they/them")
+# Nonbinary-partner wording that the romance and trans buckets never carry: the nonbinary edit is its own bucket.
+NONBINARY_PARTNER_PHRASES: tuple[str, ...] = ("nonbinary partner", "they/them")
+# The doc entries that carry the nonbinary bucket's legibility rule, under their section heading.
+NONBINARY_DOC_PHRASES: tuple[tuple[str, str], ...] = (
+    ("## Buckets", 'a short mention of a specific partner, "my partner" or a name the line already allows'),
+    ("## Buckets", "consistently called they/them wherever gender would otherwise show"),
+    ("## Buckets", "a line where the partner's gender would otherwise show"),
+    ("## Judge rubric", "rejects a rewrite whose they/them reads as merely unspecified gender"),
+    ("## Judge rubric", "the word nonbinary or any modern label"),
+)
 
 DOC_SECTIONS: tuple[str, ...] = (
     "## Aims",
@@ -376,14 +384,22 @@ def test_retired_wording_is_gone_from_the_lens_and_the_doc(phrase: str) -> None:
     assert phrase not in doc_text()
 
 
-@pytest.mark.parametrize("phrase", TRANS_RETIRED_PHRASES)
+@pytest.mark.parametrize("phrase", NONBINARY_PARTNER_PHRASES)
 @pytest.mark.parametrize("stage", ("intent", "judge"))
-def test_trans_bucket_paragraph_carries_no_nonbinary_partner_wording(lens: Lens, stage: Stage, phrase: str) -> None:
-    (paragraph,) = labelled(lens, stage, "trans-bucket")
+@pytest.mark.parametrize("bucket", ("queer-bucket", "trans-bucket"))
+def test_romance_and_trans_bucket_paragraphs_carry_no_nonbinary_partner_wording(lens: Lens, bucket: str, stage: Stage, phrase: str) -> None:
+    (paragraph,) = labelled(lens, stage, bucket)
     assert phrase not in paragraph
 
 
-@pytest.mark.parametrize("phrase", TRANS_RETIRED_PHRASES)
+@pytest.mark.parametrize(("heading", "phrase"), NONBINARY_DOC_PHRASES)
+def test_nonbinary_doc_entry_carries_the_legibility_rule(heading: str, phrase: str) -> None:
+    section = doc_text().split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
+    entry = section.split("- `nonbinary-bucket`", 1)[1].split("- `trans-bucket`", 1)[0]
+    assert phrase in " ".join(entry.split())
+
+
+@pytest.mark.parametrize("phrase", NONBINARY_PARTNER_PHRASES)
 def test_trans_bucket_doc_entry_carries_no_nonbinary_partner_wording(phrase: str) -> None:
     section = doc_text().split("\n## Buckets\n", 1)[1].split("\n## ", 1)[0]
     entry = section.split("- `trans-bucket`", 1)[1].split("- `same-partner`", 1)[0]
