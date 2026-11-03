@@ -48,7 +48,7 @@ ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 QUEERING_LINE = (
     r"queering (romance: [0-9]+ lines, [0-9]+ characters, [0-9]+ speakerless|gender roles: [0-9]+ lines, [0-9]+ characters"
-    r"|eligible characters: [0-9]+|(queer|trans) target: [0-9]+ \([0-9]+% of [0-9]+ = [0-9]+\.[0-9]{2}\)"
+    r"|eligible characters: [0-9]+|(queer|trans) target: [0-9]+ \(count ([0-9]+|all), pool [0-9]+\)"
     r"|(queer|trans) round [0-9]+: tried [0-9]+, passed [0-9]+|(queer|trans) achieved: [0-9]+ of [0-9]+(, pool exhausted)?"
     r"|flirt marked: [0-9]+, redirect half: [0-9]+"
     r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
@@ -391,14 +391,14 @@ QUEERING_RECORDS = (
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched"),
 )
 
-# Made-up selection counts: queer took two rounds and reached its target; trans ran out of pool short
-# of its target. Not game text.
+# Made-up selection counts: queer took two rounds and reached its target; trans is set to "all", so its
+# target is its whole pool, and it ran out of pool short of that target. Not game text.
 SELECTION_OBJECT: dict[str, object] = {
     "romance": {"lines": 4, "characters": 3, "speakerless": 1},
     "gender_roles": {"lines": 2, "characters": 2},
     "eligible_characters": 5,
     "queer": {
-        "share": 40,
+        "count": 3,
         "pool": 7,
         "target": 3,
         "rounds": [{"tried": 4, "passed": 2}, {"tried": 3, "passed": 1}],
@@ -406,9 +406,9 @@ SELECTION_OBJECT: dict[str, object] = {
         "exhausted": False,
     },
     "trans": {
-        "share": 60,
+        "count": "all",
         "pool": 4,
-        "target": 2,
+        "target": 4,
         "rounds": [{"tried": 2, "passed": 1}, {"tried": 2, "passed": 0}],
         "achieved": 1,
         "exhausted": True,
@@ -419,14 +419,14 @@ EXPECTED_SELECTION = [
     "queering romance: 4 lines, 3 characters, 1 speakerless",
     "queering gender roles: 2 lines, 2 characters",
     "queering eligible characters: 5",
-    "queering queer target: 3 (40% of 7 = 2.80)",
+    "queering queer target: 3 (count 3, pool 7)",
     "queering queer round 1: tried 4, passed 2",
     "queering queer round 2: tried 3, passed 1",
     "queering queer achieved: 3 of 3",
-    "queering trans target: 2 (60% of 4 = 2.40)",
+    "queering trans target: 4 (count all, pool 4)",
     "queering trans round 1: tried 2, passed 1",
     "queering trans round 2: tried 2, passed 0",
-    "queering trans achieved: 1 of 2, pool exhausted",
+    "queering trans achieved: 1 of 4, pool exhausted",
 ]
 EXPECTED_OUTCOME_LINES = [
     "queering flirt marked: 3, redirect half: 2",
@@ -503,7 +503,13 @@ BAD_SELECTION = [
         _broken("gender_roles", "characters", value=True), "field gender_roles.characters must be a non-negative integer", id="gender-bool"
     ),
     pytest.param(_broken("eligible_characters"), "field eligible_characters is missing", id="eligible-missing"),
-    pytest.param(_broken("queer", "share", value=2.5), "field queer.share must be a non-negative integer", id="share-float"),
+    pytest.param(_broken("queer", "count"), "field queer.count is missing", id="count-missing"),
+    pytest.param(_broken("queer", "count", value=2.5), 'field queer.count must be a non-negative integer or "all"', id="count-float"),
+    pytest.param(_broken("trans", "count", value=-1), 'field trans.count must be a non-negative integer or "all"', id="count-negative"),
+    pytest.param(_broken("trans", "count", value=True), 'field trans.count must be a non-negative integer or "all"', id="count-bool"),
+    pytest.param(
+        _broken("queer", "count", value="SENTINEL-COUNT"), 'field queer.count must be a non-negative integer or "all"', id="count-string"
+    ),
     pytest.param(_broken("queer", "rounds", value="SENTINEL-ROUNDS"), "field queer.rounds must be a list", id="rounds-type"),
     pytest.param(_broken("queer", "rounds", 0, value="SENTINEL-ROUND"), "field queer.rounds.0 must be an object", id="round-type"),
     pytest.param(
@@ -530,6 +536,21 @@ def test_invalid_selection_fails_naming_file_and_field_but_not_the_value(repo: P
     assert str(path) in message
     assert fragment in message
     assert "SENTINEL" not in message
+
+
+def test_share_field_does_not_stand_in_for_count(repo: Path) -> None:
+    # Made-up selection whose queer side carries a share field and no count. Not game text.
+    root: dict[str, Any] = copy.deepcopy(SELECTION_OBJECT)
+    del root["queer"]["count"]
+    root["queer"]["share"] = 40
+    (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
+    _write(repo, _lines(*QUEERING_RECORDS))
+    _write_selection(repo, _bytes(root))
+    _write_arcs(repo)
+    _write_recall(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    assert "field queer.count is missing" in str(raised.value)
 
 
 def test_lens_without_selection_prints_no_queering_line(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
