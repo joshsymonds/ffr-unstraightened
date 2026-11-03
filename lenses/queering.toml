@@ -4,8 +4,9 @@
 
 base = "unstraightening"
 selection = "queering"
-queer_count = 10
-trans_count = 5
+romance_share = 15
+world_share = 15
+trans_share = 5
 
 [[triage]]
 id = "romance"

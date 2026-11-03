@@ -157,13 +157,11 @@ DOC_SENTENCES: tuple[str, ...] = (
     "The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible speakers with a romance or gender-roles line as trans, one draft call per pick, and no Jev.",
 )
 BUCKET_PHRASES: tuple[str, ...] = (
-    "queer_count",
-    "trans_count",
-    "queer_count of the romance pool",
-    "trans_count of the trans pool",
+    "romance_share of the romance pool",
+    "trans_share of all eligible characters",
     "the trans pool is the eligible speakers with a romance or gender-roles line",
     "Speakerless lines are never trans picks",
-    "a count of `all` takes the whole pool",
+    "a share of 100 takes the whole pool",
     "refilled from the order until the target or the pool runs out",
     "gender-roles mark never puts a unit in the queer pool",
 )
@@ -209,21 +207,32 @@ def test_lens_declares_its_base_and_selection(lens: Lens) -> None:
     assert lens.selection == "queering"
 
 
-def test_lens_declares_its_counts(lens: Lens) -> None:
-    assert lens.queer_count == 10
-    assert lens.trans_count == 5
+def test_lens_declares_its_shares(lens: Lens) -> None:
+    assert lens.romance_share == 15
+    assert lens.world_share == 15
+    assert lens.trans_share == 5
 
 
 def test_declarations_are_the_only_top_level_keys_before_the_first_table() -> None:
     head = LENS.read_text(encoding="utf-8").split("[[triage]]", 1)[0]
-    assert tomllib.loads(head) == {"base": "unstraightening", "selection": "queering", "queer_count": 10, "trans_count": 5}
+    assert tomllib.loads(head) == {
+        "base": "unstraightening",
+        "selection": "queering",
+        "romance_share": 15,
+        "world_share": 15,
+        "trans_share": 5,
+    }
 
 
 def test_stage_texts_are_unchanged_by_the_declarations(lens: Lens, tmp_path: Path) -> None:
     lines = LENS.read_text(encoding="utf-8").splitlines(keepends=True)
     bare = tmp_path / "queering.toml"
     bare.write_text(
-        "".join(line for line in lines if not line.startswith(("base = ", "selection = ", "queer_count = ", "trans_count = "))),
+        "".join(
+            line
+            for line in lines
+            if not line.startswith(("base = ", "selection = ", "romance_share = ", "world_share = ", "trans_share = "))
+        ),
         encoding="utf-8",
     )
     without = load_lens(bare)
@@ -291,7 +300,7 @@ def test_doc_carries_its_pinned_sentence(sentence: str) -> None:
 
 
 @pytest.mark.parametrize("phrase", BUCKET_PHRASES)
-def test_doc_buckets_describe_the_counts_and_the_refill(phrase: str) -> None:
+def test_doc_buckets_describe_the_shares_and_the_refill(phrase: str) -> None:
     section = doc_text().split("\n## Buckets\n", 1)[1].split("\n## ", 1)[0]
     assert phrase in " ".join(section.split())
 

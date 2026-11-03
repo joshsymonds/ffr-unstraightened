@@ -68,12 +68,8 @@ def order(units: Iterable[str], salt: str) -> list[str]:
     return sorted(set(units), key=lambda unit: (hashlib.sha256(f"{salt}/{unit}".encode()).digest(), unit))
 
 
-def requested(count: int | Literal["all"], size: int) -> int:
-    return size if count == "all" else count
-
-
-def target(count: int | Literal["all"], size: int) -> int:
-    return min(requested(count, size), size)
+def target(share: int, size: int) -> int:
+    return (share * size + 50) // 100
 
 
 def redirected(namespace: str, key: str) -> bool:

@@ -14,11 +14,12 @@ Stage = Literal["triage", "screen", "intent", "judge", "scene"]
 
 ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge", "scene"})
-TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection", "queer_count", "trans_count"})
+TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection", "romance_share", "world_share", "trans_share"})
 SCENE_KEYS = frozenset({"patterns", "criteria", "plan", "rubric"})
 SCREEN_KEYS = frozenset({"criteria", "model"})
-DEFAULT_QUEER_COUNT = 10
-DEFAULT_TRANS_COUNT = 5
+DEFAULT_ROMANCE_SHARE = 15
+DEFAULT_WORLD_SHARE = 15
+DEFAULT_TRANS_SHARE = 5
 
 
 @dataclass(frozen=True)
@@ -52,8 +53,9 @@ class Lens:
     base: str | None = None
     selection: Literal["queering"] | None = None
     screen_model: str = OPUS
-    queer_count: int | Literal["all"] = DEFAULT_QUEER_COUNT
-    trans_count: int | Literal["all"] = DEFAULT_TRANS_COUNT
+    romance_share: int = DEFAULT_ROMANCE_SHARE
+    world_share: int = DEFAULT_WORLD_SHARE
+    trans_share: int = DEFAULT_TRANS_SHARE
 
     def stage_text(self, stage: Stage) -> str:
         section: object
@@ -244,15 +246,13 @@ def _screen_model(screen: dict[str, object] | None, report: _Report) -> str:
     return OPUS
 
 
-def _count(data: dict[str, object], key: str, default: int, report: _Report) -> int | Literal["all"]:
+def _share(data: dict[str, object], key: str, default: int, report: _Report) -> int:
     if key not in data:
         return default
     value = data[key]
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100:
         return value
-    if isinstance(value, str) and value == "all":
-        return "all"
-    report.add(key, 'must be a non-negative whole number or "all"')
+    report.add(key, "must be a whole number from 0 to 100")
     return default
 
 
@@ -271,8 +271,9 @@ def load_lens(path: Path) -> Lens:
     screen = _section(data, "screen", SCREEN_KEYS, report)
     criteria = _criteria(screen, "screen", report) if screen is not None else ()
     screen_model = _screen_model(screen, report)
-    queer_count = _count(data, "queer_count", DEFAULT_QUEER_COUNT, report)
-    trans_count = _count(data, "trans_count", DEFAULT_TRANS_COUNT, report)
+    romance_share = _share(data, "romance_share", DEFAULT_ROMANCE_SHARE, report)
+    world_share = _share(data, "world_share", DEFAULT_WORLD_SHARE, report)
+    trans_share = _share(data, "trans_share", DEFAULT_TRANS_SHARE, report)
     intent = _section(data, "intent", frozenset({"rule"}), report)
     rule = _text(intent, "rule", "intent", report) if intent is not None else ""
     judge = _section(data, "judge", frozenset({"rubric"}), report)
@@ -291,6 +292,7 @@ def load_lens(path: Path) -> Lens:
         base=base,
         selection=selection,
         screen_model=screen_model,
-        queer_count=queer_count,
-        trans_count=trans_count,
+        romance_share=romance_share,
+        world_share=world_share,
+        trans_share=trans_share,
     )

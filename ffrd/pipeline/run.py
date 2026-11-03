@@ -1261,14 +1261,23 @@ def _refill(
             return _Refill(outcomes, changes, tuple(queer_rounds), queer_passing, tuple(trans_rounds), trans_passing)
 
 
+def _side(share: int, pool: int, denominator: int, target: int, rounds: Sequence[tuple[int, int]], achieved: int) -> dict[str, object]:
+    """One side of the queering selection: its share, its pool, the denominator its target is a share of, the target, each round's (tried, passed), the picks achieved, and whether it fell short of its target."""
+    return {
+        "share": share,
+        "pool": pool,
+        "denominator": denominator,
+        "target": target,
+        "rounds": [{"tried": tried, "passed": passed} for tried, passed in rounds],
+        "achieved": achieved,
+        "exhausted": achieved < target,
+    }
+
+
 def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, trans_pool: int, refill: _Refill) -> None:
-    """Writes the counts of the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and each side's count, pool, target, rounds and achieved count, with whether it fell short of its count or, for all, of its pool."""
+    """Writes the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and the romance and trans sides. The romance side's share is of the romance pool, and the trans side's is of all eligible characters."""
     romance = [outcome for outcome in marks if queering.ROMANCE in outcome.reasons]
     gender = [outcome for outcome in marks if queering.GENDER_ROLES in outcome.reasons]
-    queer_target = queering.target(lens.queer_count, pool)
-    trans_target = queering.target(lens.trans_count, trans_pool)
-    queer_achieved = len(refill.queer_passing)
-    trans_achieved = len(refill.trans_passing)
     record = {
         "romance": {
             "lines": len(romance),
@@ -1277,21 +1286,23 @@ def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible:
         },
         "gender_roles": {"lines": len(gender), "characters": _characters(gender)},
         "eligible_characters": eligible,
-        "queer": {
-            "count": lens.queer_count,
-            "pool": pool,
-            "target": queer_target,
-            "rounds": [{"tried": tried, "passed": passed} for tried, passed in refill.queer_rounds],
-            "achieved": queer_achieved,
-            "exhausted": queer_achieved < queering.requested(lens.queer_count, pool),
-        },
-        "trans": {
-            "count": lens.trans_count,
-            "pool": trans_pool,
-            "target": trans_target,
-            "rounds": [{"tried": tried, "passed": passed} for tried, passed in refill.trans_rounds],
-            "achieved": trans_achieved,
-            "exhausted": trans_achieved < queering.requested(lens.trans_count, trans_pool),
+        "sides": {
+            "romance": _side(
+                lens.romance_share,
+                pool,
+                pool,
+                queering.target(lens.romance_share, pool),
+                refill.queer_rounds,
+                len(refill.queer_passing),
+            ),
+            "trans": _side(
+                lens.trans_share,
+                trans_pool,
+                eligible,
+                queering.target(lens.trans_share, eligible),
+                refill.trans_rounds,
+                len(refill.trans_passing),
+            ),
         },
     }
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
@@ -1588,9 +1599,9 @@ def run(
             ctx.marking,
             screened,
             queering.order(pool, queering.QUEER_SALT),
-            queering.target(lens.queer_count, len(pool)),
+            queering.target(lens.romance_share, len(pool)),
             queering.order(trans_pool, queering.TRANS_SALT),
-            queering.target(lens.trans_count, len(trans_pool)),
+            queering.target(lens.trans_share, len(eligible)),
             batch,
         )
         outcomes, changes = refill.outcomes, refill.changes
