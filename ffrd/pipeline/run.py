@@ -36,6 +36,7 @@ CHAPTER_FILE = re.compile(r"chapter-\d{2,}\.toml")
 UNATTRIBUTED_FILE = "unattributed.toml"
 RECHECK_AT = 0.5
 REDO_NOTE_MAX = 200
+MARKS = "marks.jsonl"
 
 OutcomeKind = Literal["changed", "kept_for_plot", "gate_failed", "unfinished", "untouched"]
 WriterName = Literal["voice", "opus"]
@@ -133,6 +134,21 @@ def _outcome_line(o: Outcome) -> str:
 
 def write_outcomes(path: Path, outcomes: Sequence[Outcome]) -> None:
     _write_atomic(path, "".join(_outcome_line(o) for o in outcomes))
+
+
+def _write_marks(path: Path, run_id: str, marks: Sequence[Outcome]) -> None:
+    lines = [
+        {
+            "run": run_id,
+            "namespace": o.namespace,
+            "key": o.key,
+            "speaker": o.speaker,
+            "chapter": o.chapter,
+            "questions": list(o.reasons),
+        }
+        for o in marks
+    ]
+    _write_atomic(path, "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines))
 
 
 def _table(c: Change) -> str:
@@ -1253,6 +1269,7 @@ def run(
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
+    marks: list[Outcome] = []
     chapter_one: list[tuple[int, Scene, _PassRecord, list[Outcome]]] = []
 
     def scene_pass(item: tuple[int, Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
@@ -1272,6 +1289,7 @@ def run(
     scene_results = claude.fan_out(scene_pass, scene_items)
     if ctx.marking is not None:
         bucketed = _ranked(ctx.marking, [result[0] for result in scene_results])
+        marks = [outcome for scene_outcomes in bucketed for outcome in scene_outcomes if outcome.reasons]
         scene_results = [
             (scene_outcomes, scene_changes, recall, passed)
             for scene_outcomes, (_, scene_changes, recall, passed) in zip(bucketed, scene_results, strict=True)
@@ -1305,6 +1323,8 @@ def run(
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
     write_outcomes(store.root / OUTCOMES, outcomes)
+    if selecting:
+        _write_marks(store.root / MARKS, run_id, marks)
     write_scenes(store.root / SCENES, _scene_records(ctx, scenes, passes, outcomes))
     _write_arcs(store.root / ARCS, ctx.arcs, scenes, changes)
     _write_recall(store.root / RECALL, lens, recall)

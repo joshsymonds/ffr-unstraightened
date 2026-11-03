@@ -4517,6 +4517,50 @@ def test_queering_screen_cast_marks_only_the_flirt_entries_with_a_flirt_key(tmp_
     }
 
 
+MARKS_FILE = "marks.jsonl"
+
+
+def _marks(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "work" / LENS / MARKS_FILE
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+QUEER_MARKS = [
+    {"run": RUN, "namespace": NS_A, "key": "2", "speaker": None, "chapter": 1, "questions": [ALPHA]},
+    {"run": RUN, "namespace": NS_A, "key": "3", "speaker": "made-up-speaker-c", "chapter": 1, "questions": [BETA]},
+    {"run": RUN, "namespace": NS_B, "key": "1", "speaker": "made-up-speaker-b", "chapter": 2, "questions": [ALPHA]},
+    {"run": RUN, "namespace": NS_C, "key": "1", "speaker": None, "chapter": None, "questions": [ALPHA]},
+]
+
+
+def test_queering_writes_one_mark_per_marked_line_with_its_questions_and_no_text(tmp_path: Path) -> None:
+    _run(tmp_path, _queer_claude(), [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    assert _marks(tmp_path) == QUEER_MARKS
+    text = (tmp_path / "work" / LENS / MARKS_FILE).read_text(encoding="utf-8")
+    assert not any(english in text for english in (EN_A1, EN_A2, EN_A3, EN_B1, EN_B2, EN_C1))
+
+
+def test_marks_list_a_lines_questions_in_lens_triage_order(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    claude.flags = {**QUEER_FLAGS, (NS_A, "2"): [BETA, ALPHA]}
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    assert _marks(tmp_path)[0]["questions"] == [ALPHA, BETA]
+
+
+def test_a_rerun_replaces_the_marks_file(tmp_path: Path) -> None:
+    _run(tmp_path, _queer_claude(), [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    # The same inputs replay the stored screens, so the rerun marks the same lines under its own run id. Appending would double the file.
+    _run(tmp_path, _queer_claude(), [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS, run_id="made-up-second-run")
+    assert _marks(tmp_path) == [{**mark, "run": "made-up-second-run"} for mark in QUEER_MARKS]
+
+
+def test_a_lens_without_selection_writes_no_marks_file(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    claude.flags = {(NS_A, "2"): [ALPHA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=LENS_OBJ)
+    assert not (tmp_path / "work" / LENS / MARKS_FILE).exists()
+
+
 def test_unstraightening_screen_cast_carries_no_flirt_key(tmp_path: Path) -> None:
     claude = _queer_claude()
     claude.flags = {}
