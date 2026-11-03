@@ -56,6 +56,7 @@ class Outcome:
     plan: str | None = None
     redo: bool = False
     bucket: queering.Selection | None = None
+    candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ def _write_marks(path: Path, run_id: str, marks: Sequence[Outcome]) -> None:
             "speaker": o.speaker,
             "chapter": o.chapter,
             "questions": list(o.reasons),
+            "candidates": list(o.candidates),
         }
         for o in marks
     ]
@@ -864,13 +866,43 @@ def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[l
     return outcomes, [], _Recall(), _PassRecord()
 
 
+def _candidate_pass(
+    ctx: _Context, marking: _Marking, scene: Scene, scene_outcomes: Sequence[Outcome], ask: Ask
+) -> tuple[list[Outcome], bool]:
+    """Phase 1b of queering, once every scene is screened: one candidate call over the scene's named lines outside the core cast, the antagonists and the flirt that carry no romance mark and that the screen finished. Each listed line takes its candidate marks, and a scene with no such line makes no call. Returns the scene's outcomes and whether its call finished. A call that does not finish marks none of the scene's lines."""
+    listed = {
+        (line.namespace, line.key)
+        for line, outcome in zip(scene.lines, scene_outcomes, strict=True)
+        if line.speaker
+        and queering.selectable(line.speaker, marking.core, marking.antagonists, marking.flirt)
+        and queering.ROMANCE not in outcome.reasons
+        and outcome.outcome != "unfinished"
+    }
+    if not listed:
+        return list(scene_outcomes), True
+    answer = stages.candidates(ctx.store, scene, listed, ask)
+    if not isinstance(answer, dict):
+        return list(scene_outcomes), False
+    return [
+        replace(outcome, candidates=answer.get((outcome.namespace, outcome.key), ()))
+        if (outcome.namespace, outcome.key) in listed
+        else outcome
+        for outcome in scene_outcomes
+    ], True
+
+
 def _unit(outcome: Outcome) -> str:
     return queering.unit(outcome.namespace, outcome.key, outcome.speaker)
 
 
+def _trans_candidate(outcome: Outcome, trans: frozenset[str]) -> bool:
+    """A trans pick's line that carries the trans-candidate mark. Only these lines take the trans bucket."""
+    return outcome.speaker in trans and stages.TRANS_CANDIDATE in outcome.candidates
+
+
 def _bucket(outcome: Outcome, marking: _Marking, queer: frozenset[str], trans: frozenset[str]) -> queering.Selection:
-    """A line's bucket in one round. Every line of a trans pick is trans, marked or not. The flirt keeps the redirect split, a romance line of a queer pick is queer, and every other marked line is untouched."""
-    if outcome.speaker in trans:
+    """A line's bucket in one round. A trans pick's trans-candidate lines are trans. The flirt keeps the redirect split, a romance line of a queer pick is queer, and every other marked line is untouched."""
+    if _trans_candidate(outcome, trans):
         return "trans"
     if marking.flirt is not None and outcome.speaker == marking.flirt:
         return "redirect" if queering.redirected(outcome.namespace, outcome.key) else "not-redirected"
@@ -880,9 +912,9 @@ def _bucket(outcome: Outcome, marking: _Marking, queer: frozenset[str], trans: f
 
 
 def _bucketed(marking: _Marking, outcomes: Sequence[Outcome], queer: frozenset[str], trans: frozenset[str]) -> list[Outcome]:
-    """Buckets the lines of one scene for a round. A line of a trans pick takes the trans bucket, and a marked line takes its bucket. Any other unmarked line keeps no bucket."""
+    """Buckets the lines of one scene for a round. A marked line, screen or candidate, takes its bucket, and a trans pick's trans-candidate line takes the trans bucket. Any other unmarked line keeps no bucket."""
     return [
-        replace(outcome, bucket=_bucket(outcome, marking, queer, trans)) if outcome.reasons or outcome.speaker in trans else outcome
+        replace(outcome, bucket=_bucket(outcome, marking, queer, trans)) if outcome.reasons or outcome.candidates else outcome
         for outcome in outcomes
     ]
 
@@ -897,12 +929,12 @@ def _romance_pool(marking: _Marking, marks: Sequence[Outcome]) -> set[str]:
 
 
 def _trans_pool(marking: _Marking, marks: Sequence[Outcome]) -> set[str]:
-    """The named speakers outside the core cast, the antagonists and the flirt with a romance- or gender-roles-marked line, which the trans side may pick. A speakerless marked line is never a trans unit."""
+    """The named speakers outside the core cast, the antagonists and the flirt with a trans-candidate-marked line, which the trans side may pick. A speakerless marked line is never a trans unit."""
     return {
         outcome.speaker
         for outcome in marks
         if outcome.speaker
-        and (queering.ROMANCE in outcome.reasons or queering.GENDER_ROLES in outcome.reasons)
+        and stages.TRANS_CANDIDATE in outcome.candidates
         and queering.selectable(outcome.speaker, marking.core, marking.antagonists, marking.flirt)
     }
 
@@ -1273,10 +1305,14 @@ def _side(share: int, pool: int, denominator: int, target: int, rounds: Sequence
     }
 
 
-def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, trans_pool: int, refill: _Refill) -> None:
-    """Writes the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and the romance and trans sides. The romance side's share is of the romance pool, and the trans side's is of all eligible characters."""
+def _write_selection(
+    path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, trans_pool: int, unfinished: int, refill: _Refill
+) -> None:
+    """Writes the queering selection beside the outcomes: the romance and gender-roles marks, the candidate marks and the scenes whose candidate call did not finish, the eligible characters, and the romance and trans sides. The romance side's share is of the romance pool, and the trans side's is of all eligible characters."""
     romance = [outcome for outcome in marks if queering.ROMANCE in outcome.reasons]
     gender = [outcome for outcome in marks if queering.GENDER_ROLES in outcome.reasons]
+    insertable = [outcome for outcome in marks if stages.INSERTABLE in outcome.candidates]
+    trans_candidate = [outcome for outcome in marks if stages.TRANS_CANDIDATE in outcome.candidates]
     record = {
         "romance": {
             "lines": len(romance),
@@ -1285,6 +1321,11 @@ def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible:
         },
         "gender_roles": {"lines": len(gender), "characters": _characters(gender)},
         "eligible_characters": eligible,
+        "candidates": {
+            "insertable": {"lines": len(insertable), "characters": _characters(insertable)},
+            "trans_candidate": {"lines": len(trans_candidate), "characters": _characters(trans_candidate)},
+            "unfinished_scenes": unfinished,
+        },
         "sides": {
             "romance": _side(
                 lens.romance_share,
@@ -1584,18 +1625,24 @@ def run(
     if ctx.marking is None:
         outcomes, changes = _settle(ctx, scenes, outcomes, changes, batch)
     else:
-        marks = [outcome for outcome in outcomes if outcome.reasons]
+        marking = ctx.marking
+        candidated = claude.fan_out(
+            lambda item: _candidate_pass(ctx, marking, *item),
+            [(scene, scene_outcomes, ask) for (_, scene, ask), (scene_outcomes, _, _, _) in zip(scene_items, scene_results, strict=True)],
+        )
+        unfinished = sum(not finished for _, finished in candidated)
         screened = [
             _Screened(position, scene, ask, tuple(scene_outcomes), passed)
-            for (position, scene, ask), (scene_outcomes, _, _, passed) in zip(scene_items, scene_results, strict=True)
+            for (position, scene, ask), (scene_outcomes, _), (_, _, _, passed) in zip(scene_items, candidated, scene_results, strict=True)
         ]
-        pool = _romance_pool(ctx.marking, marks)
-        trans_pool = _trans_pool(ctx.marking, marks)
-        eligible = _eligible(ctx.marking, scenes)
+        marks = [outcome for entry in screened for outcome in entry.outcomes if outcome.reasons or outcome.candidates]
+        pool = _romance_pool(marking, marks)
+        trans_pool = _trans_pool(marking, marks)
+        eligible = _eligible(marking, scenes)
         refill = _refill(
             ctx,
             root,
-            ctx.marking,
+            marking,
             screened,
             queering.order(pool, queering.QUEER_SALT),
             queering.target(lens.romance_share, len(pool)),
@@ -1604,7 +1651,7 @@ def run(
             batch,
         )
         outcomes, changes = refill.outcomes, refill.changes
-        _write_selection(store.root / SELECTION, lens, marks, len(eligible), len(pool), len(trans_pool), refill)
+        _write_selection(store.root / SELECTION, lens, marks, len(eligible), len(pool), len(trans_pool), unfinished, refill)
     outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
