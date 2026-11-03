@@ -14,7 +14,7 @@ REDIRECT_PERCENT = 50
 
 Selection = Literal["queer", "trans", "untouched", "redirect", "not-redirected"]
 SELECTIONS: tuple[Selection, ...] = ("queer", "trans", "untouched", "redirect", "not-redirected")
-REWRITTEN: frozenset[Selection] = frozenset({"queer", "trans", "redirect"})
+REWRITTEN: frozenset[Selection] = frozenset({"queer", "redirect"})
 
 ANTAGONIST_PREFIXES = ("villain", "antagonis")
 ANTAGONIST_WORDS = frozenset({"nemesis", "archenemy", "archvillain"})

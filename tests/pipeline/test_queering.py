@@ -149,7 +149,7 @@ def test_redirected_is_near_half_and_stable() -> None:
 
 def test_selection_order_and_rewritten_set() -> None:
     assert queering.SELECTIONS == ("queer", "trans", "untouched", "redirect", "not-redirected")
-    assert frozenset({"queer", "trans", "redirect"}) == queering.REWRITTEN
+    assert frozenset({"queer", "redirect"}) == queering.REWRITTEN
 
 
 def test_markable_admits_flirt_even_when_core_or_antagonist() -> None:
