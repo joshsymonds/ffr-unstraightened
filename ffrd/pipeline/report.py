@@ -19,6 +19,7 @@ from ffrd.pipeline.stages import KEEP_REASONS
 from ffrd.pipeline.store import work_dir
 
 OUTCOMES = "outcomes.jsonl"
+SELECTION = "selection.json"
 ARCS = "arcs.json"
 RECALL = "recall.json"
 USAGE = "usage.jsonl"
@@ -31,8 +32,6 @@ OUTCOME_LABELS = {
     "untouched": "untouched",
 }
 GATE = re.compile(r"[a-z0-9]+([-_][a-z0-9]+)*")
-QUEERING_BUCKETS = ("queer", "trans", "untouched")
-QUEERING_CHOSEN = ("queer", "trans")
 QUEERING_REWRITES = ("queer", "trans", "redirect")
 FLIRT_BUCKETS = frozenset({"redirect", "not-redirected"})
 Key = tuple[str, str]  # (namespace, key)
@@ -326,6 +325,109 @@ def _recall(path: Path, triage_ids: list[str]) -> dict[str, tuple[int, int]]:
     return recall
 
 
+@dataclass(frozen=True)
+class Round:
+    tried: int
+    passed: int
+
+
+@dataclass(frozen=True)
+class Side:
+    share: int
+    pool: int
+    target: int
+    rounds: tuple[Round, ...]
+    achieved: int
+    exhausted: bool
+
+
+@dataclass(frozen=True)
+class Selection:
+    romance_lines: int
+    romance_characters: int
+    romance_speakerless: int
+    gender_lines: int
+    gender_characters: int
+    eligible: int
+    queer: Side
+    trans: Side
+
+
+def _selection_field(obj: dict[str, object], name: str, prefix: str, path: Path) -> object:
+    if name not in obj:
+        raise Fail(f"{path}: field {prefix}{name} is missing")
+    return obj[name]
+
+
+def _selection_count(obj: dict[str, object], name: str, prefix: str, path: Path) -> int:
+    value = _selection_field(obj, name, prefix, path)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Fail(f"{path}: field {prefix}{name} must be a non-negative integer")
+    return value
+
+
+def _selection_object(obj: dict[str, object], name: str, prefix: str, path: Path) -> dict[str, object]:
+    value = _selection_field(obj, name, prefix, path)
+    if not isinstance(value, dict):
+        raise Fail(f"{path}: field {prefix}{name} must be an object")
+    return value
+
+
+def _round(entry: object, field: str, path: Path) -> Round:
+    if not isinstance(entry, dict):
+        raise Fail(f"{path}: field {field} must be an object")
+    return Round(
+        tried=_selection_count(entry, "tried", f"{field}.", path),
+        passed=_selection_count(entry, "passed", f"{field}.", path),
+    )
+
+
+def _side(obj: dict[str, object], name: str, path: Path) -> Side:
+    side = _selection_object(obj, name, "", path)
+    prefix = f"{name}."
+    rounds = _selection_field(side, "rounds", prefix, path)
+    if not isinstance(rounds, list):
+        raise Fail(f"{path}: field {prefix}rounds must be a list")
+    exhausted = _selection_field(side, "exhausted", prefix, path)
+    if not isinstance(exhausted, bool):
+        raise Fail(f"{path}: field {prefix}exhausted must be true or false")
+    return Side(
+        share=_selection_count(side, "share", prefix, path),
+        pool=_selection_count(side, "pool", prefix, path),
+        target=_selection_count(side, "target", prefix, path),
+        rounds=tuple(_round(entry, f"{prefix}rounds.{index}", path) for index, entry in enumerate(rounds)),
+        achieved=_selection_count(side, "achieved", prefix, path),
+        exhausted=exhausted,
+    )
+
+
+def _selection(path: Path) -> Selection:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as e:
+        raise Fail(f"no selection at {path}; run the lens first") from e
+    except OSError as e:
+        raise Fail(f"cannot read selection {path}: {e.strerror}") from e
+    try:
+        obj = json.loads(raw)
+    except ValueError as e:
+        raise Fail(f"{path}: is not valid JSON") from e
+    if not isinstance(obj, dict):
+        raise Fail(f"{path}: is not a JSON object")
+    romance = _selection_object(obj, "romance", "", path)
+    gender = _selection_object(obj, "gender_roles", "", path)
+    return Selection(
+        romance_lines=_selection_count(romance, "lines", "romance.", path),
+        romance_characters=_selection_count(romance, "characters", "romance.", path),
+        romance_speakerless=_selection_count(romance, "speakerless", "romance.", path),
+        gender_lines=_selection_count(gender, "lines", "gender_roles.", path),
+        gender_characters=_selection_count(gender, "characters", "gender_roles.", path),
+        eligible=_selection_count(obj, "eligible_characters", "", path),
+        queer=_side(obj, "queer", path),
+        trans=_side(obj, "trans", path),
+    )
+
+
 def _numbered(speakers: Counter[str | None], numbers: dict[str, int]) -> list[tuple[int, int]]:
     return sorted((numbers[s], n) for s, n in speakers.items() if s is not None)
 
@@ -438,23 +540,28 @@ def _redo_line(records: list[Record]) -> str:
     return f"redo: {len(listed)} listed, {changed} changed, {gate_failed} gate failed"
 
 
-def _queering_lines(records: list[Record]) -> list[str]:
-    marked = Counter(r.bucket for r in records if r.bucket is not None)
+def _side_lines(label: str, side: Side) -> list[str]:
+    exact = side.share * side.pool / 100
+    lines = [f"queering {label} target: {side.target} ({side.share}% of {side.pool} = {exact:.2f})"]
+    lines += [f"queering {label} round {n}: tried {r.tried}, passed {r.passed}" for n, r in enumerate(side.rounds, 1)]
+    exhausted = ", pool exhausted" if side.exhausted else ""
+    lines.append(f"queering {label} achieved: {side.achieved} of {side.target}{exhausted}")
+    return lines
+
+
+def _queering_lines(records: list[Record], selection: Selection) -> list[str]:
     flirt = sum(r.bucket in FLIRT_BUCKETS for r in records)
     redirect = sum(r.bucket == "redirect" for r in records)
     changed = Counter(r.bucket for r in records if r.outcome == "changed")
     gate_failed = Counter(r.bucket for r in records if r.outcome == "gate_failed")
-    lines = [f"queering marked: {sum(marked.values())}"]
-    marked_records = [r for r in records if r.bucket in QUEERING_BUCKETS]
-    marked_speakers = {r.speaker for r in marked_records if r.speaker is not None}
-    no_marked_speaker = sum(r.speaker is None for r in marked_records)
-    lines.append(f"queering marked speakers: {len(marked_speakers)}, no speaker: {no_marked_speaker}")
-    lines += [f"queering bucket {bucket}: {marked[bucket]}" for bucket in QUEERING_BUCKETS]
-    speakers = {b: {r.speaker for r in records if r.bucket == b and r.speaker is not None} for b in QUEERING_BUCKETS}
-    no_speaker = Counter(r.bucket for r in records if r.bucket is not None and r.speaker is None)
-    lines += [f"queering speakers {b}: {len(speakers[b])}, no speaker: {no_speaker[b]}" for b in QUEERING_BUCKETS]
-    chosen = [r for r in records if r.bucket in QUEERING_CHOSEN]
-    lines.append(f"queering chosen lines: {len(chosen)}, converted: {sum(r.outcome == 'changed' for r in chosen)}")
+    romance = (
+        f"queering romance: {selection.romance_lines} lines, {selection.romance_characters} characters, "
+        f"{selection.romance_speakerless} speakerless"
+    )
+    lines = [romance, f"queering gender roles: {selection.gender_lines} lines, {selection.gender_characters} characters"]
+    lines.append(f"queering eligible characters: {selection.eligible}")
+    lines += _side_lines("queer", selection.queer)
+    lines += _side_lines("trans", selection.trans)
     lines.append(f"queering flirt marked: {flirt}, redirect half: {redirect}")
     lines += [f"queering changed {bucket}: {changed[bucket]}" for bucket in QUEERING_REWRITES]
     lines += [f"queering gate failed {bucket}: {gate_failed[bucket]}" for bucket in QUEERING_REWRITES]
@@ -493,6 +600,7 @@ def cmd_report(args: argparse.Namespace) -> None:
     keys = _keys(lens_dir / OUTCOMES)
     arcs, with_changes = _arcs(lens_dir / ARCS)
     recall = _recall(lens_dir / RECALL, triage_ids)
+    selection = _selection(lens_dir / SELECTION) if lens.selection == "queering" else None
     usage = _usage(lens_dir / USAGE)
     scenes_path = lens_dir / SCENES
     scenes = read_scenes(scenes_path) if scenes_path.exists() else None
@@ -504,8 +612,8 @@ def cmd_report(args: argparse.Namespace) -> None:
     print(_scene_line(table, keys))
     print(f"arcs: {arcs}, {with_changes} with changes")
     print(_redo_line(records))
-    if lens.selection == "queering":
-        for line in _queering_lines(records):
+    if selection is not None:
+        for line in _queering_lines(records, selection):
             print(line)
     for rid in triage_ids:
         disagreements, confirmed = recall[rid]
