@@ -25,7 +25,7 @@ from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
 from ffrd.pipeline.lens import Lens, SceneSection, load_lens
-from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, USAGE, Record, render
+from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, SELECTION, USAGE, Record, render
 from ffrd.pipeline.scene_record import SCENES, SceneRecord, write_scenes
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose, distance
@@ -848,7 +848,7 @@ def _marking(bibles: Sequence[Mapping[str, Any]], scenes: Sequence[Scene]) -> _M
 
 
 def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
-    """Phase 1 of queering: one screen on the lens's model over the scene's markable lines. Each marked line is recorded untouched with its reasons, and every other line untouched. Buckets are ranked once every scene is screened (_ranked). A scene with no markable line makes no call."""
+    """Phase 1 of queering: one screen on the lens's model over the scene's markable lines. Each marked line is recorded untouched with its reasons, and every other line untouched. Buckets are set per round once every scene is screened (_bucketed). A scene with no markable line makes no call."""
     eligible = {
         (line.namespace, line.key)
         for line in scene.lines
@@ -864,19 +864,46 @@ def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[l
     return outcomes, [], _Recall(), _PassRecord()
 
 
-def _ranked(marking: _Marking, scenes: Sequence[list[Outcome]]) -> list[list[Outcome]]:
-    """Each marked line's bucket, ranked over every scene's marked lines together, so a speaker's lines share one bucket across scenes. The flirt keeps its redirect split."""
-    marked = [(outcome.namespace, outcome.key, outcome.speaker) for outcomes in scenes for outcome in outcomes if outcome.reasons]
-    ranked = queering.rank(marked, marking.core, marking.antagonists, marking.flirt)
-    return [
-        [
-            replace(outcome, bucket=queering.select(outcome.namespace, outcome.key, outcome.speaker, marking.flirt, ranked))
-            if outcome.reasons
-            else outcome
-            for outcome in outcomes
-        ]
-        for outcomes in scenes
-    ]
+def _unit(outcome: Outcome) -> str:
+    return queering.unit(outcome.namespace, outcome.key, outcome.speaker)
+
+
+def _bucket(outcome: Outcome, marking: _Marking, picks: frozenset[str]) -> queering.Selection:
+    """A marked line's bucket in one round. The flirt keeps the redirect split, a romance line of a picked unit is queer, and every other marked line is untouched."""
+    if marking.flirt is not None and outcome.speaker == marking.flirt:
+        return "redirect" if queering.redirected(outcome.namespace, outcome.key) else "not-redirected"
+    if queering.ROMANCE in outcome.reasons and _unit(outcome) in picks:
+        return "queer"
+    return "untouched"
+
+
+def _bucketed(marking: _Marking, outcomes: Sequence[Outcome], picks: frozenset[str]) -> list[Outcome]:
+    """Buckets the marked lines of one scene for a round. An unmarked line keeps no bucket."""
+    return [replace(outcome, bucket=_bucket(outcome, marking, picks)) if outcome.reasons else outcome for outcome in outcomes]
+
+
+def _romance_pool(marking: _Marking, marks: Sequence[Outcome]) -> set[str]:
+    """The units with a romance-marked line that the queer side may pick. Gender-roles marks never make a unit part of the pool."""
+    return {
+        _unit(outcome)
+        for outcome in marks
+        if queering.ROMANCE in outcome.reasons and queering.selectable(outcome.speaker, marking.core, marking.antagonists, marking.flirt)
+    }
+
+
+def _eligible(marking: _Marking, scenes: Sequence[Scene]) -> int:
+    """The distinct speakers of the run's scenes outside the core cast, the antagonists and the flirt."""
+    speakers = {
+        line.speaker
+        for scene in scenes
+        for line in scene.lines
+        if line.speaker and queering.selectable(line.speaker, marking.core, marking.antagonists, marking.flirt)
+    }
+    return len(speakers)
+
+
+def _characters(marks: Sequence[Outcome]) -> int:
+    return len({outcome.speaker for outcome in marks if outcome.speaker})
 
 
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
@@ -945,7 +972,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
 def _queered(
     ctx: _Context, scenes: Sequence[tuple[Scene, Ask]], outcomes: Sequence[list[Outcome]], batch: Callable[[], Ask]
 ) -> list[tuple[list[Outcome], list[Change]]]:
-    """Phase 2 of queering, once every scene's screen has marked its lines and _ranked has bucketed them. Each line in a rewritten bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Every target then gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
+    """Phase 2 of queering, once every scene's screen has marked its lines and the round has bucketed them. Each line in a rewritten bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Every target then gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
     intents = [
         (index, scene, ask, line, marked)
         for index, ((scene, ask), scene_outcomes) in enumerate(zip(scenes, outcomes, strict=True))
@@ -1020,6 +1047,121 @@ def _queered(
         return _coherent(ctx, scene, settled, changes, ask)
 
     return claude.fan_out(settle, list(range(len(scenes))))
+
+
+@dataclass(frozen=True)
+class _Screened:
+    """A scene after phase 1: its marked outcomes and scene-pass record, with its run position and the ask its phase-two calls use."""
+
+    position: int
+    scene: Scene
+    ask: Ask
+    outcomes: tuple[Outcome, ...]
+    passed: _PassRecord
+
+
+@dataclass(frozen=True)
+class _Refill:
+    """The refill loop's last round: its outcomes and changes, each round's (tried, passed) in order, and the picks with a changed romance line that survived it."""
+
+    outcomes: list[Outcome]
+    changes: list[Change]
+    rounds: tuple[tuple[int, int], ...]
+    passing: frozenset[str]
+
+
+def _surviving(outcomes: Sequence[Outcome]) -> frozenset[str]:
+    """The units with a changed romance line that survived every judge of the round."""
+    return frozenset(_unit(outcome) for outcome in outcomes if outcome.outcome == "changed" and outcome.bucket == "queer")
+
+
+def _settle(
+    ctx: _Context, scenes: Sequence[Scene], outcomes: Sequence[Outcome], changes: Sequence[Change], batch: Callable[[], Ask]
+) -> tuple[list[Outcome], list[Change]]:
+    """Unifies the changed lines that share one English text, then arc-judges the changes."""
+    unified_outcomes, unified_changes = _unified(ctx, outcomes, changes)
+    return _arc_judged(ctx, scenes, unified_outcomes, unified_changes, batch())
+
+
+def _round(
+    ctx: _Context,
+    root: Path,
+    marking: _Marking,
+    screened: Sequence[_Screened],
+    picks: frozenset[str],
+    batch: Callable[[], Ask],
+) -> tuple[list[Outcome], list[Change]]:
+    """One round of the refill loop over the cumulative picks: buckets the marked lines, runs phase two, writes the chapter one report from this round, then settles it."""
+    bucketed = [_bucketed(marking, entry.outcomes, picks) for entry in screened]
+    phase_two = _queered(ctx, [(entry.scene, entry.ask) for entry in screened], bucketed, batch)
+    done = [
+        (entry.position, entry.scene, entry.passed, scene_outcomes)
+        for entry, (scene_outcomes, _) in zip(screened, phase_two, strict=True)
+        if _holds_chapter_one(entry.scene)
+    ]
+    if done:
+        _write_provisional(root, ctx, done)
+    outcomes = [outcome for scene_outcomes, _ in phase_two for outcome in scene_outcomes]
+    changes = [change for _, scene_changes in phase_two for change in scene_changes]
+    return _settle(ctx, [entry.scene for entry in screened], outcomes, changes, batch)
+
+
+def _refill(
+    ctx: _Context,
+    root: Path,
+    marking: _Marking,
+    screened: Sequence[_Screened],
+    order: Sequence[str],
+    target: int,
+    batch: Callable[[], Ask],
+) -> _Refill:
+    """The refill loop over the seeded order. Each round plays the cumulative picks through phase two, unification and both arc judges, counts the picks with a surviving changed romance line, and draws the shortfall from the order's next units. It stops once the count reaches the target or the order runs out."""
+    rounds: list[tuple[int, int]] = []
+    passing: frozenset[str] = frozenset()
+    drawn = 0
+    while True:
+        new = order[drawn : drawn + target - len(passing)]
+        drawn += len(new)
+        outcomes, changes = _round(ctx, root, marking, screened, frozenset(order[:drawn]), batch)
+        passing = _surviving(outcomes)
+        if new:
+            rounds.append((len(new), len(passing.intersection(new))))
+        if len(passing) >= target or drawn == len(order):
+            return _Refill(outcomes, changes, tuple(rounds), passing)
+
+
+def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, refill: _Refill) -> None:
+    """Writes the counts of the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and the queer side's share, pool, target, rounds and achieved count. The trans side records its share, pool and target only."""
+    romance = [outcome for outcome in marks if queering.ROMANCE in outcome.reasons]
+    gender = [outcome for outcome in marks if queering.GENDER_ROLES in outcome.reasons]
+    queer_target = queering.target(lens.queer_share, pool)
+    achieved = len(refill.passing)
+    record = {
+        "romance": {
+            "lines": len(romance),
+            "characters": _characters(romance),
+            "speakerless": sum(1 for outcome in romance if not outcome.speaker),
+        },
+        "gender_roles": {"lines": len(gender), "characters": _characters(gender)},
+        "eligible_characters": eligible,
+        "queer": {
+            "share": lens.queer_share,
+            "pool": pool,
+            "target": queer_target,
+            "rounds": [{"tried": tried, "passed": passed} for tried, passed in refill.rounds],
+            "achieved": achieved,
+            "exhausted": achieved < queer_target,
+        },
+        "trans": {
+            "share": lens.trans_share,
+            "pool": eligible,
+            "target": queering.target(lens.trans_share, eligible),
+            "rounds": [],
+            "achieved": 0,
+            "exhausted": False,
+        },
+    }
+    _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _record(outcome: Outcome) -> Record:
@@ -1269,7 +1411,6 @@ def run(
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
-    marks: list[Outcome] = []
     chapter_one: list[tuple[int, Scene, _PassRecord, list[Outcome]]] = []
 
     def scene_pass(item: tuple[int, Scene, Ask]) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
@@ -1287,38 +1428,29 @@ def run(
 
     scene_items = [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)]
     scene_results = claude.fan_out(scene_pass, scene_items)
-    if ctx.marking is not None:
-        bucketed = _ranked(ctx.marking, [result[0] for result in scene_results])
-        marks = [outcome for scene_outcomes in bucketed for outcome in scene_outcomes if outcome.reasons]
-        scene_results = [
-            (scene_outcomes, scene_changes, recall, passed)
-            for scene_outcomes, (_, scene_changes, recall, passed) in zip(bucketed, scene_results, strict=True)
-        ]
-    if selecting:
-        phase_two = _queered(ctx, [(scene, ask) for _, scene, ask in scene_items], [result[0] for result in scene_results], batch)
-        scene_results = [
-            (scene_outcomes, scene_changes, recall, passed)
-            for (scene_outcomes, scene_changes), (_, _, recall, passed) in zip(phase_two, scene_results, strict=True)
-        ]
-        done = [
-            (position, scene, passed, scene_outcomes)
-            for (position, scene, _), (scene_outcomes, _, _, passed) in zip(scene_items, scene_results, strict=True)
-            if _holds_chapter_one(scene)
-        ]
-        if done:
-            _write_provisional(root, ctx, done)
     outcomes: list[Outcome] = []
     changes: list[Change] = []
-    passes: list[_PassRecord] = []
     recall = _Recall()
-    for scene_outcomes, scene_changes, scene_recall, scene_pass_record in scene_results:
+    for scene_outcomes, scene_changes, scene_recall, _ in scene_results:
         outcomes += scene_outcomes
         changes += scene_changes
-        passes.append(scene_pass_record)
         recall.disagreements.update(scene_recall.disagreements)
         recall.confirmed.update(scene_recall.confirmed)
-    outcomes, changes = _unified(ctx, outcomes, changes)
-    outcomes, changes = _arc_judged(ctx, scenes, outcomes, changes, batch())
+    passes = [passed for _, _, _, passed in scene_results]
+    marks: list[Outcome] = []
+    if ctx.marking is None:
+        outcomes, changes = _settle(ctx, scenes, outcomes, changes, batch)
+    else:
+        marks = [outcome for outcome in outcomes if outcome.reasons]
+        screened = [
+            _Screened(position, scene, ask, tuple(scene_outcomes), passed)
+            for (position, scene, ask), (scene_outcomes, _, _, passed) in zip(scene_items, scene_results, strict=True)
+        ]
+        pool = _romance_pool(ctx.marking, marks)
+        order = queering.order(pool, queering.QUEER_SALT)
+        refill = _refill(ctx, root, ctx.marking, screened, order, queering.target(lens.queer_share, len(pool)), batch)
+        outcomes, changes = refill.outcomes, refill.changes
+        _write_selection(store.root / SELECTION, lens, marks, _eligible(ctx.marking, scenes), len(pool), refill)
     outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")
