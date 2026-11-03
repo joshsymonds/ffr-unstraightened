@@ -33,6 +33,7 @@ INTENT: frozenset[str] = frozenset(
         "minimal-fix",
         "same-partner",
         "queer-bucket",
+        "world-bucket",
         "trans-bucket",
         "already-queer",
         "flirt-redirect",
@@ -70,17 +71,35 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
     ("screen", "not-core-cast", "Never flag the flirt's sincere thread."),
     ("screen", "not-core-cast", "Never flag a flirt aimed at a minor or a child-looking character."),
     ("intent", "minimal-fix", "Change only the words the edit needs"),
+    ("intent", "minimal-fix", "The world and trans buckets' own edit is allowed here."),
     ("intent", "same-partner", "the same partner in every line"),
     ("intent", "queer-bucket", "the speaker's romantic target becomes the same sex"),
     ("intent", "queer-bucket", "Swap the gender of the partner or crush so the pairing is same-sex"),
     ("intent", "queer-bucket", "For a man or woman speaker, the pursuit target changes gender too."),
     ("intent", "queer-bucket", "Where the line can carry both a same-sex and an opposite-sex reading, a bi reading is fine."),
     ("intent", "queer-bucket", "Keep everything else"),
-    ("intent", "trans-bucket", "For a trans pick, every line of the speaker is drafted together."),
-    ("intent", "trans-bucket", "Where a line naturally allows it, add a light, natural trans detail:"),
-    ("intent", "trans-bucket", "Where it does not, keep the line unchanged as no-hit."),
+    (
+        "intent",
+        "world-bucket",
+        "For a world pick, change one candidate line of the speaker",
+    ),
+    ("intent", "world-bucket", "a short same-sex partner mention"),
+    ("intent", "world-bucket", "worked into a line already about the speaker's home, family, work or daily life"),
+    (
+        "intent",
+        "world-bucket",
+        "The partner must carry the line's point, so that deleting the mention would lose something.",
+    ),
+    ("intent", "world-bucket", "Put it in one short clause, with no labels and no explaining."),
+    ("intent", "trans-bucket", "For a trans pick, change at most one candidate line of the speaker."),
+    ("intent", "trans-bucket", "Where the line naturally allows it, add one light, natural trans detail of one of four shapes:"),
+    ("intent", "trans-bucket", "a family member's acceptance, possibly in progress"),
+    ("intent", "trans-bucket", "someone who backs the speaker"),
+    ("intent", "trans-bucket", "a name the speaker chose and likes"),
+    ("intent", "trans-bucket", "ordinary present life with the speaker's gender a given"),
+    ("intent", "trans-bucket", "The detail must be recognizable as trans and must answer the line's own topic."),
+    ("intent", "trans-bucket", "Where the line does not allow it, keep it unchanged as no-hit."),
     ("intent", "trans-bucket", "The detail is never forced."),
-    ("intent", "trans-bucket", "a detail that the speaker is trans, or, on a romance line, a nonbinary partner who uses they/them"),
     ("intent", "trans-bucket", 'Never write a "she\'s trans" aside.'),
     ("intent", "already-queer", "A line whose pairing is already same-sex stays as written"),
     ("intent", "already-queer", "a line whose speaker, partner or crush is already trans or nonbinary"),
@@ -97,6 +116,19 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
         "Do not change the core cast's sexuality or romances beyond the flirt's split.",
     ),
     ("intent", "no-gender-joke-or-menace", "The queerness is never the joke or the threat."),
+    ("intent", "no-explaining", "Do not explain the change in the line, and do not add a tokenistic detail."),
+    ("intent", "no-explaining", "The world and trans buckets' own edit is neither an explanation nor a tokenistic detail."),
+    ("intent", "no-new-detail", "Add no name, object or motive the original line lacks, except the world and trans buckets' own edit."),
+    (
+        "intent",
+        "protect-plot",
+        "A pick's partner or crush gender is the bucket's edit, never a plot fact by itself.",
+    ),
+    (
+        "intent",
+        "protect-plot",
+        "Keep a line unchanged for plot only when that partner appears or is named as a character elsewhere in the given context, or when the change would alter what happens.",
+    ),
     ("judge", "meaning", "meaning protects the bond, not the gender"),
     (
         "judge",
@@ -104,32 +136,49 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
         "Reject a rewrite whose humor or menace rests on the target's or partner's gender or queerness.",
     ),
     ("judge", "no-explaining", "Reject a rewrite that explains the change or adds a tokenistic detail."),
+    ("judge", "no-explaining", "The world and trans buckets' own edit is neither an explanation nor a tokenistic detail."),
     ("judge", "keep-voice", "Reject a rewrite that breaks the speaker's voice."),
     (
         "judge",
         "no-new-detail",
-        "Reject a rewrite that adds a name, object or motive the original line lacks.",
+        "Reject a rewrite that adds a name, object or motive the original line lacks, except the world and trans buckets' own edit.",
     ),
     ("judge", "no-contradiction", "Reject a rewrite that contradicts the speaker's other lines."),
     ("judge", "minimal-fix", "Reject a rewrite that changes more than its edit needs."),
+    ("judge", "minimal-fix", "The world and trans buckets' own edit is allowed here."),
     ("judge", "queer-bucket", "Reject a rewrite that changes more than the target's gender"),
     ("judge", "queer-bucket", "unless the line carries a bi reading"),
+    ("judge", "world-bucket", "Reject a rewrite that adds a same-sex partner mention which could be deleted without loss."),
+    ("judge", "world-bucket", "Reject a rewrite that changes more than one line of a world or trans pick."),
     ("judge", "trans-bucket", 'Reject a "she\'s trans" aside.'),
     ("judge", "trans-bucket", "Reject a rewrite that forces a trans detail the line does not naturally allow."),
+    ("judge", "trans-bucket", "is the bucket's edit only when it is one of the four shapes"),
+    ("judge", "trans-bucket", "Reject a rewrite whose trans detail is too vague to read as trans."),
+    ("judge", "trans-bucket", "Reject a rewrite that states an old name."),
+    ("judge", "trans-bucket", "Reject a rewrite that volunteers transition history to a stranger."),
+    ("judge", "trans-bucket", "Reject a rewrite with body or medical talk."),
+    ("judge", "trans-bucket", "Reject a rewrite where pain is the whole story."),
+    ("judge", "trans-bucket", "Reject a rewrite that frames being trans as a secret or concealment."),
     (
         "judge",
         "trans-bucket",
-        "is the bucket's edit: a detail that the speaker is trans, or a nonbinary partner who uses they/them on a romance line",
+        "Reject a rewrite that uses a modern label (trans, transgender, transition, nonbinary, deadname) in the setting.",
     ),
+    ("judge", "trans-bucket", "Reject a rewrite that makes the player the validator or the rescuer."),
+    ("judge", "trans-bucket", "Reject a rewrite that makes a joke at the speaker's expense."),
     ("judge", "already-queer", "Reject a rewrite that changes a line whose pairing is already same-sex"),
     ("judge", "already-queer", "or whose speaker, partner or crush is already trans or nonbinary."),
     ("judge", "flirt-redirect", "unless generalize-when-reaction applies"),
+    ("judge", "protect-plot", "Reject a rewrite that changes a plot fact, or that changes the scene's meaning to fit a label."),
+    ("judge", "protect-plot", "A pick's partner or crush gender is not a plot fact by itself"),
+    ("judge", "protect-plot", "unless that partner appears or is named as a character elsewhere in the given context."),
 )
 
 # Judge rules that each carry a "Reject a rewrite that ..." sentence for their rule.
 REJECT_RULES: tuple[str, ...] = (
     "same-partner",
     "queer-bucket",
+    "world-bucket",
     "trans-bucket",
     "already-queer",
     "flirt-redirect",
@@ -139,6 +188,9 @@ REJECT_RULES: tuple[str, ...] = (
     "protect-core-cast",
     "protect-plot",
 )
+
+# Wording that the brief retires: the plot rule's screen clause and every nonbinary-partner edit.
+RETIRED_PHRASES: tuple[str, ...] = ("shown on screen", "nonbinary partner", "they/them")
 
 DOC_SECTIONS: tuple[str, ...] = (
     "## Aims",
@@ -154,12 +206,14 @@ DOC_SENTENCES: tuple[str, ...] = (
     'The trans bucket never adds a "she\'s trans" aside.',
     "The core cast's sexuality and romances stay as written, except the flirt's split.",
     "The lens chains onto the unstraightening rewrites: it starts from their output in `dialog/unstraightening/`, and the build applies the lenses in order.",
-    "The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible speakers with a romance or gender-roles line as trans, one draft call per pick, and no Jev.",
+    "The lens runs under the queering selection: an Opus marker, a Haiku candidate pass, three disjoint seeded refill sides (romance, world and trans), one draft call per pick, and no Jev.",
 )
 BUCKET_PHRASES: tuple[str, ...] = (
     "romance_share of the romance pool",
+    "world_share of the eligible characters outside the romance pool",
     "trans_share of all eligible characters",
-    "the trans pool is the eligible speakers with a romance or gender-roles line",
+    "the world pool is the eligible speakers outside the romance pool with an insertable mark",
+    "the trans pool is the eligible speakers with a trans-candidate mark, minus the other sides' picks",
     "Speakerless lines are never trans picks",
     "a share of 100 takes the whole pool",
     "refilled from the order until the target or the pool runs out",
@@ -169,6 +223,7 @@ HOW_IT_IS_CHECKED: tuple[str, ...] = (
     "used only for counts",
     "no Jev recheck",
     "reads the lines of characters outside the core cast who are not antagonists, and the flirt's",
+    "`marks.jsonl` with no line text",
 )
 
 
@@ -264,17 +319,24 @@ def test_judge_rule_is_a_reject_sentence(lens: Lens, label: str) -> None:
 INTENT_PREAMBLE_PHRASES: tuple[str, ...] = (
     "every romance line of a speaker chosen queer, drafted together",
     "a line in the flirt's redirect half",
-    "every line of a trans pick, drafted together",
+    "one candidate line of a world pick",
+    "one candidate line of a trans pick",
     "no-hit when the line is not the shape its label names",
     "protection when a protect rule below covers it",
-    "plot when switching would contradict a partner or fact shown on screen, or would change the plot",
+    "plot when the partner appears or is named as a character elsewhere in the given context, or when the change would alter what happens",
 )
 
 
 @pytest.mark.parametrize("phrase", INTENT_PREAMBLE_PHRASES)
-def test_intent_preamble_covers_the_flirt_and_names_the_keep_list(lens: Lens, phrase: str) -> None:
+def test_intent_preamble_covers_the_four_line_kinds_and_names_the_keep_list(lens: Lens, phrase: str) -> None:
     preamble = lens.intent_rule.strip().split("\n\n", 1)[0]
     assert phrase in preamble
+
+
+@pytest.mark.parametrize("phrase", RETIRED_PHRASES)
+def test_retired_wording_is_gone_from_the_lens_and_the_doc(phrase: str) -> None:
+    assert phrase not in LENS.read_text(encoding="utf-8")
+    assert phrase not in doc_text()
 
 
 def test_doc_opens_with_the_title_and_the_no_game_text_promise() -> None:
