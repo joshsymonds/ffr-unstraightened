@@ -89,9 +89,9 @@ Set the game's Text Language to English before you play.
 | `ffrd install [--deck]` | Copies `build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas` into `<game>/FFRS/Content/Paks/~mods`, whichever pak shape the last build wrote. It does not copy the `--ue4ss` folder. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
-| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json`, then `redo: n listed, m changed, k gate failed`: the lines on the redo list (those with `redo` true in `outcomes.jsonl`), how many of them changed and how many failed a gate, whatever the gate. For a lens with `selection = "queering"`, it then prints the queering counts: `queering romance: L lines, C characters, S speakerless`, `queering gender roles: L lines, C characters`, `queering eligible characters: E`, then for the queer side and then the trans side, `queering <side> target: T (count C, pool P)`, where `C` is the side's count setting, an integer or `all`, and `P` is its pool, one `queering <side> round n: tried T, passed P` line per refill round, and `queering <side> achieved: A of T`, with `, pool exhausted` added when the pool ran out. Then `queering flirt marked: N, redirect half: M`, `queering changed queer|trans|redirect: N` and `queering gate failed queer|trans|redirect: N`. Then it prints one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. When `work/<name>/usage.jsonl` holds an entry, it then prints a `usage run <id>` block for the latest run id, with calls, input, output, cache read and cache write tokens, prompt tokens per call (input plus cache read plus cache write, divided by calls, rounded) and cost in dollars per stage and model, then a total. Never prints line text. |
+| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json`, then `redo: n listed, m changed, k gate failed`: the lines on the redo list (those with `redo` true in `outcomes.jsonl`), how many of them changed and how many failed a gate, whatever the gate. For a lens with `selection = "queering"`, it then prints the queering counts: `queering romance: L lines, C characters, S speakerless`, `queering gender roles: L lines, C characters`, `queering eligible characters: E`, `queering candidates: insertable L lines, C characters; trans-candidate L lines, C characters; U scenes unfinished`, then for the romance, world, nonbinary and trans sides in that order, `queering <side> target: T (S% of D, pool P)`, where `S` is the side's share, `D` its denominator and `P` its pool, one `queering <side> round n: tried T, passed P` line per refill round, and `queering <side> achieved: A of T`, with `, pool exhausted` added when `A` is below `T`. Then `queering flirt marked: N, redirect half: M`, `queering changed queer|world|nonbinary|trans|redirect: N` and `queering gate failed queer|world|nonbinary|trans|redirect: N`, where `queer` is the romance side's bucket. Then it prints one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. When `work/<name>/usage.jsonl` holds an entry, it then prints a `usage run <id>` block for the latest run id, with calls, input, output, cache read and cache write tokens, prompt tokens per call (input plus cache read plus cache write, divided by calls, rounded) and cost in dollars per stage and model, then a total. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
-| `ffrd run --lens <name> [--no-jev] [--concurrency N] [--account N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. A lens with `selection = "queering"` runs the queering selection instead, which calls no Jev. Keeps up to `N` Claude calls in flight at once, 8 by default. `--account N` pins every Claude call of the run to cswap account `N`, skipping the 90% weekly filter for it, and a rate limit makes the run wait for that account's earliest reset and retry it, refusing before any Claude call unless `N` is a usable account. `--through N` keeps only the lines in chapters at or below `N`. Checks `ledger/<name>.jsonl` before any Claude call and appends to it at the end. Holds an exclusive lock on `work/<name>/.run.lock` for the whole run, so a second `ffrd run` of the same lens stops with an error before any Claude call. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. A queering run also writes `work/<name>/marks.jsonl` and `selection.json`. Each model call appends one entry to `work/<name>/usage.jsonl`; stored results append none. See [Rewrite pipeline](#rewrite-pipeline). |
+| `ffrd run --lens <name> [--no-jev] [--concurrency N] [--account N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. A lens with `selection = "queering"` runs the queering selection instead: a screen, a Haiku candidate pass and the four refill sides, with no Jev. Keeps up to `N` Claude calls in flight at once, 8 by default. `--account N` pins every Claude call of the run to cswap account `N`, skipping the 90% weekly filter for it, and a rate limit makes the run wait for that account's earliest reset and retry it, refusing before any Claude call unless `N` is a usable account. `--through N` keeps only the lines in chapters at or below `N`. Checks `ledger/<name>.jsonl` before any Claude call and appends to it at the end. Holds an exclusive lock on `work/<name>/.run.lock` for the whole run, so a second `ffrd run` of the same lens stops with an error before any Claude call. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. A queering run also writes `work/<name>/marks.jsonl` and `selection.json`. Each model call appends one entry to `work/<name>/usage.jsonl`; stored results append none. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
 | `ffrd probe [--shape {target,full,partial,ue4ss}]` | Installs the built mod with a probe-only marker pak beside it on the probe host, and passes when the game honours the marker. Removes both afterwards. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
@@ -301,39 +301,65 @@ Phase 1 is one screen per scene, run on the lens's screen model: Opus by default
 when the lens sets `model` in `[screen]`. It runs over the lines of speakers who are neither
 core cast nor antagonist, over the flirt's lines, and over lines with no speaker. Its two
 questions are the `[[triage]]` entries with the ids `romance` and `gender-roles`. A romance
-mark feeds the picks. A gender-roles mark widens the trans pool and never the queer pool.
-Its cast notes are windowed to the scene's chapter bible and the most recent earlier one.
+mark feeds the picks. A gender-roles mark is tracked only and never puts a unit in the romance
+pool. Its cast notes are windowed to the scene's chapter bible and the most recent earlier one.
 
-Phase 2 starts once every scene is screened, and picks the lines to rewrite. The romance pool
-is the set of units with a romance-marked line that the queer side may pick: a speaker outside
-the core cast, the antagonists and the flirt, or a speakerless line. A gender-roles mark never
-puts a unit in the queer pool. The trans pool is the named speakers outside the core cast, the
-antagonists and the flirt who have at least one romance-marked or gender-roles-marked line.
-A unit is a speaker id, or the namespace and key of a speakerless line. Each side ranks the
-units by the SHA-256 of its salt and the unit, with the salt `queer` for the queer side and
-`trans` for the trans side. The two sides' picks are disjoint.
+Phase 1 then runs a candidate pass on Haiku, one call per scene, over the scene's lines whose
+speaker is eligible and that carry no romance mark from the screen. Eligible means a named
+speaker outside the core cast, the antagonists and the flirt. A scene with no such line makes
+no call, and a scene whose screen did not finish makes none either. A line takes the mark
+`insertable` when it is about the speaker's home, family, work or daily life, and the mark
+`trans-candidate` when it is about the speaker's family, name, belonging, someone standing up
+for the speaker, or their past. A line may take both marks. A scene whose candidate call does
+not finish contributes no marks and is counted in `candidates.unfinished_scenes`. A rerun
+retries it.
 
-Each side has a count: `queer_count` for the queer side and `trans_count` for the trans side,
-each an integer or `all`. A side's target is the smaller of its count and its pool, and `all`
-makes the target the whole pool. Each side draws from its order and refills until its target is
-met or its pool runs out. A romance
-line of a queer pick takes `queer`, and every line of a trans pick takes `trans`, marked or
-not. The flirt's marked lines are split in half by a
-hash of their key, into redirect and not-redirected, and the flirt is never picked.
+Phase 2 starts once every scene is screened and every candidate pass has finished, and picks
+the lines to rewrite. Four disjoint sides each draw from their own seeded order. A unit is a
+speaker id, or the namespace and key of a speakerless line. Each side sorts its pool by the
+SHA-256 of its salt and the unit, with the salts `queer` for romance, `world`, `nonbinary` and
+`trans`. Each side's share is a whole number from 0 to 100, and its target is its share of its
+denominator, rounded half up:
+
+- romance: `romance_share`, default 15, of the romance pool. The pool is the units with a
+  romance-marked line, and the denominator is the pool. A gender-roles mark never puts a unit
+  in it.
+- world: `world_share`, default 10, of the eligible speakers outside the romance pool. The
+  pool is those speakers with an `insertable` mark.
+- nonbinary: `nonbinary_share`, default 5, with the same denominator and pool as world.
+- trans: `trans_share`, default 5, of all eligible speakers. The pool is the eligible speakers
+  with a `trans-candidate` mark. Speakerless lines are never trans picks.
+
+Each refill round draws romance, world, nonbinary and then trans, and each side skips any unit
+another side has drawn. A side refills until its target is met or its pool runs out. A share of
+0 draws nothing. A side that ends short of its target is exhausted, and a pick counts only when
+a changed line survives every judge.
 
 Each queer pick's selected lines are drafted in one call per speaker across all scenes, and a
-speakerless pick's lines in one call per scene. A trans pick's lines go to one Opus call per
-speaker. The drafts then go through the existing gates, the judges, the coherence check, the
-arc judge, the voice classifier and the redo list, as described above. Each outcome record
-of a marked line or of a trans pick's line carries its bucket: `queer`, `trans`,
-`untouched`, `redirect` or `not-redirected`.
+speakerless pick's lines in one call per scene. Each world, nonbinary or trans pick is drafted
+in one Opus call over its candidate lines: its `insertable`-marked lines for world and
+nonbinary, and its `trans-candidate`-marked lines for trans. Each candidate line is shown with
+the three scene lines before and after it. The call returns either no change or exactly one
+candidate line changed, with its intent and its drafts. A world pick gets a short same-sex
+partner mention, a nonbinary pick a short mention of a partner consistently called they/them,
+and a trans pick at most one light trans detail. The chosen line goes through the line gate,
+and the pick's other lines are left as written. The drafts then go through the existing gates,
+the judges, the coherence check, the arc judge, the voice classifier and the redo list, as
+described above.
 
-The run writes `work/<lens>/marks.jsonl`, one line per marked line with the run id, namespace,
-key, speaker, chapter and questions, and no text. It writes `selection.json` with the romance
-and gender-roles counts, the eligible characters (the distinct speakers of the run's scenes
-outside the core cast, the antagonists and the flirt), and for each side its count (an integer or
-`all`), pool, target, refill rounds, achieved count and whether it is exhausted: the achieved
-count is below the count, or below the pool for `all`. `ffrd report` prints the new lines.
+Each outcome record of a marked line carries its bucket: `queer`, `world`, `nonbinary`, `trans`,
+`redirect` or `not-redirected`, or `untouched` when no side picks the line. The flirt's marked
+lines are split in half by a hash of their key, into redirect and not-redirected, and the flirt
+is never picked.
+
+The run writes `work/<lens>/marks.jsonl`, one entry per line with a screen or candidate mark.
+Each entry holds the run id, namespace, key, speaker, chapter, `questions` (its screen marks) and
+`candidates` (its candidate marks), and no text. It writes `selection.json` with `romance`
+(lines, characters, speakerless), `gender_roles` (lines, characters), `eligible_characters`,
+`candidates` (`insertable` and `trans_candidate`, each with lines and characters, and
+`unfinished_scenes`), and `sides` for romance, world, nonbinary and trans. Each side records its
+share, pool, denominator, target, the tried and passed count of each refill round, achieved, and
+`exhausted`, which is true when achieved is below target. `ffrd report` prints the new lines.
 
 #### Change ledger
 
