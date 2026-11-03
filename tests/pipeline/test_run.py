@@ -5175,13 +5175,14 @@ def test_trans_draft_is_one_call_per_pick_across_its_scenes_and_marks_its_unmark
         Scene("made-up-scene-y", (_line(NS_B, "1", REFILL_X, EN_B1, 2),)),
     )
     claude = FakeClaude()
+    # Each speaker has one marked line, so both are in the trans pool. The unmarked line of speaker x still takes its pick's trans bucket.
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_A, "2"): [ROMANCE_ID]}
     outcomes = _run(
         tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=scenes, lens=replace(QUEER_LENS, queer_count=0, trans_count="all")
     )
     calls = _trans_calls(claude)
     assert len(calls) == 2
     assert {tuple(sorted(_trans_refs(parts))) for parts in calls} == {((NS_A, "1"), (NS_B, "1")), ((NS_A, "2"),)}
-    # No speaker here is flagged, so every line is unmarked, and each still takes the trans bucket of its pick.
     assert [(outcome.speaker, outcome.bucket) for outcome in outcomes] == [(REFILL_X, "trans"), (REFILL_Y, "trans"), (REFILL_X, "trans")]
 
 
@@ -5500,6 +5501,98 @@ def test_gender_roles_only_lines_never_select(tmp_path: Path) -> None:
     assert selection["queer"]["pool"] == 1
 
 
+# Trans pool fixtures: a made-up speaker whose only line is unmarked, so it is eligible but outside the trans pool. Not game text.
+UNMARKED_SPEAKER = "made-up-speaker-u"
+UNMARKED_SCENE = Scene("made-up-scene-u", (_line(NS_A, "9", UNMARKED_SPEAKER, EN_A3, 1),))
+GENDER_SPEAKER = "made-up-speaker-g"
+GENDER_TRANS_DRAFT = "Made-up trans rewrite of g. Not game text."
+
+
+def test_a_speaker_with_only_unmarked_lines_is_never_a_trans_pick(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=(*REFILL_SCENES, UNMARKED_SCENE),
+        lens=replace(QUEER_LENS, queer_count=0, trans_count="all"),
+    )
+    assert [(outcome.speaker, outcome.bucket) for outcome in outcomes if outcome.speaker == UNMARKED_SPEAKER] == [(UNMARKED_SPEAKER, None)]
+    assert not any((NS_A, "9") in _trans_refs(parts) for parts in _trans_calls(claude))
+    selection = _selection(tmp_path)
+    assert selection["eligible_characters"] == 4
+    assert selection["trans"] == {
+        "count": "all",
+        "pool": 3,
+        "target": 3,
+        "rounds": [{"tried": 3, "passed": 3}],
+        "achieved": 3,
+        "exhausted": False,
+    }
+
+
+def test_a_gender_roles_only_speaker_is_a_trans_pick_and_never_a_queer_pick(tmp_path: Path) -> None:
+    scene = Scene(
+        "made-up-scene-gender-trans",
+        (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_B, "1", GENDER_SPEAKER, EN_B1, 1)),
+    )
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE}
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_B, "1"): [GENDER_ID]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1]}
+    claude.trans = {(NS_B, "1"): _trans_change(TRANS_INTENT, [GENDER_TRANS_DRAFT])}
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=(scene,),
+        lens=replace(QUEER_LENS, queer_count="all", trans_count="all"),
+    )
+    assert [(outcome.speaker, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, "changed", "queer"),
+        (GENDER_SPEAKER, "changed", "trans"),
+    ]
+    selection = _selection(tmp_path)
+    assert selection["queer"]["pool"] == 1
+    assert selection["trans"]["pool"] == 2
+
+
+def test_a_flagged_antagonist_or_flirt_is_never_in_the_trans_pool(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.bible = {1: COUNT_BIBLE_ONE, 2: COUNT_BIBLE_TWO}
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_A, "3"): [ROMANCE_ID], (NS_B, "2"): [ROMANCE_ID]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1]}
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=COUNT_SCENES,
+        lens=replace(QUEER_LENS, queer_count=0, trans_count="all"),
+    )
+    buckets = {(outcome.speaker, outcome.key): outcome.bucket for outcome in outcomes}
+    # The antagonist's line is never screened, so its flag never lands and it keeps no bucket. The flirt's marked line keeps its flirt bucket.
+    assert buckets[(COUNT_VILLAIN, "2")] is None
+    assert buckets[(COUNT_FLIRT, "3")] in {"redirect", "not-redirected"}
+    assert _selection(tmp_path)["trans"]["pool"] == 1
+
+
+def test_a_queering_rerun_on_stored_results_makes_no_calls(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    lens = replace(QUEER_LENS, queer_count=1, trans_count="all")
+    _refill_run(tmp_path, claude, lens)
+    before = _snapshot(tmp_path)
+    calls = len(claude.calls)
+    _refill_run(tmp_path, claude, lens)
+    assert len(claude.calls) == calls
+    assert _snapshot(tmp_path) == before
+
+
 # Selection counts fixtures: a flirt, an antagonist, a plain speaker, a gender-roles speaker and a speakerless romance line. Made-up speakers, notes and lines. Not game text.
 COUNT_FLIRT = "made-up-speaker-f"
 COUNT_VILLAIN = "made-up-speaker-v"
@@ -5558,12 +5651,11 @@ def test_selection_counts_are_exact(tmp_path: Path) -> None:
         (NS_B, "1"): [ROMANCE_ID],
     }
     claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1]}
-    # Every eligible character's lines change on the trans side, so the first trans pick passes whichever speaker the queer side leaves.
+    # The trans pool is the marked speakers x and the gender-roles speaker, so their lines change on the trans side and the first trans pick passes whichever one the queer side leaves.
     claude.trans = {
         (NS_A, "1"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
         (NS_B, "1"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
         (NS_A, "4"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
-        (NS_B, "3"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
     }
     _run(
         tmp_path,
@@ -5579,7 +5671,7 @@ def test_selection_counts_are_exact(tmp_path: Path) -> None:
         "gender_roles": {"lines": 1, "characters": 1},
         "eligible_characters": 3,
         "queer": {"count": 1, "pool": 2, "target": 1, "rounds": [{"tried": 1, "passed": 1}], "achieved": 1, "exhausted": False},
-        "trans": {"count": 1, "pool": 3, "target": 1, "rounds": [{"tried": 1, "passed": 1}], "achieved": 1, "exhausted": False},
+        "trans": {"count": 1, "pool": 2, "target": 1, "rounds": [{"tried": 1, "passed": 1}], "achieved": 1, "exhausted": False},
     }
 
 

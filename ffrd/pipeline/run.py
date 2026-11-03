@@ -896,8 +896,19 @@ def _romance_pool(marking: _Marking, marks: Sequence[Outcome]) -> set[str]:
     }
 
 
+def _trans_pool(marking: _Marking, marks: Sequence[Outcome]) -> set[str]:
+    """The named speakers outside the core cast, the antagonists and the flirt with a romance- or gender-roles-marked line, which the trans side may pick. A speakerless marked line is never a trans unit."""
+    return {
+        outcome.speaker
+        for outcome in marks
+        if outcome.speaker
+        and (queering.ROMANCE in outcome.reasons or queering.GENDER_ROLES in outcome.reasons)
+        and queering.selectable(outcome.speaker, marking.core, marking.antagonists, marking.flirt)
+    }
+
+
 def _eligible(marking: _Marking, scenes: Sequence[Scene]) -> frozenset[str]:
-    """The distinct speakers of the run's scenes outside the core cast, the antagonists and the flirt. They are the trans pool."""
+    """The distinct speakers of the run's scenes outside the core cast, the antagonists and the flirt. They are counted as the eligible characters."""
     return frozenset(
         line.speaker
         for scene in scenes
@@ -1250,12 +1261,12 @@ def _refill(
             return _Refill(outcomes, changes, tuple(queer_rounds), queer_passing, tuple(trans_rounds), trans_passing)
 
 
-def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, refill: _Refill) -> None:
+def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, trans_pool: int, refill: _Refill) -> None:
     """Writes the counts of the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and each side's count, pool, target, rounds and achieved count, with whether it fell short of its count or, for all, of its pool."""
     romance = [outcome for outcome in marks if queering.ROMANCE in outcome.reasons]
     gender = [outcome for outcome in marks if queering.GENDER_ROLES in outcome.reasons]
     queer_target = queering.target(lens.queer_count, pool)
-    trans_target = queering.target(lens.trans_count, eligible)
+    trans_target = queering.target(lens.trans_count, trans_pool)
     queer_achieved = len(refill.queer_passing)
     trans_achieved = len(refill.trans_passing)
     record = {
@@ -1276,11 +1287,11 @@ def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible:
         },
         "trans": {
             "count": lens.trans_count,
-            "pool": eligible,
+            "pool": trans_pool,
             "target": trans_target,
             "rounds": [{"tried": tried, "passed": passed} for tried, passed in refill.trans_rounds],
             "achieved": trans_achieved,
-            "exhausted": trans_achieved < queering.requested(lens.trans_count, eligible),
+            "exhausted": trans_achieved < queering.requested(lens.trans_count, trans_pool),
         },
     }
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
@@ -1569,7 +1580,8 @@ def run(
             for (position, scene, ask), (scene_outcomes, _, _, passed) in zip(scene_items, scene_results, strict=True)
         ]
         pool = _romance_pool(ctx.marking, marks)
-        speakers = _eligible(ctx.marking, scenes)
+        trans_pool = _trans_pool(ctx.marking, marks)
+        eligible = _eligible(ctx.marking, scenes)
         refill = _refill(
             ctx,
             root,
@@ -1577,12 +1589,12 @@ def run(
             screened,
             queering.order(pool, queering.QUEER_SALT),
             queering.target(lens.queer_count, len(pool)),
-            queering.order(speakers, queering.TRANS_SALT),
-            queering.target(lens.trans_count, len(speakers)),
+            queering.order(trans_pool, queering.TRANS_SALT),
+            queering.target(lens.trans_count, len(trans_pool)),
             batch,
         )
         outcomes, changes = refill.outcomes, refill.changes
-        _write_selection(store.root / SELECTION, lens, marks, len(speakers), len(pool), refill)
+        _write_selection(store.root / SELECTION, lens, marks, len(eligible), len(pool), len(trans_pool), refill)
     outcomes = [replace(o, redo=(o.namespace, o.key) in ctx.redo) for o in outcomes]
     _check_changes(changes)
     out(f"total: {_counts(outcomes)}")

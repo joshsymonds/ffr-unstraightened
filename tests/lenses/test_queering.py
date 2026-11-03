@@ -154,16 +154,18 @@ DOC_SENTENCES: tuple[str, ...] = (
     'The trans bucket never adds a "she\'s trans" aside.',
     "The core cast's sexuality and romances stay as written, except the flirt's split.",
     "The lens chains onto the unstraightening rewrites: it starts from their output in `dialog/unstraightening/`, and the build applies the lenses in order.",
-    "The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible characters as trans, one draft call per pick, and no Jev.",
+    "The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible speakers with a romance or gender-roles line as trans, one draft call per pick, and no Jev.",
 )
 BUCKET_PHRASES: tuple[str, ...] = (
     "queer_count",
     "trans_count",
     "queer_count of the romance pool",
-    "trans_count of every eligible character",
+    "trans_count of the trans pool",
+    "the trans pool is the eligible speakers with a romance or gender-roles line",
+    "Speakerless lines are never trans picks",
     "a count of `all` takes the whole pool",
     "refilled from the order until the target or the pool runs out",
-    "gender-roles marks never select",
+    "gender-roles mark never puts a unit in the queer pool",
 )
 HOW_IT_IS_CHECKED: tuple[str, ...] = (
     "used only for counts",
