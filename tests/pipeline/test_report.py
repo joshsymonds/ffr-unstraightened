@@ -48,10 +48,13 @@ ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 QUEERING_LINE = (
     r"queering (romance: [0-9]+ lines, [0-9]+ characters, [0-9]+ speakerless|gender roles: [0-9]+ lines, [0-9]+ characters"
-    r"|eligible characters: [0-9]+|(romance|trans) target: [0-9]+ \([0-9]+% of [0-9]+, pool [0-9]+\)"
-    r"|(romance|trans) round [0-9]+: tried [0-9]+, passed [0-9]+|(romance|trans) achieved: [0-9]+ of [0-9]+(, pool exhausted)?"
+    r"|eligible characters: [0-9]+"
+    r"|candidates: insertable [0-9]+ lines, [0-9]+ characters; trans-candidate [0-9]+ lines, [0-9]+ characters; [0-9]+ scenes unfinished"
+    r"|(romance|world|nonbinary|trans) target: [0-9]+ \([0-9]+% of [0-9]+, pool [0-9]+\)"
+    r"|(romance|world|nonbinary|trans) round [0-9]+: tried [0-9]+, passed [0-9]+"
+    r"|(romance|world|nonbinary|trans) achieved: [0-9]+ of [0-9]+(, pool exhausted)?"
     r"|flirt marked: [0-9]+, redirect half: [0-9]+"
-    r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
+    r"|changed (queer|world|nonbinary|trans|redirect): [0-9]+|gate failed (queer|world|nonbinary|trans|redirect): [0-9]+)"
 )
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
 SCENE_DETAIL = (
@@ -377,26 +380,35 @@ def test_absent_bucket_reads_as_none(tmp_path: Path) -> None:
 # Made-up queering lens: the queering selection declared above the lens tables. Not game text.
 QUEERING_LENS_TOML = 'selection = "queering"\n' + LENS_TOML
 
-# Made-up outcomes for the queering block: ten records, the last one unmarked. Not game text.
+# Made-up outcomes for the queering block: fourteen records, the last one unmarked. Not game text.
 QUEERING_RECORDS = (
     _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="queer"),
     _record(chapter=1, speaker=SPEAKER_TEN, reasons=[FIRST], outcome="changed", bucket="trans"),
     _record(chapter=1, speaker=SPEAKER_TWO, outcome="untouched", bucket="untouched"),
     _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="redirect"),
+    _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="world"),
+    _record(chapter=1, speaker=SPEAKER_TEN, reasons=[FIRST], outcome="changed", bucket="nonbinary"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="redirect"),
+    _record(chapter=2, speaker=SPEAKER_TWO, outcome="gate_failed", gate="made-up-gate", bucket="world"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="nonbinary"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched", bucket="not-redirected"),
     _record(chapter=2, speaker=None, outcome="untouched", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TWO, outcome="untouched", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched"),
 )
 
-# Made-up selection sides: romance reached its target; trans ran out of pool short of its target, so it is
-# the exhausted side. Not game text.
+# Made-up selection: four sides and the candidate block. Romance reached its target; trans ran out of pool short
+# of its target, so it is the exhausted side. Not game text.
 SELECTION_OBJECT: dict[str, object] = {
     "romance": {"lines": 4, "characters": 3, "speakerless": 1},
     "gender_roles": {"lines": 2, "characters": 2},
     "eligible_characters": 5,
+    "candidates": {
+        "insertable": {"lines": 6, "characters": 4},
+        "trans_candidate": {"lines": 3, "characters": 2},
+        "unfinished_scenes": 2,
+    },
     "sides": {
         "romance": {
             "share": 40,
@@ -405,6 +417,24 @@ SELECTION_OBJECT: dict[str, object] = {
             "target": 4,
             "rounds": [{"tried": 5, "passed": 3}, {"tried": 2, "passed": 1}],
             "achieved": 4,
+            "exhausted": False,
+        },
+        "world": {
+            "share": 10,
+            "denominator": 8,
+            "pool": 3,
+            "target": 2,
+            "rounds": [{"tried": 3, "passed": 2}],
+            "achieved": 2,
+            "exhausted": False,
+        },
+        "nonbinary": {
+            "share": 5,
+            "denominator": 6,
+            "pool": 2,
+            "target": 1,
+            "rounds": [{"tried": 2, "passed": 1}],
+            "achieved": 1,
             "exhausted": False,
         },
         "trans": {
@@ -423,10 +453,17 @@ EXPECTED_SELECTION = [
     "queering romance: 4 lines, 3 characters, 1 speakerless",
     "queering gender roles: 2 lines, 2 characters",
     "queering eligible characters: 5",
+    "queering candidates: insertable 6 lines, 4 characters; trans-candidate 3 lines, 2 characters; 2 scenes unfinished",
     "queering romance target: 4 (40% of 10, pool 7)",
     "queering romance round 1: tried 5, passed 3",
     "queering romance round 2: tried 2, passed 1",
     "queering romance achieved: 4 of 4",
+    "queering world target: 2 (10% of 8, pool 3)",
+    "queering world round 1: tried 3, passed 2",
+    "queering world achieved: 2 of 2",
+    "queering nonbinary target: 1 (5% of 6, pool 2)",
+    "queering nonbinary round 1: tried 2, passed 1",
+    "queering nonbinary achieved: 1 of 1",
     "queering trans target: 2 (20% of 9, pool 4)",
     "queering trans round 1: tried 2, passed 1",
     "queering trans round 2: tried 2, passed 0",
@@ -435,9 +472,13 @@ EXPECTED_SELECTION = [
 EXPECTED_OUTCOME_LINES = [
     "queering flirt marked: 3, redirect half: 2",
     "queering changed queer: 1",
+    "queering changed world: 1",
+    "queering changed nonbinary: 1",
     "queering changed trans: 1",
     "queering changed redirect: 1",
     "queering gate failed queer: 1",
+    "queering gate failed world: 1",
+    "queering gate failed nonbinary: 1",
     "queering gate failed trans: 0",
     "queering gate failed redirect: 1",
 ]
@@ -521,6 +562,52 @@ BAD_SELECTION = [
     pytest.param(_broken("sides", value="SENTINEL-SIDES"), "field sides must be an object", id="sides-type"),
     pytest.param(_broken("sides", "romance"), "field sides.romance is missing", id="romance-side-missing"),
     pytest.param(_broken("sides", "trans"), "field sides.trans is missing", id="trans-side-missing"),
+    pytest.param(_broken("sides", "world"), "field sides.world is missing", id="world-side-missing"),
+    pytest.param(_broken("sides", "nonbinary"), "field sides.nonbinary is missing", id="nonbinary-side-missing"),
+    pytest.param(
+        _broken("sides", "world", "pool", value="SENTINEL-POOL"),
+        "field sides.world.pool must be a non-negative integer",
+        id="world-pool-type",
+    ),
+    pytest.param(
+        _broken("sides", "nonbinary", "share", value=101),
+        "field sides.nonbinary.share must be a whole number from 0 to 100",
+        id="nonbinary-share-high",
+    ),
+    pytest.param(
+        _broken("sides", "nonbinary", "exhausted", value="SENTINEL-EXHAUSTED"),
+        "field sides.nonbinary.exhausted must be true or false",
+        id="nonbinary-exhausted-type",
+    ),
+    pytest.param(_broken("candidates"), "field candidates is missing", id="candidates-missing"),
+    pytest.param(_broken("candidates", value="SENTINEL-CANDIDATES"), "field candidates must be an object", id="candidates-type"),
+    pytest.param(_broken("candidates", "insertable"), "field candidates.insertable is missing", id="insertable-missing"),
+    pytest.param(
+        _broken("candidates", "insertable", value="SENTINEL-INSERTABLE"),
+        "field candidates.insertable must be an object",
+        id="insertable-type",
+    ),
+    pytest.param(
+        _broken("candidates", "insertable", "lines", value="SENTINEL-LINES"),
+        "field candidates.insertable.lines must be a non-negative integer",
+        id="insertable-lines-type",
+    ),
+    pytest.param(
+        _broken("candidates", "trans_candidate", "lines"),
+        "field candidates.trans_candidate.lines is missing",
+        id="trans-candidate-lines-missing",
+    ),
+    pytest.param(
+        _broken("candidates", "trans_candidate", "characters", value=-1),
+        "field candidates.trans_candidate.characters must be a non-negative integer",
+        id="trans-candidate-characters-negative",
+    ),
+    pytest.param(_broken("candidates", "unfinished_scenes"), "field candidates.unfinished_scenes is missing", id="unfinished-missing"),
+    pytest.param(
+        _broken("candidates", "unfinished_scenes", value=True),
+        "field candidates.unfinished_scenes must be a non-negative integer",
+        id="unfinished-bool",
+    ),
     pytest.param(_broken("sides", "romance", "share"), "field sides.romance.share is missing", id="share-missing"),
     pytest.param(
         _broken("sides", "romance", "share", value=101),

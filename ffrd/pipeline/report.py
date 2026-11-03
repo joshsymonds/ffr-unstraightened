@@ -32,7 +32,7 @@ OUTCOME_LABELS = {
     "untouched": "untouched",
 }
 GATE = re.compile(r"[a-z0-9]+([-_][a-z0-9]+)*")
-QUEERING_REWRITES = ("queer", "trans", "redirect")
+QUEERING_REWRITES = ("queer", "world", "nonbinary", "trans", "redirect")
 FLIRT_BUCKETS = frozenset({"redirect", "not-redirected"})
 Key = tuple[str, str]  # (namespace, key)
 
@@ -343,6 +343,19 @@ class Side:
 
 
 @dataclass(frozen=True)
+class Marked:
+    lines: int
+    characters: int
+
+
+@dataclass(frozen=True)
+class Candidates:
+    insertable: Marked
+    trans_candidate: Marked
+    unfinished_scenes: int
+
+
+@dataclass(frozen=True)
 class Selection:
     romance_lines: int
     romance_characters: int
@@ -350,7 +363,10 @@ class Selection:
     gender_lines: int
     gender_characters: int
     eligible: int
+    candidates: Candidates
     romance: Side
+    world: Side
+    nonbinary: Side
     trans: Side
 
 
@@ -410,6 +426,15 @@ def _side(sides: dict[str, object], name: str, path: Path) -> Side:
     )
 
 
+def _marked(candidates: dict[str, object], name: str, path: Path) -> Marked:
+    entry = _selection_object(candidates, name, "candidates.", path)
+    prefix = f"candidates.{name}."
+    return Marked(
+        lines=_selection_count(entry, "lines", prefix, path),
+        characters=_selection_count(entry, "characters", prefix, path),
+    )
+
+
 def _selection(path: Path) -> Selection:
     try:
         raw = path.read_bytes()
@@ -426,6 +451,7 @@ def _selection(path: Path) -> Selection:
     romance = _selection_object(obj, "romance", "", path)
     gender = _selection_object(obj, "gender_roles", "", path)
     sides = _selection_object(obj, "sides", "", path)
+    candidates = _selection_object(obj, "candidates", "", path)
     return Selection(
         romance_lines=_selection_count(romance, "lines", "romance.", path),
         romance_characters=_selection_count(romance, "characters", "romance.", path),
@@ -433,7 +459,14 @@ def _selection(path: Path) -> Selection:
         gender_lines=_selection_count(gender, "lines", "gender_roles.", path),
         gender_characters=_selection_count(gender, "characters", "gender_roles.", path),
         eligible=_selection_count(obj, "eligible_characters", "", path),
+        candidates=Candidates(
+            insertable=_marked(candidates, "insertable", path),
+            trans_candidate=_marked(candidates, "trans_candidate", path),
+            unfinished_scenes=_selection_count(candidates, "unfinished_scenes", "candidates.", path),
+        ),
         romance=_side(sides, "romance", path),
+        world=_side(sides, "world", path),
+        nonbinary=_side(sides, "nonbinary", path),
         trans=_side(sides, "trans", path),
     )
 
@@ -569,7 +602,15 @@ def _queering_lines(records: list[Record], selection: Selection) -> list[str]:
     )
     lines = [romance, f"queering gender roles: {selection.gender_lines} lines, {selection.gender_characters} characters"]
     lines.append(f"queering eligible characters: {selection.eligible}")
+    candidates = selection.candidates
+    lines.append(
+        f"queering candidates: insertable {candidates.insertable.lines} lines, {candidates.insertable.characters} characters; "
+        f"trans-candidate {candidates.trans_candidate.lines} lines, {candidates.trans_candidate.characters} characters; "
+        f"{candidates.unfinished_scenes} scenes unfinished"
+    )
     lines += _side_lines("romance", selection.romance)
+    lines += _side_lines("world", selection.world)
+    lines += _side_lines("nonbinary", selection.nonbinary)
     lines += _side_lines("trans", selection.trans)
     lines.append(f"queering flirt marked: {flirt}, redirect half: {redirect}")
     lines += [f"queering changed {bucket}: {changed[bucket]}" for bucket in QUEERING_REWRITES]
