@@ -333,7 +333,8 @@ class Round:
 
 @dataclass(frozen=True)
 class Side:
-    count: int | str
+    share: int
+    denominator: int
     pool: int
     target: int
     rounds: tuple[Round, ...]
@@ -349,7 +350,7 @@ class Selection:
     gender_lines: int
     gender_characters: int
     eligible: int
-    queer: Side
+    romance: Side
     trans: Side
 
 
@@ -366,12 +367,10 @@ def _selection_count(obj: dict[str, object], name: str, prefix: str, path: Path)
     return value
 
 
-def _side_count(side: dict[str, object], prefix: str, path: Path) -> int | str:
-    value = _selection_field(side, "count", prefix, path)
-    if value == "all":
-        return "all"
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise Fail(f'{path}: field {prefix}count must be a non-negative integer or "all"')
+def _side_share(side: dict[str, object], prefix: str, path: Path) -> int:
+    value = _selection_field(side, "share", prefix, path)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+        raise Fail(f"{path}: field {prefix}share must be a whole number from 0 to 100")
     return value
 
 
@@ -391,9 +390,9 @@ def _round(entry: object, field: str, path: Path) -> Round:
     )
 
 
-def _side(obj: dict[str, object], name: str, path: Path) -> Side:
-    side = _selection_object(obj, name, "", path)
-    prefix = f"{name}."
+def _side(sides: dict[str, object], name: str, path: Path) -> Side:
+    side = _selection_object(sides, name, "sides.", path)
+    prefix = f"sides.{name}."
     rounds = _selection_field(side, "rounds", prefix, path)
     if not isinstance(rounds, list):
         raise Fail(f"{path}: field {prefix}rounds must be a list")
@@ -401,7 +400,8 @@ def _side(obj: dict[str, object], name: str, path: Path) -> Side:
     if not isinstance(exhausted, bool):
         raise Fail(f"{path}: field {prefix}exhausted must be true or false")
     return Side(
-        count=_side_count(side, prefix, path),
+        share=_side_share(side, prefix, path),
+        denominator=_selection_count(side, "denominator", prefix, path),
         pool=_selection_count(side, "pool", prefix, path),
         target=_selection_count(side, "target", prefix, path),
         rounds=tuple(_round(entry, f"{prefix}rounds.{index}", path) for index, entry in enumerate(rounds)),
@@ -425,6 +425,7 @@ def _selection(path: Path) -> Selection:
         raise Fail(f"{path}: is not a JSON object")
     romance = _selection_object(obj, "romance", "", path)
     gender = _selection_object(obj, "gender_roles", "", path)
+    sides = _selection_object(obj, "sides", "", path)
     return Selection(
         romance_lines=_selection_count(romance, "lines", "romance.", path),
         romance_characters=_selection_count(romance, "characters", "romance.", path),
@@ -432,8 +433,8 @@ def _selection(path: Path) -> Selection:
         gender_lines=_selection_count(gender, "lines", "gender_roles.", path),
         gender_characters=_selection_count(gender, "characters", "gender_roles.", path),
         eligible=_selection_count(obj, "eligible_characters", "", path),
-        queer=_side(obj, "queer", path),
-        trans=_side(obj, "trans", path),
+        romance=_side(sides, "romance", path),
+        trans=_side(sides, "trans", path),
     )
 
 
@@ -550,7 +551,7 @@ def _redo_line(records: list[Record]) -> str:
 
 
 def _side_lines(label: str, side: Side) -> list[str]:
-    lines = [f"queering {label} target: {side.target} (count {side.count}, pool {side.pool})"]
+    lines = [f"queering {label} target: {side.target} ({side.share}% of {side.denominator}, pool {side.pool})"]
     lines += [f"queering {label} round {n}: tried {r.tried}, passed {r.passed}" for n, r in enumerate(side.rounds, 1)]
     exhausted = ", pool exhausted" if side.exhausted else ""
     lines.append(f"queering {label} achieved: {side.achieved} of {side.target}{exhausted}")
@@ -568,7 +569,7 @@ def _queering_lines(records: list[Record], selection: Selection) -> list[str]:
     )
     lines = [romance, f"queering gender roles: {selection.gender_lines} lines, {selection.gender_characters} characters"]
     lines.append(f"queering eligible characters: {selection.eligible}")
-    lines += _side_lines("queer", selection.queer)
+    lines += _side_lines("romance", selection.romance)
     lines += _side_lines("trans", selection.trans)
     lines.append(f"queering flirt marked: {flirt}, redirect half: {redirect}")
     lines += [f"queering changed {bucket}: {changed[bucket]}" for bucket in QUEERING_REWRITES]
