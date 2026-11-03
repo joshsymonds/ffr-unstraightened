@@ -630,37 +630,30 @@ DRAFT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-TRANS_DRAFT_INSTRUCTIONS = (
-    "Decide for each of one speaker's lines whether a trans detail fits it. Add a light, natural trans detail only where "
-    "the line allows it: a detail that the speaker is trans, or a nonbinary partner who uses they/them on a romance line. "
-    'Otherwise keep the line unchanged. Never force a detail, and never write a "she\'s trans" aside. Return JSON with '
-    "lines, an array with one entry per speaker line, each with namespace, key, keep, intent and drafts. Set keep to true, "
-    "intent to an empty string and drafts to an empty array when the line stays unchanged. Otherwise set keep to false, "
-    "give the intent of the change, and give one or more candidate English lines in drafts. Keep every {...} placeholder "
-    "and every <text ...>...</> tag from the line's English, unchanged. Keep each English line's line breaks. Stay within "
-    "120% of each English line's length. Refer to lines only by namespace and key."
+PICK_WINDOW = 3
+
+PICK_DRAFT_INSTRUCTIONS = (
+    "Decide for one pick whether a trans detail fits one of its lines. The pick's lines are listed across their scenes, and "
+    "each one comes with a window of the scene lines three before and three after it. Choose at most one line to change: "
+    "add a light, natural trans detail to it, and only where that line allows it, such as a detail that the speaker is "
+    'trans. Otherwise choose no change. Never force a detail, and never write a "she\'s trans" aside. Return JSON with '
+    "keep, namespace, key, intent and drafts. Set keep to true, namespace, key and intent to empty strings and drafts to "
+    "an empty array when no line changes. Otherwise set keep to false, name the chosen line by namespace and key, give the "
+    "intent of the change, and give one or more candidate English lines in drafts. Keep every {...} placeholder and every "
+    "<text ...>...</> tag from the line's English, unchanged. Keep each English line's line breaks. Stay within 120% of each "
+    "English line's length. Refer to lines only by namespace and key."
 )
 
-TRANS_DRAFT_SCHEMA: dict[str, Any] = {
+PICK_DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "lines": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "namespace": {"type": "string"},
-                    "key": {"type": "string"},
-                    "keep": {"type": "boolean"},
-                    "intent": {"type": "string"},
-                    "drafts": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["namespace", "key", "keep", "intent", "drafts"],
-                "additionalProperties": False,
-            },
-        },
+        "keep": {"type": "boolean"},
+        "namespace": {"type": "string"},
+        "key": {"type": "string"},
+        "intent": {"type": "string"},
+        "drafts": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["lines"],
+    "required": ["keep", "namespace", "key", "intent", "drafts"],
     "additionalProperties": False,
 }
 
@@ -758,49 +751,67 @@ def draft_speaker(
 
 
 @dataclass(frozen=True)
-class TransDraft:
-    keep: bool
+class PickChange:
+    namespace: str
+    key: str
     intent: str
     drafts: tuple[str, ...]
 
 
-def trans_draft(
+def _pick_window(scene: Scene, line: SceneLine) -> list[SceneLine]:
+    position = next(
+        index for index, scene_line in enumerate(scene.lines) if (scene_line.namespace, scene_line.key) == (line.namespace, line.key)
+    )
+    return list(scene.lines[max(0, position - PICK_WINDOW) : position + PICK_WINDOW + 1])
+
+
+def pick_draft(
     store: Store,
     lens: Lens,
+    bucket: str,
     groups: Sequence[tuple[Scene, Sequence[SceneLine]]],
     ask: Ask,
-) -> dict[tuple[str, str], TransDraft] | Unfinished | Rejected:
-    expected = sorted((line.namespace, line.key) for _scene, lines in groups for line in lines)
+) -> PickChange | Unfinished | Rejected | None:
+    expected = {(line.namespace, line.key) for _scene, lines in groups for line in lines}
     parts = [
-        TRANS_DRAFT_INSTRUCTIONS,
+        PICK_DRAFT_INSTRUCTIONS,
         f"Intent rule:\n{lens.stage_text('intent')}",
-        "Scenes:\n"
-        + _json([{"scene": scene.key, "lines": _line_dicts(scene.lines), "speaker_lines": _line_dicts(lines)} for scene, lines in groups]),
+        f"Bucket:\n{bucket}",
+        "Lines:\n"
+        + _json(
+            [
+                {"scene": scene.key, "target": _line_ref(line), "window": _line_dicts(_pick_window(scene, line))}
+                for scene, lines in groups
+                for line in lines
+            ]
+        ),
     ]
 
-    def call() -> list[dict[str, Any]]:
-        answer = ask(claude.OPUS, parts, TRANS_DRAFT_SCHEMA)
+    def call() -> dict[str, Any] | None:
+        answer = ask(claude.OPUS, parts, PICK_DRAFT_SCHEMA)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
-        entries = answer["lines"]
-        if sorted((entry["namespace"], entry["key"]) for entry in entries) != expected:
-            raise _Unanswered(Rejected("trans entries do not name each line of the speaker once"))
-        for entry in entries:
-            if entry["keep"] and entry["drafts"]:
-                raise _Unanswered(Rejected("trans entry keeps a line but gives drafts for it"))
-            if not entry["keep"] and not (entry["intent"] and entry["drafts"]):
-                raise _Unanswered(Rejected("trans entry changes a line without an intent or drafts"))
-        return entries
+        if answer["keep"]:
+            if answer["drafts"]:
+                raise _Unanswered(Rejected("pick entry keeps the pick but gives drafts for it"))
+            return None
+        if (answer["namespace"], answer["key"]) not in expected:
+            raise _Unanswered(Rejected("pick entry changes a line outside the pick"))
+        if not (answer["intent"] and answer["drafts"]):
+            raise _Unanswered(Rejected("pick entry changes a line without an intent or drafts"))
+        return {"namespace": answer["namespace"], "key": answer["key"], "intent": answer["intent"], "drafts": answer["drafts"]}
 
-    inputs = {"scenes": [{**_inputs(scene), "targets": [_line_ref(line) for line in lines]} for scene, lines in groups]}
+    inputs = {
+        "bucket": bucket,
+        "scenes": [{**_inputs(scene), "targets": [_line_ref(line) for line in lines]} for scene, lines in groups],
+    }
     try:
-        entries = store.run("trans_draft", inputs, lens.stage_text("intent"), call).value
+        change = store.run("pick_draft", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
-    return {
-        (entry["namespace"], entry["key"]): TransDraft(keep=entry["keep"], intent=entry["intent"], drafts=tuple(entry["drafts"]))
-        for entry in entries
-    }
+    if change is None:
+        return None
+    return PickChange(namespace=change["namespace"], key=change["key"], intent=change["intent"], drafts=tuple(change["drafts"]))
 
 
 def render(store: Store, renderer: Renderer, speaker: str | None, text: str) -> str:

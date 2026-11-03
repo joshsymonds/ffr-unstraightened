@@ -989,16 +989,16 @@ def _trans_line(
     scene: Scene,
     line: SceneLine,
     marked: Outcome,
-    draft: stages.TransDraft | Unfinished | Rejected,
+    answer: stages.PickChange | Unfinished | Rejected | None,
     ask: Ask,
 ) -> tuple[Outcome, Change | None]:
-    """One line of a trans pick. A kept line stays unchanged, and a changed line gates as a line-pass line with the answer's intent and drafts."""
-    if isinstance(draft, Unfinished | Rejected):
+    """One line of a trans pick. The line the pick's answer names gates as a line-pass line with the answer's intent and drafts. A failed answer leaves the line unfinished, and any other line stays unchanged."""
+    if isinstance(answer, Unfinished | Rejected):
         return _outcome(line, marked.reasons, "unfinished"), None
-    if draft.keep:
+    if answer is None or (answer.namespace, answer.key) != (line.namespace, line.key):
         return _outcome(line, marked.reasons, "untouched"), None
     callbacks, context = _neighbourhood(ctx, scene, line)
-    return _gated(ctx, scene, stages.Target(line, draft.intent, callbacks, context), marked.reasons, draft.drafts, ask)
+    return _gated(ctx, scene, stages.Target(line, answer.intent, callbacks, context), marked.reasons, answer.drafts, ask)
 
 
 def _trans_picked(
@@ -1007,7 +1007,7 @@ def _trans_picked(
     picked: Mapping[int, Sequence[tuple[SceneLine, Outcome]]],
     ask: Ask,
 ) -> dict[tuple[int, str, str], tuple[Outcome, Change | None]]:
-    """One trans pick. Its lines across the run's scenes go to one trans draft call, each ref named once, and each then settles as a trans line. A ref repeated across scenes gates once, in its earliest scene, since a line has one change; its later occurrences take that outcome with no change of their own."""
+    """One trans pick. Its lines across the run's scenes go to one pick draft call, which changes at most one of them. The chosen line gates once, in its earliest scene, and its later occurrences take that outcome with no change of their own. Every other line stays untouched with the trans bucket, and a failed call leaves each line unfinished with it."""
     # Every scene keeps its place as context, but each ref is named once across the call, since its one answer covers every occurrence.
     named: set[tuple[str, str]] = set()
     groups: list[tuple[Scene, list[SceneLine]]] = []
@@ -1018,7 +1018,7 @@ def _trans_picked(
                 named.add((line.namespace, line.key))
                 fresh.append(line)
         groups.append((scenes[index][0], fresh))
-    answer = stages.trans_draft(ctx.store, ctx.lens, groups, ask)
+    answer = stages.pick_draft(ctx.store, ctx.lens, "trans", groups, ask)
     results: dict[tuple[int, str, str], tuple[Outcome, Change | None]] = {}
     gated: dict[tuple[str, str], tuple[Outcome, Change | None]] = {}
     for index, members in picked.items():
@@ -1029,8 +1029,7 @@ def _trans_picked(
                 first, _ = gated[ref]
                 results[(index, *ref)] = (replace(first, chapter=line.chapter, reasons=marked.reasons), None)
                 continue
-            draft = answer[ref] if isinstance(answer, dict) else answer
-            outcome, change = _trans_line(ctx, scene, line, marked, draft, ask)
+            outcome, change = _trans_line(ctx, scene, line, marked, answer, ask)
             gated[ref] = (replace(outcome, bucket=marked.bucket), change)
             results[(index, *ref)] = gated[ref]
     return results
@@ -1039,7 +1038,7 @@ def _trans_picked(
 def _trans_gated(
     ctx: _Context, scenes: Sequence[tuple[Scene, Ask]], outcomes: Sequence[list[Outcome]], batch: Callable[[], Ask]
 ) -> dict[tuple[int, str, str], tuple[Outcome, Change | None]]:
-    """Gates every line of the round's trans picks, one trans draft call per pick across its scenes."""
+    """Gates every line of the round's trans picks, one pick draft call per pick across its scenes."""
     picked: dict[str | None, dict[int, list[tuple[SceneLine, Outcome]]]] = {}
     for index, scene_outcomes in enumerate(outcomes):
         for line, marked in zip(scenes[index][0].lines, scene_outcomes, strict=True):

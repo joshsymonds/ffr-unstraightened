@@ -44,9 +44,9 @@ from ffrd.pipeline.stages import (
     DRAFT_SCHEMA,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
+    PICK_DRAFT_SCHEMA,
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
-    TRANS_DRAFT_SCHEMA,
     Ask,
     Bindings,
     Scene,
@@ -468,9 +468,8 @@ def _is_scene_arc(parts: Sequence[str]) -> bool:
 
 
 def _trans_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
-    """The speaker lines a trans draft call is about, under each of its scenes."""
-    scenes = json.loads(_part(parts, "Scenes:\n"))
-    return [(line["namespace"], line["key"]) for scene in scenes for line in scene["speaker_lines"]]
+    """The lines a trans pick call is about, each named by its target."""
+    return [(entry["target"]["namespace"], entry["target"]["key"]) for entry in json.loads(_part(parts, "Lines:\n"))]
 
 
 def _target(parts: Sequence[str]) -> tuple[str, str]:
@@ -528,7 +527,7 @@ class FakeClaude:
         self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         # Answers for draft calls that carry a reviewer note, by the one line they name. Not game text.
         self.redrafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
-        # Answers for trans draft calls, by the one line they name: keep, intent and drafts. A line without an answer is kept. Not game text.
+        # Answers for each trans pick's lines: keep, intent and drafts. A pick changes the first of its lines with a change answer. A line without an answer is kept. Not game text.
         self.trans: dict[tuple[str, str], dict[str, Any] | Unfinished | Rejected] = {}
         self.judgments: dict[str, dict[str, bool]] = {}
         self.judge_failures: dict[str, Unfinished | Rejected] = {}
@@ -595,8 +594,8 @@ class FakeClaude:
                 if isinstance(answer, Unfinished | Rejected):
                     return answer
             return {"drafts": [{"namespace": namespace, "key": key, "drafts": answers[(namespace, key)]} for namespace, key in refs]}
-        if schema is TRANS_DRAFT_SCHEMA:
-            return self._trans(parts)
+        if schema is PICK_DRAFT_SCHEMA:
+            return self._pick(parts)
         if schema is JUDGE_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.judge_failures:
@@ -642,15 +641,15 @@ class FakeClaude:
         ]
         return {"flagged": flagged}
 
-    def _trans(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
-        lines: list[dict[str, Any]] = []
-        # The model answers each ref once, so a ref repeated across scenes gets one entry. Not game text.
-        for namespace, key in dict.fromkeys(_trans_refs(parts)):
+    def _pick(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
+        # The pick changes the first of its lines with a change answer, and a failed answer for any of its lines fails the pick. Not game text.
+        for namespace, key in _trans_refs(parts):
             answer = self.trans.get((namespace, key), TRANS_KEEP)
             if isinstance(answer, Unfinished | Rejected):
                 return answer
-            lines.append({"namespace": namespace, "key": key, **answer})
-        return {"lines": lines}
+            if not answer["keep"]:
+                return {"namespace": namespace, "key": key, **answer}
+        return {"namespace": "", "key": "", **TRANS_KEEP}
 
     def _rescreen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
         question = json.loads(_part(parts, "Triage question:\n"))["id"]
@@ -5147,7 +5146,7 @@ def _trans_refill_claude() -> FakeClaude:
 
 
 def _trans_calls(claude: FakeClaude) -> list[list[str]]:
-    return [parts for _, parts, schema in claude.calls if schema is TRANS_DRAFT_SCHEMA]
+    return [parts for _, parts, schema in claude.calls if schema is PICK_DRAFT_SCHEMA]
 
 
 def test_trans_pick_follows_the_trans_seeded_order_and_gates_with_the_answers_intent_and_drafts(tmp_path: Path) -> None:
@@ -5173,7 +5172,7 @@ def test_trans_pick_follows_the_trans_seeded_order_and_gates_with_the_answers_in
     }
 
 
-def test_trans_draft_is_one_call_per_pick_across_its_scenes_and_marks_its_unmarked_lines_trans(tmp_path: Path) -> None:
+def test_trans_pick_is_one_call_across_its_scenes_and_marks_its_unmarked_lines_trans(tmp_path: Path) -> None:
     scenes = (
         Scene("made-up-scene-x", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_Y, EN_A2, 1))),
         Scene("made-up-scene-y", (_line(NS_B, "1", REFILL_X, EN_B1, 2),)),
@@ -5245,7 +5244,55 @@ def test_coherence_revert_of_a_repeated_trans_ref_in_its_first_scene_fails_every
     assert _dialog_entries(tmp_path) == {(NS_C, "1")}
 
 
-def test_trans_draft_failure_leaves_each_of_the_picks_lines_unfinished_with_the_trans_bucket(tmp_path: Path) -> None:
+# One speaker with two romance-marked lines in one scene, so one trans pick holds both lines. Not game text.
+PAIR_SCENES = (Scene("made-up-scene-pair", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_X, EN_A2, 1))),)
+
+
+def _pair_run(tmp_path: Path, trans: dict[tuple[str, str], Any]) -> tuple[FakeClaude, list[Outcome]]:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_A, "2"): [ROMANCE_ID]}
+    claude.trans = trans
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=PAIR_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, trans_share=100),
+    )
+    return claude, outcomes
+
+
+def test_trans_pick_with_several_lines_makes_one_call_and_changes_at_most_one_of_them(tmp_path: Path) -> None:
+    change = _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]])
+    claude, outcomes = _pair_run(tmp_path, {(NS_A, "1"): change, (NS_A, "2"): change})
+    [pick] = _trans_calls(claude)
+    assert _trans_refs(pick) == [(NS_A, "1"), (NS_A, "2")]
+    assert [(outcome.key, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        ("1", "changed", "trans"),
+        ("2", "untouched", "trans"),
+    ]
+
+
+def test_trans_pick_that_changes_no_line_leaves_each_of_its_lines_untouched_with_the_trans_bucket(tmp_path: Path) -> None:
+    _, outcomes = _pair_run(tmp_path, {(NS_A, "1"): TRANS_KEEP, (NS_A, "2"): TRANS_KEEP})
+    assert [(outcome.key, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        ("1", "untouched", "trans"),
+        ("2", "untouched", "trans"),
+    ]
+
+
+def test_failed_trans_pick_call_leaves_every_one_of_its_lines_unfinished_with_the_trans_bucket(tmp_path: Path) -> None:
+    change = _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]])
+    _, outcomes = _pair_run(tmp_path, {(NS_A, "1"): Unfinished("Made-up transport failure. Not game text."), (NS_A, "2"): change})
+    assert [(outcome.key, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        ("1", "unfinished", "trans"),
+        ("2", "unfinished", "trans"),
+    ]
+
+
+def test_failed_trans_pick_call_leaves_its_lines_unfinished_with_the_trans_bucket(tmp_path: Path) -> None:
     claude = _trans_refill_claude()
     claude.trans[REFILL_REF[REFILL_X]] = Unfinished("Made-up transport failure. Not game text.")
     outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, romance_share=0, trans_share=100))

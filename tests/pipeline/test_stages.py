@@ -26,19 +26,19 @@ from ffrd.pipeline.stages import (
     INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
+    PICK_DRAFT_INSTRUCTIONS,
+    PICK_DRAFT_SCHEMA,
     RESCREEN_INSTRUCTIONS,
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     SPEAKER_DRAFT_INSTRUCTIONS,
     TRANS_CANDIDATE,
-    TRANS_DRAFT_INSTRUCTIONS,
-    TRANS_DRAFT_SCHEMA,
     Batch,
     Intent,
+    PickChange,
     Scene,
     SceneLine,
     Target,
-    TransDraft,
     _family_scenes,
     _table_scenes,
     candidates,
@@ -47,11 +47,11 @@ from ffrd.pipeline.stages import (
     draft_speaker,
     intent,
     judge,
+    pick_draft,
     render,
     rescreen,
     scene_text,
     screen,
-    trans_draft,
     triage,
 )
 from ffrd.pipeline.store import Store
@@ -1682,90 +1682,111 @@ def test_changed_arc_context_or_cast_asks_again(
     assert _heading_part(heading, changed) in ask.calls[1][1]
 
 
-TRANS_GROUPS = [(SCENE, [LINE_ONE]), (SCENE_TWO, [LINE_THREE])]
-TRANS_KEEP_ENTRY = {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key, "keep": True, "intent": "", "drafts": []}
-TRANS_CHANGE_ENTRY = {
+PICK_GROUPS = [(SCENE, [LINE_ONE]), (SCENE_TWO, [LINE_THREE])]
+PICK_KEEP = {"keep": True, "namespace": "", "key": "", "intent": "", "drafts": []}
+PICK_CHANGE = {
+    "keep": False,
     "namespace": LINE_THREE.namespace,
     "key": LINE_THREE.key,
-    "keep": False,
     "intent": "Made-up trans detail intent. Not game text.",
     "drafts": ["Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."],
 }
-TRANS_ANSWER = {"lines": [TRANS_KEEP_ENTRY, TRANS_CHANGE_ENTRY]}
-TRANS_RESULT = {
-    (LINE_ONE.namespace, LINE_ONE.key): TransDraft(keep=True, intent="", drafts=()),
-    (LINE_THREE.namespace, LINE_THREE.key): TransDraft(
-        keep=False,
-        intent="Made-up trans detail intent. Not game text.",
-        drafts=("Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."),
-    ),
-}
+PICK_RESULT = PickChange(
+    namespace=LINE_THREE.namespace,
+    key=LINE_THREE.key,
+    intent="Made-up trans detail intent. Not game text.",
+    drafts=("Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."),
+)
+# A made-up scene of nine lines, for the window around each line of a pick. Not game text.
+WIDE_LINES = tuple(
+    SceneLine(
+        "ST_C01_002_01",
+        str(number),
+        None,
+        f"Made-up wide line {number}. Not game text.",
+        f"Made-up Japanese wide {number}. Not game text.",
+        1,
+    )
+    for number in range(1, 10)
+)
+WIDE_SCENE = Scene("made-up-scene-wide", WIDE_LINES)
 
 
-def test_trans_draft_schema_requires_one_entry_per_line_with_keep_intent_and_drafts() -> None:
-    assert TRANS_DRAFT_SCHEMA["type"] == "object"
-    assert TRANS_DRAFT_SCHEMA["required"] == ["lines"]
-    assert TRANS_DRAFT_SCHEMA["additionalProperties"] is False
-    entry = TRANS_DRAFT_SCHEMA["properties"]["lines"]["items"]
-    assert entry["required"] == ["namespace", "key", "keep", "intent", "drafts"]
-    assert entry["properties"]["keep"] == {"type": "boolean"}
-    assert entry["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}}
-    assert entry["additionalProperties"] is False
+def test_pick_draft_schema_asks_for_one_entry_with_keep_namespace_key_intent_and_drafts() -> None:
+    assert PICK_DRAFT_SCHEMA["type"] == "object"
+    assert PICK_DRAFT_SCHEMA["required"] == ["keep", "namespace", "key", "intent", "drafts"]
+    assert PICK_DRAFT_SCHEMA["additionalProperties"] is False
+    assert PICK_DRAFT_SCHEMA["properties"]["keep"] == {"type": "boolean"}
+    assert PICK_DRAFT_SCHEMA["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}}
 
 
-def test_trans_draft_instructions_allow_only_the_two_detail_kinds_and_forbid_forcing_or_she_is_trans_asides() -> None:
-    assert "they/them" in TRANS_DRAFT_INSTRUCTIONS
-    assert "nonbinary partner" in TRANS_DRAFT_INSTRUCTIONS
-    assert "Never force" in TRANS_DRAFT_INSTRUCTIONS
-    assert "she's trans" in TRANS_DRAFT_INSTRUCTIONS
+def test_pick_draft_instructions_keep_the_placeholder_tag_and_length_rules_without_partner_wording() -> None:
+    assert "Keep every {...} placeholder" in PICK_DRAFT_INSTRUCTIONS
+    assert "every <text ...>...</> tag" in PICK_DRAFT_INSTRUCTIONS
+    assert "Stay within 120% of each English line's length" in PICK_DRAFT_INSTRUCTIONS
+    assert "she's trans" in PICK_DRAFT_INSTRUCTIONS
+    assert "nonbinary" not in PICK_DRAFT_INSTRUCTIONS.lower()
+    assert "partner" not in PICK_DRAFT_INSTRUCTIONS.lower()
+    assert "they/them" not in PICK_DRAFT_INSTRUCTIONS
 
 
-def test_trans_draft_sends_one_opus_call_with_schema_and_returns_a_record_per_line(tmp_path: Path) -> None:
-    ask = Fake(TRANS_ANSWER)
+def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(tmp_path: Path) -> None:
+    ask = Fake(PICK_CHANGE)
 
-    result = trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, ask)
+    result = pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
 
-    assert result == TRANS_RESULT
+    assert result == PICK_RESULT
     assert len(ask.calls) == 1
     model, parts, schema = ask.calls[0]
     assert model == claude.OPUS
-    assert schema == TRANS_DRAFT_SCHEMA
-    assert TRANS_DRAFT_INSTRUCTIONS in parts
+    assert schema == PICK_DRAFT_SCHEMA
+    assert PICK_DRAFT_INSTRUCTIONS in parts
     assert "Made-up intent rule. Not game text." in "\n".join(parts)
 
 
-def test_trans_draft_prompt_groups_each_scenes_lines_and_the_speakers_lines(tmp_path: Path) -> None:
-    ask = Fake(TRANS_ANSWER)
+def test_pick_draft_no_change_returns_none_and_a_second_call_reuses_it(tmp_path: Path) -> None:
+    ask = Fake(PICK_KEEP)
 
-    trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, ask)
+    assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask) is None
+    assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, Fake()) is None
+    assert len(ask.calls) == 1
 
-    scenes = json.loads(_part(ask.calls[0][1], "Scenes:\n"))
-    assert [scene["scene"] for scene in scenes] == [SCENE.key, SCENE_TWO.key]
-    assert [[line["key"] for line in scene["lines"]] for scene in scenes] == [["1", "2"], ["3", "4"]]
-    assert [[line["key"] for line in scene["speaker_lines"]] for scene in scenes] == [["1"], ["3"]]
-    assert scenes[1]["speaker_lines"][0]["english"] == LINE_THREE.english
+
+def test_pick_draft_prompt_names_the_bucket(tmp_path: Path) -> None:
+    ask = Fake(PICK_KEEP)
+
+    pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
+
+    assert _part(ask.calls[0][1], "Bucket:\n") == "trans"
+
+
+def test_pick_draft_shows_each_line_with_the_three_scene_lines_either_side_and_no_line_further_away(tmp_path: Path) -> None:
+    ask = Fake(PICK_KEEP)
+
+    pick_draft(Store(tmp_path), LENS, "trans", [(WIDE_SCENE, [WIDE_LINES[0], WIDE_LINES[8]])], ask)
+
+    entries = json.loads(_part(ask.calls[0][1], "Lines:\n"))
+    assert [[line["key"] for line in entry["window"]] for entry in entries] == [["1", "2", "3", "4"], ["6", "7", "8", "9"]]
 
 
 @pytest.mark.parametrize(
     "answer",
     [
-        pytest.param({"lines": [TRANS_KEEP_ENTRY]}, id="missing"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, TRANS_CHANGE_ENTRY, ENTRY_UNKNOWN]}, id="unknown"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, TRANS_KEEP_ENTRY, TRANS_CHANGE_ENTRY]}, id="duplicate"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, {**TRANS_CHANGE_ENTRY, "keep": True}]}, id="kept-line-with-drafts"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, {**TRANS_CHANGE_ENTRY, "intent": ""}]}, id="changed-line-without-intent"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, {**TRANS_CHANGE_ENTRY, "drafts": []}]}, id="changed-line-without-drafts"),
+        pytest.param({**PICK_CHANGE, "namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, id="line-outside-the-pick"),
+        pytest.param({**PICK_CHANGE, "intent": ""}, id="change-without-intent"),
+        pytest.param({**PICK_CHANGE, "drafts": []}, id="change-without-drafts"),
+        pytest.param({**PICK_KEEP, "drafts": ["Made-up draft kept with no change. Not game text."]}, id="no-change-with-drafts"),
     ],
 )
-def test_trans_draft_answers_that_break_the_line_rules_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
+def test_pick_draft_answers_that_break_the_pick_rules_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
     store = Store(tmp_path)
-    ask = Fake(answer, TRANS_ANSWER)
+    ask = Fake(answer, PICK_CHANGE)
 
-    assert isinstance(trans_draft(store, LENS, TRANS_GROUPS, ask), Rejected)
+    assert isinstance(pick_draft(store, LENS, "trans", PICK_GROUPS, ask), Rejected)
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert trans_draft(store, LENS, TRANS_GROUPS, ask) == TRANS_RESULT
+    assert pick_draft(store, LENS, "trans", PICK_GROUPS, ask) == PICK_RESULT
     assert len(ask.calls) == 2
 
 
@@ -1773,22 +1794,23 @@ def test_trans_draft_answers_that_break_the_line_rules_are_rejected_and_stored_n
     "failure",
     [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
 )
-def test_trans_draft_failed_answer_passes_through_unstored(tmp_path: Path, failure: Any) -> None:
+def test_pick_draft_failed_answer_passes_through_unstored(tmp_path: Path, failure: Any) -> None:
     store = Store(tmp_path)
-    ask = Fake(failure, TRANS_ANSWER)
+    ask = Fake(failure, PICK_CHANGE)
 
-    assert trans_draft(store, LENS, TRANS_GROUPS, ask) == failure
+    assert pick_draft(store, LENS, "trans", PICK_GROUPS, ask) == failure
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert trans_draft(store, LENS, TRANS_GROUPS, ask) == TRANS_RESULT
+    assert pick_draft(store, LENS, "trans", PICK_GROUPS, ask) == PICK_RESULT
 
 
-def test_trans_draft_is_stored_under_its_trans_draft_key_and_a_fresh_store_reuses_it(tmp_path: Path) -> None:
-    ask = Fake(TRANS_ANSWER)
-    trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, ask)
+def test_pick_draft_is_stored_under_its_pick_draft_key_with_its_bucket_and_a_fresh_store_reuses_it(tmp_path: Path) -> None:
+    ask = Fake(PICK_CHANGE)
+    pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
     [record] = (tmp_path / "results").glob("*.json")
     inputs = {
+        "bucket": "trans",
         "scenes": [
             {
                 "scene": SCENE.key,
@@ -1800,12 +1822,12 @@ def test_trans_draft_is_stored_under_its_trans_draft_key_and_a_fresh_store_reuse
                 "lines": [asdict(line) for line in SCENE_TWO.lines],
                 "targets": [{"namespace": LINE_THREE.namespace, "key": LINE_THREE.key}],
             },
-        ]
+        ],
     }
 
-    assert record.stem == store_key("trans_draft", inputs, LENS.stage_text("intent"))
-    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "trans_draft"
-    assert trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, Fake()) == TRANS_RESULT
+    assert record.stem == store_key("pick_draft", inputs, LENS.stage_text("intent"))
+    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "pick_draft"
+    assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, Fake()) == PICK_RESULT
     assert len(ask.calls) == 1
 
 
