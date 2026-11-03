@@ -1,0 +1,12 @@
+[ST_C04_437_01]
+"437_01_038" = "This line belongs to the flirt's protected sincere thread with one party member; keep the base text unchanged as no-hit."
+
+[ST_C05_543_01]
+"543_01_048" = "This line belongs to the flirt's protected sincere thread with one party member; keep the base text unchanged as no-hit."
+"543_01_050" = "The rewrite loses the line's point; keep what the line is doing in the scene and change only the flirt's target."
+
+[ST_FEV_Com_00Com_03]
+"FEV_Com_00Com_03_031" = "The rewrite invents a character who is not in the scene; redirect only to a man present in the scene, or generalize the address."
+
+[ST_Summon640_Shiva_02_NF]
+"Summon640_Shiva_02_NF_004" = "The rewrite is weak and drifts from the line's point; keep the original joke's shape and change only the flirt's target."
