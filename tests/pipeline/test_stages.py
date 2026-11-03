@@ -17,9 +17,12 @@ from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
+    CANDIDATE_INSTRUCTIONS,
+    CANDIDATE_SCHEMA,
     CROSS_SCHEMA,
     DRAFT_INSTRUCTIONS,
     DRAFT_SCHEMA,
+    INSERTABLE,
     INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
@@ -27,6 +30,7 @@ from ffrd.pipeline.stages import (
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     SPEAKER_DRAFT_INSTRUCTIONS,
+    TRANS_CANDIDATE,
     TRANS_DRAFT_INSTRUCTIONS,
     TRANS_DRAFT_SCHEMA,
     Batch,
@@ -37,6 +41,7 @@ from ffrd.pipeline.stages import (
     TransDraft,
     _family_scenes,
     _table_scenes,
+    candidates,
     cross_judge,
     draft,
     draft_speaker,
@@ -1802,3 +1807,123 @@ def test_trans_draft_is_stored_under_its_trans_draft_key_and_a_fresh_store_reuse
     assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "trans_draft"
     assert trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, Fake()) == TRANS_RESULT
     assert len(ask.calls) == 1
+
+
+CANDIDATE_REFS = [(LINE_ONE.namespace, LINE_ONE.key), (LINE_TWO.namespace, LINE_TWO.key), (LINE_THREE.namespace, LINE_THREE.key)]
+CANDIDATE_LISTED = [{"namespace": namespace, "key": key} for namespace, key in CANDIDATE_REFS]
+INSERTABLE_QUESTION = "Is the line about the speaker's home, family, work or daily life?"
+TRANS_CANDIDATE_QUESTION = "Is the line about the speaker's family, name, belonging, someone standing up for them, or their past?"
+
+
+def _marked(*entries: tuple[SceneLine, list[str]]) -> dict[str, Any]:
+    return {"marked": [{"namespace": line.namespace, "key": line.key, "marks": marks} for line, marks in entries]}
+
+
+CANDIDATE_ANSWER = _marked((LINE_ONE, [TRANS_CANDIDATE, INSERTABLE]), (LINE_TWO, [INSERTABLE]))
+CANDIDATE_RESULT = {
+    (LINE_ONE.namespace, LINE_ONE.key): (INSERTABLE, TRANS_CANDIDATE),
+    (LINE_TWO.namespace, LINE_TWO.key): (INSERTABLE,),
+}
+
+
+def test_candidate_mark_ids_are_insertable_and_trans_candidate() -> None:
+    assert INSERTABLE == "insertable"
+    assert TRANS_CANDIDATE == "trans-candidate"
+
+
+def test_candidates_asks_haiku_with_schema_and_returns_marks_in_constant_order_for_marked_lines_only(tmp_path: Path) -> None:
+    ask = Fake(CANDIDATE_ANSWER)
+
+    result = candidates(Store(tmp_path), FOUR_LINE_SCENE, CANDIDATE_REFS, ask)
+
+    assert result == CANDIDATE_RESULT
+    model, _parts, schema = ask.calls[0]
+    assert model == claude.HAIKU
+    assert schema == CANDIDATE_SCHEMA
+
+
+def test_candidate_schema_requires_marked_and_forbids_extra_properties() -> None:
+    entry = CANDIDATE_SCHEMA["properties"]["marked"]["items"]
+
+    assert CANDIDATE_SCHEMA["required"] == ["marked"]
+    assert CANDIDATE_SCHEMA["additionalProperties"] is False
+    assert entry["required"] == ["namespace", "key", "marks"]
+    assert entry["additionalProperties"] is False
+
+
+def test_candidate_prompt_carries_both_questions_the_scene_lines_and_the_refs_to_answer(tmp_path: Path) -> None:
+    ask = Fake(_marked())
+
+    candidates(Store(tmp_path), SCENE, [(LINE_ONE.namespace, LINE_ONE.key)], ask)
+
+    parts = ask.calls[0][1]
+    prompt = "\n".join(parts)
+    assert INSERTABLE_QUESTION in prompt
+    assert TRANS_CANDIDATE_QUESTION in prompt
+    assert CANDIDATE_INSTRUCTIONS in parts
+    lines_part = _part(parts, "Scene lines:\n")
+    assert '"english": "Made-up first line. Not game text."' in lines_part
+    assert '"english": "Made-up narration. Not game text."' in lines_part
+    assert "Made-up Japanese one. Not game text." not in prompt
+    assert '"japanese"' not in prompt
+    assert json.loads(_part(parts, "Lines to mark:\n")) == [{"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}]
+
+
+def test_candidates_store_under_the_candidates_stage_and_a_second_call_makes_no_ask(tmp_path: Path) -> None:
+    candidates(Store(tmp_path), FOUR_LINE_SCENE, CANDIDATE_REFS, Fake(CANDIDATE_ANSWER))
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": FOUR_LINE_SCENE.key,
+        "lines": [asdict(line) for line in FOUR_LINE_SCENE.lines],
+        "refs": CANDIDATE_LISTED,
+    }
+    assert record.stem == store_key("candidates", inputs, CANDIDATE_INSTRUCTIONS)
+    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "candidates"
+    ask = Fake()
+
+    assert candidates(Store(tmp_path), FOUR_LINE_SCENE, CANDIDATE_REFS, ask) == CANDIDATE_RESULT
+    assert ask.calls == []
+
+
+def test_screen_on_the_same_scene_after_candidates_still_asks_and_is_stored_under_its_own_key(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    candidates(store, SCENE, [(LINE_ONE.namespace, LINE_ONE.key)], Fake(_marked((LINE_ONE, [INSERTABLE]))))
+    ask = Fake({"flagged": []})
+
+    assert screen(store, LENS, SCENE, CAST, ask) == {}
+    assert len(ask.calls) == 1
+    assert len(list((tmp_path / "results").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize(
+    "refs,answer",
+    [
+        ([(LINE_ONE.namespace, LINE_ONE.key)], _marked((LINE_TWO, [INSERTABLE]))),
+        (CANDIDATE_REFS, _marked((LINE_ONE, ["made-up-mark"]))),
+    ],
+    ids=["ref-outside-listed-refs", "unknown-mark"],
+)
+def test_candidates_rejects_an_unlisted_ref_or_unknown_mark_and_stores_nothing(tmp_path: Path, refs: Any, answer: Any) -> None:
+    store = Store(tmp_path)
+
+    result = candidates(store, FOUR_LINE_SCENE, refs, Fake(answer))
+
+    assert isinstance(result, Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_candidates_pass_through_unstored_and_are_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, CANDIDATE_ANSWER)
+
+    assert candidates(store, FOUR_LINE_SCENE, CANDIDATE_REFS, ask) == failure
+    assert store.finished() == []
+
+    assert candidates(store, FOUR_LINE_SCENE, CANDIDATE_REFS, ask) == CANDIDATE_RESULT
+    assert len(ask.calls) == 2

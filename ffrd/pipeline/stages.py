@@ -402,6 +402,86 @@ def rescreen(
     return {(entry["namespace"], entry["key"]): (question.id,) for entry in flagged}
 
 
+INSERTABLE = "insertable"
+TRANS_CANDIDATE = "trans-candidate"
+CANDIDATE_QUESTIONS = (
+    (INSERTABLE, "Is the line about the speaker's home, family, work or daily life?"),
+    (TRANS_CANDIDATE, "Is the line about the speaker's family, name, belonging, someone standing up for them, or their past?"),
+)
+CANDIDATE_MARKS = tuple(mark for mark, _question in CANDIDATE_QUESTIONS)
+CANDIDATE_INSTRUCTIONS = (
+    "For each listed scene line, answer each question below with yes or no. Return JSON with marked, one entry per "
+    "listed line that answers yes to at least one question, each with namespace, key and marks, where marks are the "
+    "mark ids of the questions it answers yes to. Refer to lines only by namespace and key.\n"
+    + "\n".join(f"{mark}: {question}" for mark, question in CANDIDATE_QUESTIONS)
+)
+
+CANDIDATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "marked": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string"},
+                    "key": {"type": "string"},
+                    "marks": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                },
+                "required": ["namespace", "key", "marks"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["marked"],
+    "additionalProperties": False,
+}
+
+
+def _marked_lines(answer: Mapping[str, Any], refs: Collection[tuple[str, str]]) -> list[dict[str, Any]] | Rejected:
+    marks_by_line: dict[tuple[str, str], set[str]] = {}
+    for entry in answer["marked"]:
+        ref = (entry["namespace"], entry["key"])
+        if ref not in refs:
+            return Rejected(f"marked line {ref[0]}/{ref[1]} is not one of the listed lines")
+        for mark in entry["marks"]:
+            if mark not in CANDIDATE_MARKS:
+                return Rejected(f"mark {mark!r} is not a candidate mark id")
+        marks_by_line.setdefault(ref, set()).update(entry["marks"])
+    return [
+        {"namespace": namespace, "key": key, "marks": [mark for mark in CANDIDATE_MARKS if mark in marks]}
+        for (namespace, key), marks in marks_by_line.items()
+    ]
+
+
+def candidates(
+    store: Store, scene: Scene, refs: Collection[tuple[str, str]], ask: Ask
+) -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
+    listed = sorted(set(refs))
+    listed_refs = [{"namespace": namespace, "key": key} for namespace, key in listed]
+    parts = [
+        CANDIDATE_INSTRUCTIONS,
+        f"Scene lines:\n{_screen_lines(scene)}",
+        f"Lines to mark:\n{_json(listed_refs)}",
+    ]
+
+    def call() -> list[dict[str, Any]]:
+        answer = ask(claude.HAIKU, parts, CANDIDATE_SCHEMA)
+        if isinstance(answer, Unfinished | Rejected):
+            raise _Unanswered(answer)
+        marked = _marked_lines(answer, set(listed))
+        if isinstance(marked, Rejected):
+            raise _Unanswered(marked)
+        return marked
+
+    inputs = {**_inputs(scene), "refs": listed_refs}
+    try:
+        marked = store.run("candidates", inputs, CANDIDATE_INSTRUCTIONS, call).value
+    except _Unanswered as unanswered:
+        return unanswered.failure
+    return {(entry["namespace"], entry["key"]): tuple(entry["marks"]) for entry in marked}
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
