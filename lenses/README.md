@@ -11,7 +11,7 @@ comes from the lens. The code adds only generic instructions, such as the output
 ## Sections
 
 A lens has four required sections and one optional section, `[scene]`. Each one feeds
-the stages that read it. The line stages run in this order: the Opus screen with the
+the stages that read it. The line stages run in this order: the screen with the
 Jev recall check, Opus intents and drafts, then the judges. The scene pass runs after
 the line stages.
 
@@ -21,7 +21,9 @@ the line stages.
   the report counts, so pick ids that name the reason. The judge's `fixed` verdict
   checks that a rewrite answers no to each reason question of its line.
 - `[screen]` holds `criteria`, a list of one or more strings. Screen checks each
-  candidate line against every criterion.
+  candidate line against every criterion. It may also hold `model`, one string, which
+  picks the model the screen runs on: `"opus"` or `"sonnet"`. Without `model` the screen
+  runs on Opus. Both the default run and the queering selection use this model.
 - `[intent]` holds `rule`, one string. Opus applies this rule when it writes intents
   and drafts.
 - `[judge]` holds `rubric`, one string. The scene judge, the cross-scene judge, the
@@ -49,7 +51,8 @@ the line stages.
 Each stage's saved results are keyed by the text of the sections it reads, so an edit
 reruns only the stages that read that section. Editing `triage` reruns Jev triage, the
 screen, the recheck of each edited question, and the scene and cross-scene judges. Editing `screen`
-reruns the screen and its recheck. Editing `intent` reruns the intents and drafts.
+reruns the screen and its recheck. Changing `model` in `[screen]` reruns the screen, because
+the model is part of the screen's saved-result key. Editing `intent` reruns the intents and drafts.
 Editing `judge` reruns both judges, the coherence check and the arc judge.
 
 ## Base lens
@@ -90,11 +93,12 @@ without it loads with no selection. `selection` is not a section. It does not
 change any stage text.
 
 The only value is `"queering"`. With it, `ffrd run` runs the queering selection
-instead of the default one. The queering selection runs an Opus screen over the
-lines of speakers who are neither core cast nor antagonists, plus the flirt's lines;
+instead of the default one. The queering selection runs a screen over the
+lines of speakers who are neither core cast nor antagonists, plus the flirt's lines and
+speakerless lines, on the lens's screen model (Opus by default, see `[screen]`);
 the flirt is the one core-cast speaker the screen may flag, for his running-gag flirts.
-It buckets the marked lines per speaker and makes one draft call per speaker. It
-does not call Jev.
+It ranks the marked speakers and the speakerless marked lines into buckets, and makes one
+draft call per chosen speaker and one per scene for speakerless lines. It does not call Jev.
 
 The example below does not declare a selection.
 
@@ -112,6 +116,8 @@ example `lenses/made-up-lens.toml: triage[1].id duplicates triage[0].id`.
 - Every string must be non-empty. A string that holds only whitespace counts as
   empty.
 - `screen` needs `criteria`, and `criteria` needs one or more non-empty strings.
+- `screen.model`, when present, must be the string `"opus"` or `"sonnet"`. Any other
+  value is an error, reported as `screen.model must be "opus" or "sonnet"`.
 - `intent` needs `rule`. `judge` needs `rubric`.
 - `scene` is optional. When it is present, `patterns`, `criteria`, `plan` and
   `rubric` are all required.
