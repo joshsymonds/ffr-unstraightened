@@ -14,7 +14,7 @@ The lens chains onto the unstraightening rewrites: it starts from their output i
 
 - Keep the story: its plot, relationships and stakes.
 - Keep every line the lens does not flag exactly as written.
-- Make a character outside the core cast's romance queer only in the three shapes the triage names.
+- Make a character outside the core cast's romance queer only in the shapes the triage names.
 - Split the flirt's running gag, so a flirt aimed at a woman is redirected or generalized.
 - Never touch the flirt's sincere thread, or a flirt aimed at a minor.
 - Keep the core cast's sexuality and romances as written.
@@ -23,25 +23,21 @@ The lens chains onto the unstraightening rewrites: it starts from their output i
 ## The marker
 
 The marker finds throwaway romance lines: lines where a character outside the core cast
-talks about their own partner, attraction or crush, or flirts with or pursues someone. Any
-character outside the core cast qualifies, a bigger recurring one as much as a passer-by.
-It is a model judgment, not a regex. It reads the lines of characters outside the core cast
-who are not antagonists, and the flirt's, and it flags them under these labels:
+refers to their own partner or a romantic interest of any sort, or flirts with or pursues
+someone. Any character outside the core cast qualifies, a bigger recurring one as much as a
+passer-by. It is a model judgment, not a regex. It reads the lines of characters outside the
+core cast who are not antagonists, and the flirt's, and it flags them under these labels:
 
-- `partner`: a character outside the core cast talks about their own romantic partner, such
-  as a spouse, lover, betrothed or ex, and the pairing reads as a cisgender man and a
-  cisgender woman.
-- `attraction`: a character outside the core cast talks about their own romantic attraction
-  or crush, and it is aimed at a cisgender person of the opposite sex.
-- `pursuit`: a character outside the core cast flirts with, courts or romantically pursues a
-  cisgender person of the opposite sex.
+- `romance`: a character outside the core cast refers to their own partner or a romantic
+  interest of any sort: a partner, a crush, someone they are attracted to, flirting or
+  romantic pursuit.
+- `gender-roles`: a line about what men or women are, may do or should do. Tracking only:
+  a gender-roles flag never selects a speaker or a line.
 - `not-core-cast`: the marker never flags a core-cast line, with one exception: the flirt,
   the one speaker whose cast entry carries `"flirt": true`. It flags the flirt's
   running-gag flirts aimed only at a woman or women under `flirt-at-woman`. It never
   flags the flirt's sincere thread, or a flirt aimed at a minor or a child-looking
   character.
-- `already-queer`: the marker does not flag a line whose pairing is already same-sex.
-  This also covers a speaker, partner or crush who is already trans or nonbinary.
 
 ## Buckets
 
@@ -49,19 +45,28 @@ who are not antagonists, and the flirt's, and it flags them under these labels:
   the partner or crush so the pairing is same-sex. For a man or woman speaker, the pursuit
   target changes gender too. Where the line can carry both a same-sex and an opposite-sex
   reading, a bi reading is fine. Keep everything else.
-- `trans-bucket`: by default, make the partner a nonbinary partner who uses they/them.
-  Instead, and only where the line naturally allows it, use a light detail that the
-  speaker is trans.
-  The trans bucket never adds a "she's trans" aside.
+- `trans-bucket`: for a trans pick, every line of the speaker is drafted together. Where a
+  line naturally allows it, add a light, natural trans detail: a detail that the speaker is
+  trans, or, on a romance line, a nonbinary partner who uses they/them. Where it does not,
+  keep the line unchanged as no-hit. The detail is never forced. The trans bucket never adds a
+  "she's trans" aside.
 - `same-partner`: when a speaker has several bucketed lines, they are drafted together.
   Use the same partner in every line, with one gender, one set of pronouns and the
   same details.
 - `minimal-fix`: change only the words the edit needs.
+- `already-queer`: a line whose pairing is already same-sex stays as written, and so does a
+  line whose speaker, partner or crush is already trans or nonbinary. The intent keeps these
+  as no-hit.
 
-Selection: a speaker is eligible when they are not core cast, not an antagonist, and not
-the flirt. The selection ranks the marked speakers by SHA-256 of the speaker id. The first
-ceil(15%) are queer, and the next ceil(5%) are trans. Each speakerless marked line is its
-own unit, ranked by namespace and key. Every marked line of a chosen speaker converts.
+Selection: the queer and trans picks come from salted seeded orders, and the two are
+disjoint. Queer is round(queer_share% of the romance pool), where the romance pool is the
+eligible speakers with a romance line plus each speakerless romance line. Trans is
+round(trans_share% of every eligible character). Eligible means not core cast, not an
+antagonist, and not the flirt. Each pool is sorted by a salted SHA-256 of its unit id, and
+the queer and trans salts keep the two orders apart. Picks that end with no surviving change
+are refilled from the order until the target or the pool runs out. Every romance line of a
+queer pick converts, drafted together, and every line of a trans pick is drafted together.
+The gender-roles marks never select.
 
 ## The flirt
 
@@ -90,8 +95,11 @@ It rejects a rewrite that breaks any of these labels.
   details from one of the speaker's lines to another.
 - `queer-bucket`: rejects a rewrite that changes more than the target's gender, or that
   leaves the pairing other than same-sex unless the line carries a bi reading.
-- `trans-bucket`: rejects a "she's trans" aside. A light detail that the speaker is trans,
-  where the line naturally allows it, is the bucket's edit, not a new or tokenistic detail.
+- `trans-bucket`: rejects a "she's trans" aside and a forced trans detail. A light, natural
+  trans detail, where the line allows it, is the bucket's edit, not a new or tokenistic
+  detail.
+- `already-queer`: rejects a rewrite that changes a line whose pairing is already same-sex,
+  or whose speaker, partner or crush is already trans or nonbinary.
 - `flirt-redirect`: rejects a rewrite that redirects the flirt to anyone but a man
   present in the scene, unless `generalize-when-reaction` applies.
 - `generalize-when-reaction`: rejects a rewrite that does not generalize the address
@@ -125,7 +133,7 @@ The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 
 ## How it is checked
 
-The lens runs under the queering selection: a model marker, a hash-ranked choice of the marked speakers (15% queer, 5% trans), one draft call per chosen speaker, and no Jev.
+The lens runs under the queering selection: an Opus marker, a seeded refill selection of the romance characters as queer and the eligible characters as trans, one draft call per pick, and no Jev.
 
 The triage questions are used only for counts, with no Jev recheck. The marker reads the lines of characters outside the core cast who are not antagonists, and the flirt's. The lens test, `tests/lenses/test_queering.py`, pins the triage
 questions, the label sets of each stage, the key sentences of this page and the sections
