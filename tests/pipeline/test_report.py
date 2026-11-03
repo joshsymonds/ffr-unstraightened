@@ -48,10 +48,13 @@ ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 QUEERING_LINE = (
     r"queering (romance: [0-9]+ lines, [0-9]+ characters, [0-9]+ speakerless|gender roles: [0-9]+ lines, [0-9]+ characters"
-    r"|eligible characters: [0-9]+|(queer|trans) target: [0-9]+ \(count ([0-9]+|all), pool [0-9]+\)"
-    r"|(queer|trans) round [0-9]+: tried [0-9]+, passed [0-9]+|(queer|trans) achieved: [0-9]+ of [0-9]+(, pool exhausted)?"
+    r"|eligible characters: [0-9]+"
+    r"|candidates: insertable [0-9]+ lines, [0-9]+ characters; trans-candidate [0-9]+ lines, [0-9]+ characters; [0-9]+ scenes unfinished"
+    r"|(romance|world|nonbinary|trans) target: [0-9]+ \([0-9]+% of [0-9]+, pool [0-9]+\)"
+    r"|(romance|world|nonbinary|trans) round [0-9]+: tried [0-9]+, passed [0-9]+"
+    r"|(romance|world|nonbinary|trans) achieved: [0-9]+ of [0-9]+(, pool exhausted)?"
     r"|flirt marked: [0-9]+, redirect half: [0-9]+"
-    r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
+    r"|changed (queer|world|nonbinary|trans|redirect): [0-9]+|gate failed (queer|world|nonbinary|trans|redirect): [0-9]+)"
 )
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
 SCENE_DETAIL = (
@@ -377,41 +380,72 @@ def test_absent_bucket_reads_as_none(tmp_path: Path) -> None:
 # Made-up queering lens: the queering selection declared above the lens tables. Not game text.
 QUEERING_LENS_TOML = 'selection = "queering"\n' + LENS_TOML
 
-# Made-up outcomes for the queering block: ten records, the last one unmarked. Not game text.
+# Made-up outcomes for the queering block: fourteen records, the last one unmarked. Not game text.
 QUEERING_RECORDS = (
     _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="queer"),
     _record(chapter=1, speaker=SPEAKER_TEN, reasons=[FIRST], outcome="changed", bucket="trans"),
     _record(chapter=1, speaker=SPEAKER_TWO, outcome="untouched", bucket="untouched"),
     _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="redirect"),
+    _record(chapter=1, speaker=SPEAKER_TWO, reasons=[FIRST], outcome="changed", bucket="world"),
+    _record(chapter=1, speaker=SPEAKER_TEN, reasons=[FIRST], outcome="changed", bucket="nonbinary"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="redirect"),
+    _record(chapter=2, speaker=SPEAKER_TWO, outcome="gate_failed", gate="made-up-gate", bucket="world"),
+    _record(chapter=2, speaker=SPEAKER_TEN, outcome="gate_failed", gate="made-up-gate", bucket="nonbinary"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched", bucket="not-redirected"),
     _record(chapter=2, speaker=None, outcome="untouched", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TWO, outcome="untouched", bucket="queer"),
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched"),
 )
 
-# Made-up selection counts: queer took two rounds and reached its target; trans is set to "all", so its
-# target is its whole pool, and it ran out of pool short of that target. Not game text.
+# Made-up selection: four sides and the candidate block. Romance reached its target; trans ran out of pool short
+# of its target, so it is the exhausted side. Not game text.
 SELECTION_OBJECT: dict[str, object] = {
     "romance": {"lines": 4, "characters": 3, "speakerless": 1},
     "gender_roles": {"lines": 2, "characters": 2},
     "eligible_characters": 5,
-    "queer": {
-        "count": 3,
-        "pool": 7,
-        "target": 3,
-        "rounds": [{"tried": 4, "passed": 2}, {"tried": 3, "passed": 1}],
-        "achieved": 3,
-        "exhausted": False,
+    "candidates": {
+        "insertable": {"lines": 6, "characters": 4},
+        "trans_candidate": {"lines": 3, "characters": 2},
+        "unfinished_scenes": 2,
     },
-    "trans": {
-        "count": "all",
-        "pool": 4,
-        "target": 4,
-        "rounds": [{"tried": 2, "passed": 1}, {"tried": 2, "passed": 0}],
-        "achieved": 1,
-        "exhausted": True,
+    "sides": {
+        "romance": {
+            "share": 40,
+            "denominator": 10,
+            "pool": 7,
+            "target": 4,
+            "rounds": [{"tried": 5, "passed": 3}, {"tried": 2, "passed": 1}],
+            "achieved": 4,
+            "exhausted": False,
+        },
+        "world": {
+            "share": 10,
+            "denominator": 8,
+            "pool": 3,
+            "target": 2,
+            "rounds": [{"tried": 3, "passed": 2}],
+            "achieved": 2,
+            "exhausted": False,
+        },
+        "nonbinary": {
+            "share": 5,
+            "denominator": 6,
+            "pool": 2,
+            "target": 1,
+            "rounds": [{"tried": 2, "passed": 1}],
+            "achieved": 1,
+            "exhausted": False,
+        },
+        "trans": {
+            "share": 20,
+            "denominator": 9,
+            "pool": 4,
+            "target": 2,
+            "rounds": [{"tried": 2, "passed": 1}, {"tried": 2, "passed": 0}],
+            "achieved": 1,
+            "exhausted": True,
+        },
     },
 }
 SELECTION_VALID = _bytes(SELECTION_OBJECT)
@@ -419,21 +453,32 @@ EXPECTED_SELECTION = [
     "queering romance: 4 lines, 3 characters, 1 speakerless",
     "queering gender roles: 2 lines, 2 characters",
     "queering eligible characters: 5",
-    "queering queer target: 3 (count 3, pool 7)",
-    "queering queer round 1: tried 4, passed 2",
-    "queering queer round 2: tried 3, passed 1",
-    "queering queer achieved: 3 of 3",
-    "queering trans target: 4 (count all, pool 4)",
+    "queering candidates: insertable 6 lines, 4 characters; trans-candidate 3 lines, 2 characters; 2 scenes unfinished",
+    "queering romance target: 4 (40% of 10, pool 7)",
+    "queering romance round 1: tried 5, passed 3",
+    "queering romance round 2: tried 2, passed 1",
+    "queering romance achieved: 4 of 4",
+    "queering world target: 2 (10% of 8, pool 3)",
+    "queering world round 1: tried 3, passed 2",
+    "queering world achieved: 2 of 2",
+    "queering nonbinary target: 1 (5% of 6, pool 2)",
+    "queering nonbinary round 1: tried 2, passed 1",
+    "queering nonbinary achieved: 1 of 1",
+    "queering trans target: 2 (20% of 9, pool 4)",
     "queering trans round 1: tried 2, passed 1",
     "queering trans round 2: tried 2, passed 0",
-    "queering trans achieved: 1 of 4, pool exhausted",
+    "queering trans achieved: 1 of 2, pool exhausted",
 ]
 EXPECTED_OUTCOME_LINES = [
     "queering flirt marked: 3, redirect half: 2",
     "queering changed queer: 1",
+    "queering changed world: 1",
+    "queering changed nonbinary: 1",
     "queering changed trans: 1",
     "queering changed redirect: 1",
     "queering gate failed queer: 1",
+    "queering gate failed world: 1",
+    "queering gate failed nonbinary: 1",
     "queering gate failed trans: 0",
     "queering gate failed redirect: 1",
 ]
@@ -489,9 +534,19 @@ def _broken(*keys: str | int, value: object = MISSING) -> bytes:
     return _bytes(root)
 
 
+def _old_shape() -> bytes:
+    # Made-up selection in the retired shape: top-level queer and trans sides with count fields, no sides object. Not game text.
+    root: dict[str, Any] = copy.deepcopy(SELECTION_OBJECT)
+    del root["sides"]
+    root["queer"] = {"count": 3, "pool": 7, "target": 3, "rounds": [{"tried": 4, "passed": 2}], "achieved": 3, "exhausted": False}
+    root["trans"] = {"count": "all", "pool": 4, "target": 4, "rounds": [{"tried": 2, "passed": 1}], "achieved": 1, "exhausted": True}
+    return _bytes(root)
+
+
 BAD_SELECTION = [
     pytest.param(b"SENTINEL-NOT-JSON {\n", "is not valid JSON", id="not-json"),
     pytest.param(b'["SENTINEL-ARRAY"]\n', "is not a JSON object", id="not-object"),
+    pytest.param(_old_shape(), "field sides is missing", id="old-shape"),
     pytest.param(_broken("romance"), "field romance is missing", id="romance-missing"),
     pytest.param(
         _broken("romance", "lines", value="SENTINEL-LINES"), "field romance.lines must be a non-negative integer", id="romance-type"
@@ -503,23 +558,104 @@ BAD_SELECTION = [
         _broken("gender_roles", "characters", value=True), "field gender_roles.characters must be a non-negative integer", id="gender-bool"
     ),
     pytest.param(_broken("eligible_characters"), "field eligible_characters is missing", id="eligible-missing"),
-    pytest.param(_broken("queer", "count"), "field queer.count is missing", id="count-missing"),
-    pytest.param(_broken("queer", "count", value=2.5), 'field queer.count must be a non-negative integer or "all"', id="count-float"),
-    pytest.param(_broken("trans", "count", value=-1), 'field trans.count must be a non-negative integer or "all"', id="count-negative"),
-    pytest.param(_broken("trans", "count", value=True), 'field trans.count must be a non-negative integer or "all"', id="count-bool"),
+    pytest.param(_broken("sides"), "field sides is missing", id="sides-missing"),
+    pytest.param(_broken("sides", value="SENTINEL-SIDES"), "field sides must be an object", id="sides-type"),
+    pytest.param(_broken("sides", "romance"), "field sides.romance is missing", id="romance-side-missing"),
+    pytest.param(_broken("sides", "trans"), "field sides.trans is missing", id="trans-side-missing"),
+    pytest.param(_broken("sides", "world"), "field sides.world is missing", id="world-side-missing"),
+    pytest.param(_broken("sides", "nonbinary"), "field sides.nonbinary is missing", id="nonbinary-side-missing"),
     pytest.param(
-        _broken("queer", "count", value="SENTINEL-COUNT"), 'field queer.count must be a non-negative integer or "all"', id="count-string"
+        _broken("sides", "world", "pool", value="SENTINEL-POOL"),
+        "field sides.world.pool must be a non-negative integer",
+        id="world-pool-type",
     ),
-    pytest.param(_broken("queer", "rounds", value="SENTINEL-ROUNDS"), "field queer.rounds must be a list", id="rounds-type"),
-    pytest.param(_broken("queer", "rounds", 0, value="SENTINEL-ROUND"), "field queer.rounds.0 must be an object", id="round-type"),
     pytest.param(
-        _broken("queer", "rounds", 0, "tried", value="SENTINEL-TRIED"),
-        "field queer.rounds.0.tried must be a non-negative integer",
+        _broken("sides", "nonbinary", "share", value=101),
+        "field sides.nonbinary.share must be a whole number from 0 to 100",
+        id="nonbinary-share-high",
+    ),
+    pytest.param(
+        _broken("sides", "nonbinary", "exhausted", value="SENTINEL-EXHAUSTED"),
+        "field sides.nonbinary.exhausted must be true or false",
+        id="nonbinary-exhausted-type",
+    ),
+    pytest.param(_broken("candidates"), "field candidates is missing", id="candidates-missing"),
+    pytest.param(_broken("candidates", value="SENTINEL-CANDIDATES"), "field candidates must be an object", id="candidates-type"),
+    pytest.param(_broken("candidates", "insertable"), "field candidates.insertable is missing", id="insertable-missing"),
+    pytest.param(
+        _broken("candidates", "insertable", value="SENTINEL-INSERTABLE"),
+        "field candidates.insertable must be an object",
+        id="insertable-type",
+    ),
+    pytest.param(
+        _broken("candidates", "insertable", "lines", value="SENTINEL-LINES"),
+        "field candidates.insertable.lines must be a non-negative integer",
+        id="insertable-lines-type",
+    ),
+    pytest.param(
+        _broken("candidates", "trans_candidate", "lines"),
+        "field candidates.trans_candidate.lines is missing",
+        id="trans-candidate-lines-missing",
+    ),
+    pytest.param(
+        _broken("candidates", "trans_candidate", "characters", value=-1),
+        "field candidates.trans_candidate.characters must be a non-negative integer",
+        id="trans-candidate-characters-negative",
+    ),
+    pytest.param(_broken("candidates", "unfinished_scenes"), "field candidates.unfinished_scenes is missing", id="unfinished-missing"),
+    pytest.param(
+        _broken("candidates", "unfinished_scenes", value=True),
+        "field candidates.unfinished_scenes must be a non-negative integer",
+        id="unfinished-bool",
+    ),
+    pytest.param(_broken("sides", "romance", "share"), "field sides.romance.share is missing", id="share-missing"),
+    pytest.param(
+        _broken("sides", "romance", "share", value=101),
+        "field sides.romance.share must be a whole number from 0 to 100",
+        id="share-high",
+    ),
+    pytest.param(
+        _broken("sides", "trans", "share", value=-1), "field sides.trans.share must be a whole number from 0 to 100", id="share-negative"
+    ),
+    pytest.param(
+        _broken("sides", "trans", "share", value=2.5), "field sides.trans.share must be a whole number from 0 to 100", id="share-float"
+    ),
+    pytest.param(
+        _broken("sides", "romance", "share", value=True), "field sides.romance.share must be a whole number from 0 to 100", id="share-bool"
+    ),
+    pytest.param(
+        _broken("sides", "trans", "share", value="SENTINEL-SHARE"),
+        "field sides.trans.share must be a whole number from 0 to 100",
+        id="share-string",
+    ),
+    pytest.param(_broken("sides", "romance", "denominator"), "field sides.romance.denominator is missing", id="denominator-missing"),
+    pytest.param(
+        _broken("sides", "trans", "denominator", value=-1),
+        "field sides.trans.denominator must be a non-negative integer",
+        id="denominator-negative",
+    ),
+    pytest.param(
+        _broken("sides", "romance", "pool", value="SENTINEL-POOL"),
+        "field sides.romance.pool must be a non-negative integer",
+        id="pool-type",
+    ),
+    pytest.param(_broken("sides", "trans", "target"), "field sides.trans.target is missing", id="target-missing"),
+    pytest.param(
+        _broken("sides", "romance", "rounds", value="SENTINEL-ROUNDS"), "field sides.romance.rounds must be a list", id="rounds-type"
+    ),
+    pytest.param(
+        _broken("sides", "romance", "rounds", 0, value="SENTINEL-ROUND"),
+        "field sides.romance.rounds.0 must be an object",
+        id="round-type",
+    ),
+    pytest.param(
+        _broken("sides", "romance", "rounds", 0, "tried", value="SENTINEL-TRIED"),
+        "field sides.romance.rounds.0.tried must be a non-negative integer",
         id="tried-type",
     ),
-    pytest.param(_broken("queer", "rounds", 1, "passed"), "field queer.rounds.1.passed is missing", id="passed-missing"),
-    pytest.param(_broken("queer", "achieved"), "field queer.achieved is missing", id="achieved-missing"),
-    pytest.param(_broken("trans", "exhausted", value=1), "field trans.exhausted must be true or false", id="exhausted-type"),
+    pytest.param(_broken("sides", "romance", "rounds", 1, "passed"), "field sides.romance.rounds.1.passed is missing", id="passed-missing"),
+    pytest.param(_broken("sides", "romance", "achieved"), "field sides.romance.achieved is missing", id="achieved-missing"),
+    pytest.param(_broken("sides", "trans", "exhausted", value=1), "field sides.trans.exhausted must be true or false", id="exhausted-type"),
 ]
 
 
@@ -538,19 +674,18 @@ def test_invalid_selection_fails_naming_file_and_field_but_not_the_value(repo: P
     assert "SENTINEL" not in message
 
 
-def test_share_field_does_not_stand_in_for_count(repo: Path) -> None:
-    # Made-up selection whose queer side carries a share field and no count. Not game text.
+@pytest.mark.parametrize("share", [0, 100])
+def test_share_bounds_zero_and_one_hundred_print(repo: Path, capsys: pytest.CaptureFixture[str], share: int) -> None:
+    # Made-up selection whose romance side has a share at one edge of the 0 to 100 range. Not game text.
     root: dict[str, Any] = copy.deepcopy(SELECTION_OBJECT)
-    del root["queer"]["count"]
-    root["queer"]["share"] = 40
+    root["sides"]["romance"]["share"] = share
     (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
     _write(repo, _lines(*QUEERING_RECORDS))
     _write_selection(repo, _bytes(root))
     _write_arcs(repo)
     _write_recall(repo)
-    with pytest.raises(Fail) as raised:
-        _invoke()
-    assert "field queer.count is missing" in str(raised.value)
+    _invoke()
+    assert f"queering romance target: 4 ({share}% of 10, pool 7)" in capsys.readouterr().out.splitlines()
 
 
 def test_lens_without_selection_prints_no_queering_line(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:

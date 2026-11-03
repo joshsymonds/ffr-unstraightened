@@ -93,23 +93,30 @@ without it loads with no selection. `selection` is not a section. It does not
 change any stage text.
 
 The only value is `"queering"`. With it, `ffrd run` runs the queering selection
-instead of the default one. The queering selection runs a screen over the
-lines of speakers who are neither core cast nor antagonists, plus the flirt's lines and
-speakerless lines, on the lens's screen model (Opus by default, see `[screen]`);
-the flirt is the one core-cast speaker the screen may flag, for his running-gag flirts.
-The screen's two questions are the `[[triage]]` entries with the ids `romance` and
-`gender-roles`. A `romance` mark feeds the picks. A `gender-roles` mark widens the trans pool
-and never the queer pool.
+instead of the default one. The queering selection runs a screen over the lines of speakers who are neither core cast
+nor antagonists, plus the flirt's lines and speakerless lines, on the lens's screen model (Opus
+by default, see `[screen]`); the flirt is the one core-cast speaker the screen may flag, for
+his running-gag flirts. The screen's two questions are the `[[triage]]` entries with the ids
+`romance` and `gender-roles`. A `romance` mark feeds the picks. A `gender-roles` mark is
+tracked only. A Haiku candidate pass then marks each eligible speaker's lines that carry no
+`romance` mark with `insertable` (about the speaker's home, family, work or daily life),
+`trans-candidate` (about the speaker's family, name, belonging, someone standing up for them,
+or their past), or both. An eligible speaker is a named speaker outside the core cast, the
+antagonists and the flirt.
 
-The picks come from two salted seeded orders, one for the queer side and one for the trans
-side, disjoint from each other. The queer pool is the romance pool: the speakers outside the
-core cast, the antagonists and the flirt with a `romance` mark, plus each speakerless
-`romance` line. The trans pool is the named speakers outside the core cast,
-the antagonists and the flirt who have at least one `romance` or `gender-roles` mark. Each
-side's count is `queer_count` or `trans_count`, an integer or `all`. A side's target is the
-smaller of its count and its pool, and `all` makes the target the whole pool. Each side
-refills from its order until its target is met or its pool runs out. A trans
-pick's lines go to one Opus call per speaker. The queering selection does not call Jev.
+The picks come from four salted seeded orders, one each for the romance, world, nonbinary and
+trans sides, disjoint from each other. The romance pool is the speakers outside the core cast,
+the antagonists and the flirt with a `romance` mark, plus each speakerless `romance` line. The
+world and nonbinary pools are the eligible speakers outside the romance pool with an
+`insertable` mark. The trans pool is the eligible speakers with a `trans-candidate` mark. Each
+side's share is a setting, `romance_share`, `world_share`, `nonbinary_share` or `trans_share`,
+a whole number from 0 to 100. A side's target is its share of its denominator, rounded half up:
+the romance pool for romance, the eligible speakers outside the romance pool for world and
+nonbinary, and all eligible speakers for trans. Each refill round draws romance, world,
+nonbinary and then trans, each side skipping units any other side has drawn, and each side
+refills until its target is met or its pool runs out. A world, nonbinary or trans pick's lines
+go to one Opus call per pick, which changes at most one of them. The queering selection does
+not call Jev.
 
 The example below does not declare a selection.
 
@@ -139,11 +146,12 @@ example `lenses/made-up-lens.toml: triage[1].id duplicates triage[0].id`.
   lens itself. The loader does not check that the base lens's file exists.
 - `selection`, when present, must be the string `"queering"`. Any other value
   is an error.
-- `queer_count` and `trans_count`, when present, must each be a non-negative whole number
-  or the string `"all"`. Any other value is an error, reported as `queer_count must be a
-  non-negative whole number or "all"`. They default to 10 and 5, the number of units each
-  side picks, and `"all"` picks the whole pool. The queering lens sets both. Like
-  `selection`, they are top-level keys, placed before the first table header.
+- `romance_share`, `world_share`, `nonbinary_share` and `trans_share`, when present, must each
+  be a whole number from 0 to 100. Any other value is an error, reported as
+  `romance_share must be a whole number from 0 to 100`. A boolean is not a whole number. They
+  default to 15, 10, 5 and 5: each is the percentage of its side's denominator that the side
+  picks. The queering lens sets all four. Like `selection`, they are top-level keys, placed
+  before the first table header.
 - Unknown keys are errors at every level, including unknown sections.
 
 ## Example

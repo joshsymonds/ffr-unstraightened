@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
@@ -148,7 +148,7 @@ def test_redirected_is_near_half_and_stable() -> None:
 
 
 def test_selection_order_and_rewritten_set() -> None:
-    assert queering.SELECTIONS == ("queer", "trans", "untouched", "redirect", "not-redirected")
+    assert queering.SELECTIONS == ("queer", "world", "nonbinary", "trans", "untouched", "redirect", "not-redirected")
     assert frozenset({"queer", "redirect"}) == queering.REWRITTEN
 
 
@@ -189,16 +189,11 @@ def test_unit_is_speaker_or_namespace_and_key() -> None:
 
 
 @pytest.mark.parametrize(
-    ("count", "size", "expected"),
-    [(10, 20, 10), (10, 3, 3), (1, 3, 1), (0, 37, 0), (5, 0, 0), ("all", 37, 37), ("all", 0, 0)],
+    ("share", "size", "expected"),
+    [(15, 23, 3), (50, 3, 2), (50, 1, 1), (5, 216, 11), (0, 37, 0), (100, 37, 37), (0, 0, 0), (100, 0, 0)],
 )
-def test_target_is_the_count_capped_at_the_pool_or_the_whole_pool_for_all(count: int | Literal["all"], size: int, expected: int) -> None:
-    assert queering.target(count, size) == expected
-
-
-@pytest.mark.parametrize(("count", "size", "expected"), [(10, 3, 10), (0, 37, 0), ("all", 37, 37)])
-def test_requested_is_the_count_or_the_pool_for_all(count: int | Literal["all"], size: int, expected: int) -> None:
-    assert queering.requested(count, size) == expected
+def test_target_is_the_share_of_the_size_rounded_half_up(share: int, size: int, expected: int) -> None:
+    assert queering.target(share, size) == expected
 
 
 SYNTH_UNITS = [f"Synth-{i}" for i in range(21)] + ["Made-up-ns/3", "Made-up-ns/4"]
@@ -223,6 +218,13 @@ def test_order_ignores_input_order_and_duplicates() -> None:
 def test_queer_and_trans_salts_are_distinct_and_order_differently() -> None:
     assert queering.QUEER_SALT != queering.TRANS_SALT
     assert queering.order(SYNTH_UNITS, queering.QUEER_SALT) != queering.order(SYNTH_UNITS, queering.TRANS_SALT)
+
+
+def test_every_side_salt_is_distinct_and_orders_the_same_units_differently() -> None:
+    salts = [queering.QUEER_SALT, queering.WORLD_SALT, queering.NONBINARY_SALT, queering.TRANS_SALT]
+    assert len(set(salts)) == len(salts)
+    orders = [queering.order(SYNTH_UNITS, salt) for salt in salts]
+    assert all(orders[i] != orders[j] for i in range(len(orders)) for j in range(i + 1, len(orders)))
 
 
 def test_reason_ids_name_the_two_screen_questions() -> None:

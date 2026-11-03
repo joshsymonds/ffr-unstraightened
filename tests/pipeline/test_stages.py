@@ -17,36 +17,41 @@ from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
+    CANDIDATE_INSTRUCTIONS,
+    CANDIDATE_SCHEMA,
     CROSS_SCHEMA,
     DRAFT_INSTRUCTIONS,
     DRAFT_SCHEMA,
+    INSERTABLE,
     INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
     JUDGE_SCHEMA,
+    PICK_DRAFT_INSTRUCTIONS,
+    PICK_DRAFT_SCHEMA,
     RESCREEN_INSTRUCTIONS,
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     SPEAKER_DRAFT_INSTRUCTIONS,
-    TRANS_DRAFT_INSTRUCTIONS,
-    TRANS_DRAFT_SCHEMA,
+    TRANS_CANDIDATE,
     Batch,
     Intent,
+    PickChange,
     Scene,
     SceneLine,
     Target,
-    TransDraft,
     _family_scenes,
     _table_scenes,
+    candidates,
     cross_judge,
     draft,
     draft_speaker,
     intent,
     judge,
+    pick_draft,
     render,
     rescreen,
     scene_text,
     screen,
-    trans_draft,
     triage,
 )
 from ffrd.pipeline.store import Store
@@ -1677,90 +1682,117 @@ def test_changed_arc_context_or_cast_asks_again(
     assert _heading_part(heading, changed) in ask.calls[1][1]
 
 
-TRANS_GROUPS = [(SCENE, [LINE_ONE]), (SCENE_TWO, [LINE_THREE])]
-TRANS_KEEP_ENTRY = {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key, "keep": True, "intent": "", "drafts": []}
-TRANS_CHANGE_ENTRY = {
+PICK_GROUPS = [(SCENE, [LINE_ONE]), (SCENE_TWO, [LINE_THREE])]
+PICK_KEEP = {"keep": True, "namespace": "", "key": "", "intent": "", "drafts": []}
+PICK_CHANGE = {
+    "keep": False,
     "namespace": LINE_THREE.namespace,
     "key": LINE_THREE.key,
-    "keep": False,
     "intent": "Made-up trans detail intent. Not game text.",
     "drafts": ["Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."],
 }
-TRANS_ANSWER = {"lines": [TRANS_KEEP_ENTRY, TRANS_CHANGE_ENTRY]}
-TRANS_RESULT = {
-    (LINE_ONE.namespace, LINE_ONE.key): TransDraft(keep=True, intent="", drafts=()),
-    (LINE_THREE.namespace, LINE_THREE.key): TransDraft(
-        keep=False,
-        intent="Made-up trans detail intent. Not game text.",
-        drafts=("Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."),
-    ),
-}
+PICK_RESULT = PickChange(
+    namespace=LINE_THREE.namespace,
+    key=LINE_THREE.key,
+    intent="Made-up trans detail intent. Not game text.",
+    drafts=("Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."),
+)
+# A made-up scene of nine lines, for the window around each line of a pick. Not game text.
+WIDE_LINES = tuple(
+    SceneLine(
+        "ST_C01_002_01",
+        str(number),
+        None,
+        f"Made-up wide line {number}. Not game text.",
+        f"Made-up Japanese wide {number}. Not game text.",
+        1,
+    )
+    for number in range(1, 10)
+)
+WIDE_SCENE = Scene("made-up-scene-wide", WIDE_LINES)
 
 
-def test_trans_draft_schema_requires_one_entry_per_line_with_keep_intent_and_drafts() -> None:
-    assert TRANS_DRAFT_SCHEMA["type"] == "object"
-    assert TRANS_DRAFT_SCHEMA["required"] == ["lines"]
-    assert TRANS_DRAFT_SCHEMA["additionalProperties"] is False
-    entry = TRANS_DRAFT_SCHEMA["properties"]["lines"]["items"]
-    assert entry["required"] == ["namespace", "key", "keep", "intent", "drafts"]
-    assert entry["properties"]["keep"] == {"type": "boolean"}
-    assert entry["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}}
-    assert entry["additionalProperties"] is False
+def test_pick_draft_schema_asks_for_one_entry_with_keep_namespace_key_intent_and_drafts() -> None:
+    assert PICK_DRAFT_SCHEMA["type"] == "object"
+    assert PICK_DRAFT_SCHEMA["required"] == ["keep", "namespace", "key", "intent", "drafts"]
+    assert PICK_DRAFT_SCHEMA["additionalProperties"] is False
+    assert PICK_DRAFT_SCHEMA["properties"]["keep"] == {"type": "boolean"}
+    assert PICK_DRAFT_SCHEMA["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}}
 
 
-def test_trans_draft_instructions_allow_only_the_two_detail_kinds_and_forbid_forcing_or_she_is_trans_asides() -> None:
-    assert "they/them" in TRANS_DRAFT_INSTRUCTIONS
-    assert "nonbinary partner" in TRANS_DRAFT_INSTRUCTIONS
-    assert "Never force" in TRANS_DRAFT_INSTRUCTIONS
-    assert "she's trans" in TRANS_DRAFT_INSTRUCTIONS
+def test_pick_draft_instructions_keep_the_placeholder_tag_and_length_rules_without_partner_wording() -> None:
+    assert "Keep every {...} placeholder" in PICK_DRAFT_INSTRUCTIONS
+    assert "every <text ...>...</> tag" in PICK_DRAFT_INSTRUCTIONS
+    assert "Stay within 120% of each English line's length" in PICK_DRAFT_INSTRUCTIONS
+    assert "nonbinary" not in PICK_DRAFT_INSTRUCTIONS.lower()
+    assert "partner" not in PICK_DRAFT_INSTRUCTIONS.lower()
+    assert "they/them" not in PICK_DRAFT_INSTRUCTIONS
 
 
-def test_trans_draft_sends_one_opus_call_with_schema_and_returns_a_record_per_line(tmp_path: Path) -> None:
-    ask = Fake(TRANS_ANSWER)
+@pytest.mark.parametrize("bucket", ["world", "nonbinary", "trans"])
+def test_pick_draft_instructions_name_no_single_bucket_and_point_at_the_bucket_label(bucket: str) -> None:
+    assert bucket not in PICK_DRAFT_INSTRUCTIONS.lower()
+    assert "-bucket]" in PICK_DRAFT_INSTRUCTIONS
+    assert "she's trans" not in PICK_DRAFT_INSTRUCTIONS
 
-    result = trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, ask)
 
-    assert result == TRANS_RESULT
+def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(tmp_path: Path) -> None:
+    ask = Fake(PICK_CHANGE)
+
+    result = pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
+
+    assert result == PICK_RESULT
     assert len(ask.calls) == 1
     model, parts, schema = ask.calls[0]
     assert model == claude.OPUS
-    assert schema == TRANS_DRAFT_SCHEMA
-    assert TRANS_DRAFT_INSTRUCTIONS in parts
+    assert schema == PICK_DRAFT_SCHEMA
+    assert PICK_DRAFT_INSTRUCTIONS in parts
     assert "Made-up intent rule. Not game text." in "\n".join(parts)
 
 
-def test_trans_draft_prompt_groups_each_scenes_lines_and_the_speakers_lines(tmp_path: Path) -> None:
-    ask = Fake(TRANS_ANSWER)
+def test_pick_draft_no_change_returns_none_and_a_second_call_reuses_it(tmp_path: Path) -> None:
+    ask = Fake(PICK_KEEP)
 
-    trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, ask)
+    assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask) is None
+    assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, Fake()) is None
+    assert len(ask.calls) == 1
 
-    scenes = json.loads(_part(ask.calls[0][1], "Scenes:\n"))
-    assert [scene["scene"] for scene in scenes] == [SCENE.key, SCENE_TWO.key]
-    assert [[line["key"] for line in scene["lines"]] for scene in scenes] == [["1", "2"], ["3", "4"]]
-    assert [[line["key"] for line in scene["speaker_lines"]] for scene in scenes] == [["1"], ["3"]]
-    assert scenes[1]["speaker_lines"][0]["english"] == LINE_THREE.english
+
+def test_pick_draft_prompt_names_the_bucket(tmp_path: Path) -> None:
+    ask = Fake(PICK_KEEP)
+
+    pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
+
+    assert _part(ask.calls[0][1], "Bucket:\n") == "trans"
+
+
+def test_pick_draft_shows_each_line_with_the_three_scene_lines_either_side_and_no_line_further_away(tmp_path: Path) -> None:
+    ask = Fake(PICK_KEEP)
+
+    pick_draft(Store(tmp_path), LENS, "trans", [(WIDE_SCENE, [WIDE_LINES[0], WIDE_LINES[8]])], ask)
+
+    entries = json.loads(_part(ask.calls[0][1], "Lines:\n"))
+    assert [[line["key"] for line in entry["window"]] for entry in entries] == [["1", "2", "3", "4"], ["6", "7", "8", "9"]]
 
 
 @pytest.mark.parametrize(
     "answer",
     [
-        pytest.param({"lines": [TRANS_KEEP_ENTRY]}, id="missing"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, TRANS_CHANGE_ENTRY, ENTRY_UNKNOWN]}, id="unknown"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, TRANS_KEEP_ENTRY, TRANS_CHANGE_ENTRY]}, id="duplicate"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, {**TRANS_CHANGE_ENTRY, "keep": True}]}, id="kept-line-with-drafts"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, {**TRANS_CHANGE_ENTRY, "intent": ""}]}, id="changed-line-without-intent"),
-        pytest.param({"lines": [TRANS_KEEP_ENTRY, {**TRANS_CHANGE_ENTRY, "drafts": []}]}, id="changed-line-without-drafts"),
+        pytest.param({**PICK_CHANGE, "namespace": LINE_TWO.namespace, "key": LINE_TWO.key}, id="line-outside-the-pick"),
+        pytest.param({**PICK_CHANGE, "intent": ""}, id="change-without-intent"),
+        pytest.param({**PICK_CHANGE, "drafts": []}, id="change-without-drafts"),
+        pytest.param({**PICK_KEEP, "drafts": ["Made-up draft kept with no change. Not game text."]}, id="no-change-with-drafts"),
     ],
 )
-def test_trans_draft_answers_that_break_the_line_rules_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
+def test_pick_draft_answers_that_break_the_pick_rules_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
     store = Store(tmp_path)
-    ask = Fake(answer, TRANS_ANSWER)
+    ask = Fake(answer, PICK_CHANGE)
 
-    assert isinstance(trans_draft(store, LENS, TRANS_GROUPS, ask), Rejected)
+    assert isinstance(pick_draft(store, LENS, "trans", PICK_GROUPS, ask), Rejected)
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert trans_draft(store, LENS, TRANS_GROUPS, ask) == TRANS_RESULT
+    assert pick_draft(store, LENS, "trans", PICK_GROUPS, ask) == PICK_RESULT
     assert len(ask.calls) == 2
 
 
@@ -1768,22 +1800,23 @@ def test_trans_draft_answers_that_break_the_line_rules_are_rejected_and_stored_n
     "failure",
     [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
 )
-def test_trans_draft_failed_answer_passes_through_unstored(tmp_path: Path, failure: Any) -> None:
+def test_pick_draft_failed_answer_passes_through_unstored(tmp_path: Path, failure: Any) -> None:
     store = Store(tmp_path)
-    ask = Fake(failure, TRANS_ANSWER)
+    ask = Fake(failure, PICK_CHANGE)
 
-    assert trans_draft(store, LENS, TRANS_GROUPS, ask) == failure
+    assert pick_draft(store, LENS, "trans", PICK_GROUPS, ask) == failure
     assert store.finished() == []
     assert len(store.unfinished()) == 1
 
-    assert trans_draft(store, LENS, TRANS_GROUPS, ask) == TRANS_RESULT
+    assert pick_draft(store, LENS, "trans", PICK_GROUPS, ask) == PICK_RESULT
 
 
-def test_trans_draft_is_stored_under_its_trans_draft_key_and_a_fresh_store_reuses_it(tmp_path: Path) -> None:
-    ask = Fake(TRANS_ANSWER)
-    trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, ask)
+def test_pick_draft_is_stored_under_its_pick_draft_key_with_its_bucket_and_a_fresh_store_reuses_it(tmp_path: Path) -> None:
+    ask = Fake(PICK_CHANGE)
+    pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
     [record] = (tmp_path / "results").glob("*.json")
     inputs = {
+        "bucket": "trans",
         "scenes": [
             {
                 "scene": SCENE.key,
@@ -1795,10 +1828,130 @@ def test_trans_draft_is_stored_under_its_trans_draft_key_and_a_fresh_store_reuse
                 "lines": [asdict(line) for line in SCENE_TWO.lines],
                 "targets": [{"namespace": LINE_THREE.namespace, "key": LINE_THREE.key}],
             },
-        ]
+        ],
     }
 
-    assert record.stem == store_key("trans_draft", inputs, LENS.stage_text("intent"))
-    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "trans_draft"
-    assert trans_draft(Store(tmp_path), LENS, TRANS_GROUPS, Fake()) == TRANS_RESULT
+    assert record.stem == store_key("pick_draft", inputs, LENS.stage_text("intent"))
+    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "pick_draft"
+    assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, Fake()) == PICK_RESULT
     assert len(ask.calls) == 1
+
+
+CANDIDATE_REFS = [(LINE_ONE.namespace, LINE_ONE.key), (LINE_TWO.namespace, LINE_TWO.key), (LINE_THREE.namespace, LINE_THREE.key)]
+CANDIDATE_LISTED = [{"namespace": namespace, "key": key} for namespace, key in CANDIDATE_REFS]
+INSERTABLE_QUESTION = "Is the line about the speaker's home, family, work or daily life?"
+TRANS_CANDIDATE_QUESTION = "Is the line about the speaker's family, name, belonging, someone standing up for them, or their past?"
+
+
+def _marked(*entries: tuple[SceneLine, list[str]]) -> dict[str, Any]:
+    return {"marked": [{"namespace": line.namespace, "key": line.key, "marks": marks} for line, marks in entries]}
+
+
+CANDIDATE_ANSWER = _marked((LINE_ONE, [TRANS_CANDIDATE, INSERTABLE]), (LINE_TWO, [INSERTABLE]))
+CANDIDATE_RESULT = {
+    (LINE_ONE.namespace, LINE_ONE.key): (INSERTABLE, TRANS_CANDIDATE),
+    (LINE_TWO.namespace, LINE_TWO.key): (INSERTABLE,),
+}
+
+
+def test_candidate_mark_ids_are_insertable_and_trans_candidate() -> None:
+    assert INSERTABLE == "insertable"
+    assert TRANS_CANDIDATE == "trans-candidate"
+
+
+def test_candidates_asks_haiku_with_schema_and_returns_marks_in_constant_order_for_marked_lines_only(tmp_path: Path) -> None:
+    ask = Fake(CANDIDATE_ANSWER)
+
+    result = candidates(Store(tmp_path), FOUR_LINE_SCENE, CANDIDATE_REFS, ask)
+
+    assert result == CANDIDATE_RESULT
+    model, _parts, schema = ask.calls[0]
+    assert model == claude.HAIKU
+    assert schema == CANDIDATE_SCHEMA
+
+
+def test_candidate_schema_requires_marked_and_forbids_extra_properties() -> None:
+    entry = CANDIDATE_SCHEMA["properties"]["marked"]["items"]
+
+    assert CANDIDATE_SCHEMA["required"] == ["marked"]
+    assert CANDIDATE_SCHEMA["additionalProperties"] is False
+    assert entry["required"] == ["namespace", "key", "marks"]
+    assert entry["additionalProperties"] is False
+
+
+def test_candidate_prompt_carries_both_questions_the_scene_lines_and_the_refs_to_answer(tmp_path: Path) -> None:
+    ask = Fake(_marked())
+
+    candidates(Store(tmp_path), SCENE, [(LINE_ONE.namespace, LINE_ONE.key)], ask)
+
+    parts = ask.calls[0][1]
+    prompt = "\n".join(parts)
+    assert INSERTABLE_QUESTION in prompt
+    assert TRANS_CANDIDATE_QUESTION in prompt
+    assert CANDIDATE_INSTRUCTIONS in parts
+    lines_part = _part(parts, "Scene lines:\n")
+    assert '"english": "Made-up first line. Not game text."' in lines_part
+    assert '"english": "Made-up narration. Not game text."' in lines_part
+    assert "Made-up Japanese one. Not game text." not in prompt
+    assert '"japanese"' not in prompt
+    assert json.loads(_part(parts, "Lines to mark:\n")) == [{"namespace": LINE_ONE.namespace, "key": LINE_ONE.key}]
+
+
+def test_candidates_store_under_the_candidates_stage_and_a_second_call_makes_no_ask(tmp_path: Path) -> None:
+    candidates(Store(tmp_path), FOUR_LINE_SCENE, CANDIDATE_REFS, Fake(CANDIDATE_ANSWER))
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": FOUR_LINE_SCENE.key,
+        "lines": [asdict(line) for line in FOUR_LINE_SCENE.lines],
+        "refs": CANDIDATE_LISTED,
+    }
+    assert record.stem == store_key("candidates", inputs, CANDIDATE_INSTRUCTIONS)
+    assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "candidates"
+    ask = Fake()
+
+    assert candidates(Store(tmp_path), FOUR_LINE_SCENE, CANDIDATE_REFS, ask) == CANDIDATE_RESULT
+    assert ask.calls == []
+
+
+def test_screen_on_the_same_scene_after_candidates_still_asks_and_is_stored_under_its_own_key(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    candidates(store, SCENE, [(LINE_ONE.namespace, LINE_ONE.key)], Fake(_marked((LINE_ONE, [INSERTABLE]))))
+    ask = Fake({"flagged": []})
+
+    assert screen(store, LENS, SCENE, CAST, ask) == {}
+    assert len(ask.calls) == 1
+    assert len(list((tmp_path / "results").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize(
+    "refs,answer",
+    [
+        ([(LINE_ONE.namespace, LINE_ONE.key)], _marked((LINE_TWO, [INSERTABLE]))),
+        (CANDIDATE_REFS, _marked((LINE_ONE, ["made-up-mark"]))),
+    ],
+    ids=["ref-outside-listed-refs", "unknown-mark"],
+)
+def test_candidates_rejects_an_unlisted_ref_or_unknown_mark_and_stores_nothing(tmp_path: Path, refs: Any, answer: Any) -> None:
+    store = Store(tmp_path)
+
+    result = candidates(store, FOUR_LINE_SCENE, refs, Fake(answer))
+
+    assert isinstance(result, Rejected)
+    assert store.finished() == []
+    assert len(store.unfinished()) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Unfinished("Made-up unfinished detail. Not game text."), Rejected("Made-up rejected detail. Not game text.")],
+    ids=["unfinished", "rejected"],
+)
+def test_failed_candidates_pass_through_unstored_and_are_asked_again(tmp_path: Path, failure: Any) -> None:
+    store = Store(tmp_path)
+    ask = Fake(failure, CANDIDATE_ANSWER)
+
+    assert candidates(store, FOUR_LINE_SCENE, CANDIDATE_REFS, ask) == failure
+    assert store.finished() == []
+
+    assert candidates(store, FOUR_LINE_SCENE, CANDIDATE_REFS, ask) == CANDIDATE_RESULT
+    assert len(ask.calls) == 2
