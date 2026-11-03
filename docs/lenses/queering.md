@@ -52,9 +52,11 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   so that deleting the mention would lose something. The mention takes one short clause,
   with no labels and no explaining.
 - `nonbinary-bucket`: for a nonbinary pick, the speaker gets one candidate line changed,
-  and no other. The change adds a short mention of a specific partner, consistently called
+  and no other. The change adds a short mention of a specific partner, "my partner" or a
+  name the line already allows, consistently called
   they/them wherever gender would otherwise show. The mention is worked into a line already
-  about the speaker's home, family, work or daily life. The partner must carry the line's
+  about the speaker's home, family, work or daily life, a line where the partner's gender
+  would otherwise show. The partner must carry the line's
   point, so that deleting the mention would lose something. The mention takes one short
   clause, with no labels and no explaining.
 - `trans-bucket`: for a trans pick, at most one candidate line of the speaker changes. Where
@@ -123,9 +125,10 @@ It rejects a rewrite that breaks any of these labels.
 - `world-bucket`: rejects a same-sex partner mention that could be deleted without loss, a
   rewrite that changes more than one line of a world, nonbinary or trans pick, and a mention that is
   not one short clause or puts a label or an explanation in the line.
-- `nonbinary-bucket`: rejects a rewrite whose partner's gender is unspecified rather than
-  consistently they/them, a modern label in the setting, a partner mention that could be
-  deleted without loss, and a mention that is not one short clause or puts a label or an
+- `nonbinary-bucket`: rejects a rewrite whose they/them reads as merely unspecified gender,
+  one that uses the word nonbinary or any modern label in the setting, a partner mention
+  that could be deleted without loss, and a mention that is not one short clause or puts a
+  label or an
   explanation in the line.
 - `trans-bucket`: rejects a "she's trans" aside and a forced trans detail. A trans detail
   that is not one of the four shapes, does not answer the line's own topic, or is too vague
