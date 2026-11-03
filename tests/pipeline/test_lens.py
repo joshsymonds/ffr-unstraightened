@@ -441,6 +441,65 @@ def test_screen_model_does_not_change_screen_stage_text(tmp_path: Path) -> None:
     assert modelled.stage_text("screen") == '{"criteria": ["Made-up criterion one.", "Made-up criterion two."]}'
 
 
+def test_lens_without_shares_has_default_shares(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, VALID))
+    assert lens.queer_share == 15
+    assert lens.trans_share == 5
+    assert lens == EXPECTED_LENS
+
+
+@pytest.mark.parametrize("key", ["queer_share", "trans_share"])
+@pytest.mark.parametrize("value", [0, 42, 100])
+def test_declared_share_loads_into_its_field(tmp_path: Path, key: str, value: int) -> None:
+    lens = load_lens(write_lens(tmp_path, f"{key} = {value}\n" + VALID))
+    assert getattr(lens, key) == value
+
+
+def test_both_shares_declared_load_together(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, "queer_share = 0\ntrans_share = 100\n" + VALID))
+    assert lens == replace(EXPECTED_LENS, queer_share=0, trans_share=100)
+
+
+# Each case declares a share that is not a whole number from 0 to 100. A bool is not a number here.
+SHARE_INVALID_VALUES: list[tuple[str, str]] = [
+    ("boolean", "true"),
+    ("float", "5.0"),
+    ("string", '"5"'),
+    ("negative", "-1"),
+    ("over one hundred", "101"),
+    ("array", "[5]"),
+]
+
+
+@pytest.mark.parametrize("key", ["queer_share", "trans_share"])
+@pytest.mark.parametrize(
+    ("label", "value"),
+    SHARE_INVALID_VALUES,
+    ids=[case[0] for case in SHARE_INVALID_VALUES],
+)
+def test_malformed_share_raises_fail_naming_file_and_field(tmp_path: Path, key: str, label: str, value: str) -> None:
+    path = write_lens(tmp_path, f"{key} = {value}\n" + VALID)
+    with pytest.raises(Fail, match=re.escape(f"{path}: {key} must be a whole number from 0 to 100")):
+        load_lens(path)
+
+
+def test_share_problem_reported_with_other_problems_in_one_fail(tmp_path: Path) -> None:
+    text = "trans_share = 101\n" + VALID.replace('rule = "Made-up intent rule, café."', "")
+    path = write_lens(tmp_path, text)
+    with pytest.raises(Fail) as raised:
+        load_lens(path)
+    message = str(raised.value)
+    assert f"{path}: trans_share must be a whole number from 0 to 100" in message
+    assert f"{path}: intent.rule is missing" in message
+
+
+def test_shares_do_not_change_stage_text(tmp_path: Path) -> None:
+    plain = load_lens(write_lens(tmp_path, VALID_WITH_SCENE, name="plain"))
+    shared = load_lens(write_lens(tmp_path, "queer_share = 0\ntrans_share = 100\n" + VALID_WITH_SCENE, name="shared"))
+    for stage in ("triage", "screen", "intent", "judge", "scene"):
+        assert shared.stage_text(stage) == plain.stage_text(stage)
+
+
 README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
 FENCED_TOML = re.compile(r"^```toml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 
