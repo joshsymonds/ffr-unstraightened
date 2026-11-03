@@ -1,4 +1,4 @@
-# Queering lens. Makes a minor character's romance queer, and splits the party flirt's running gag.
+# Queering lens. Makes a character outside the core cast's romance queer, and splits the party flirt's running gag.
 # Keeps the core cast's sexuality and romances as written, and keeps the sincere threads.
 # Each screen criterion and each intent/judge paragraph starts with its [label].
 
@@ -6,12 +6,16 @@ base = "unstraightening"
 selection = "queering"
 
 [[triage]]
-id = "minor-partner"
-question = "A minor character in this scene talks about their own romantic partner, and the pairing reads as a cisgender man and a cisgender woman."
+id = "partner"
+question = "A character outside the core cast in this scene talks about their own romantic partner, such as a spouse, lover, betrothed or ex, and the pairing reads as a cisgender man and a cisgender woman."
 
 [[triage]]
-id = "minor-attraction"
-question = "A minor character in this scene talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex."
+id = "attraction"
+question = "A character outside the core cast in this scene talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex."
+
+[[triage]]
+id = "pursuit"
+question = "A character outside the core cast in this scene flirts with, courts or romantically pursues a cisgender person of the opposite sex."
 
 [[triage]]
 id = "flirt-at-woman"
@@ -19,21 +23,22 @@ question = "The party member whose running gag is flirting aims a running-gag fl
 
 [screen]
 criteria = [
-    "[minor-partner] Flag minor-partner when a minor character talks about their own romantic partner, and the pairing reads as a cisgender man and a cisgender woman. Flag only the minor character's own lines.",
-    "[minor-attraction] Flag minor-attraction when a minor character talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex. Flag only the minor character's own lines.",
+    "[partner] Flag partner when a character outside the core cast talks about their own romantic partner, such as a spouse, lover, betrothed or ex, and the pairing reads as a cisgender man and a cisgender woman. Any character outside the core cast qualifies, a bigger recurring one as much as a passer-by. Flag only the speaker's own lines.",
+    "[attraction] Flag attraction when a character outside the core cast talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex. Any character outside the core cast qualifies, a bigger recurring one as much as a passer-by. Flag only the speaker's own lines.",
+    "[pursuit] Flag pursuit when a character outside the core cast flirts with, courts or romantically pursues a cisgender person of the opposite sex. Any character outside the core cast qualifies, a bigger recurring one as much as a passer-by. Flag only the speaker's own lines.",
     "[not-core-cast] Never flag a core-cast line, with one exception: the flirt, the one speaker whose cast entry carries \"flirt\": true. Flag the flirt's running-gag flirts aimed only at a woman or women under flirt-at-woman. Never flag the flirt's sincere thread. Never flag a flirt aimed at a minor or a child-looking character. The core cast is the recurring party members, not a minor character.",
     "[already-queer] Do not flag a line whose pairing is already same-sex. This also covers a speaker, partner or crush who is already trans or nonbinary.",
 ]
 
 [intent]
 rule = """
-You rewrite only the lines you are given: a minor character's line the screen marked, in its speaker's queer or trans bucket, or a line in the flirt's redirect half. Change only what the bucket or the flirt rule asks, and keep the story. Keep a line unchanged only for a reason from this keep list: no-hit when the line is not the shape its label names, protection when a protect rule below covers it, or plot when the edit needs a plot change.
+You rewrite only the lines you are given: every marked line of a speaker chosen queer or trans, drafted together, or a line in the flirt's redirect half. Change only what the bucket or the flirt rule asks, and keep the story. Keep a line unchanged only for a reason from this keep list: no-hit when the line is not the shape its label names, protection when a protect rule below covers it, or plot when switching would contradict a partner or fact shown on screen, or would change the plot.
 
 [minimal-fix] Change only the words the edit needs. Leave the rest of the line as written. Do not rewrite a whole line when one word or one clause carries the change.
 
 [same-partner] When a speaker has several bucketed lines, they are drafted together. Use the same partner in every line, with one gender, one set of pronouns and the same details.
 
-[queer-bucket] For the queer bucket, swap the gender of the partner or crush so the pairing is same-sex. Keep everything else: the feeling, the bond and the details.
+[queer-bucket] For the queer bucket, the speaker's romantic target becomes the same sex. Swap the gender of the partner or crush so the pairing is same-sex. For a man or woman speaker, the pursuit target changes gender too. Where the line can carry both a same-sex and an opposite-sex reading, a bi reading is fine. Keep everything else: the feeling, the bond and the details.
 
 [trans-bucket] For the trans bucket, by default, make the partner a nonbinary partner who uses they/them. Instead, and only where the line naturally allows it, use a light detail that the speaker is trans. Never write a "she's trans" aside.
 
@@ -70,7 +75,7 @@ You judge one rewritten line against its original and the label it was drafted u
 
 [same-partner] Reject a rewrite that changes the partner's gender, pronouns or details from one of the speaker's lines to another.
 
-[queer-bucket] Reject a rewrite that changes more than the partner's or crush's gender, or that leaves the pairing other than same-sex.
+[queer-bucket] Reject a rewrite that changes more than the target's gender, or that leaves the pairing other than same-sex unless the line carries a bi reading.
 
 [trans-bucket] Reject a "she's trans" aside. A light detail that the speaker is trans, where the line naturally allows it, is the bucket's edit, not a new or tokenistic detail.
 
