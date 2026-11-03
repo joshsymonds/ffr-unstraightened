@@ -5310,6 +5310,111 @@ def test_a_trans_pick_repeated_twice_in_its_first_scene_and_once_later_keeps_one
     assert _side(tmp_path, "trans")["achieved"] == 1
 
 
+# Queer picks whose ref repeats across scenes or within its first scene. Made-up speaker and lines. Not game text.
+QUEER_REPEAT_SCENES = (
+    Scene("made-up-scene-x-early", (_line(NS_A, "1", REFILL_X, EN_A1, 1),)),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2),)),
+)
+QUEER_TWICE_THEN_ONCE_SCENES = (
+    Scene("made-up-scene-x-early", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "1", REFILL_X, EN_A1, 1))),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2),)),
+)
+QUEER_COHERENT_SCENES = (
+    Scene("made-up-scene-x-early", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_C, "1", REFILL_Z, EN_C1, 1))),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2),)),
+)
+
+
+def _queer_repeat_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE, 2: EMPTY_BIBLE, 3: EMPTY_BIBLE}
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_C, "1"): [ROMANCE_ID]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_C, "1"): [OPUS_C1]}
+    return claude
+
+
+def test_a_queer_ref_repeated_across_scenes_gates_once_and_ships_one_change_for_both(tmp_path: Path) -> None:
+    outcomes = _run(tmp_path, _queer_repeat_claude(), [], jev=None, renderer=FakeRenderer({}), scenes=QUEER_REPEAT_SCENES, lens=QUEER_LENS)
+    assert [(outcome.speaker, outcome.chapter, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, 1, "changed", "queer"),
+        (REFILL_X, 2, "changed", "queer"),
+    ]
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_a_queer_ref_repeated_twice_in_its_first_scene_and_once_later_keeps_one_change_for_all_three(tmp_path: Path) -> None:
+    outcomes = _run(
+        tmp_path,
+        _queer_repeat_claude(),
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=QUEER_TWICE_THEN_ONCE_SCENES,
+        lens=QUEER_LENS,
+    )
+    assert [(outcome.speaker, outcome.chapter, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, 1, "changed", "queer"),
+        (REFILL_X, 1, "changed", "queer"),
+        (REFILL_X, 2, "changed", "queer"),
+    ]
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
+
+
+def test_coherence_revert_of_a_repeated_queer_ref_in_its_first_scene_fails_every_occurrence(tmp_path: Path) -> None:
+    claude = _queer_repeat_claude()
+    claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=QUEER_COHERENT_SCENES, lens=QUEER_LENS)
+    assert [(outcome.speaker, outcome.chapter, outcome.outcome, outcome.gate, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, 1, "gate_failed", "scene", "queer"),
+        (REFILL_Z, 1, "changed", None, "queer"),
+        (REFILL_X, 2, "gate_failed", "scene", "queer"),
+    ]
+    assert _dialog_entries(tmp_path) == {(NS_C, "1")}
+
+
+class _KeepInLoneScene(FakeClaude):
+    """Keeps the target line for plot when its scene holds that line alone, and intends it otherwise, so one ref is kept in one scene and targeted in another. Not game text."""
+
+    def ask(self, model: str, parts: Sequence[str], schema: Mapping[str, Any]) -> dict[str, Any] | Unfinished | Rejected:
+        if schema is INTENT_SCHEMA and len(json.loads(_part(parts, "Scene lines:\n"))) == 1:
+            self.calls.append((model, list(parts), schema))
+            return {"intent": "Made-up intent. Not game text.", "keep": True, "keep_reason": "plot"}
+        return super().ask(model, parts, schema)
+
+
+# The repeated ref stands alone in its first scene, where its intent keeps it, and shares its later scene with an unmarked line. Not game text.
+QUEER_KEPT_FIRST_SCENES = (
+    Scene("made-up-scene-x-early", (_line(NS_A, "1", REFILL_X, EN_A1, 1),)),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2), _line(NS_B, "2", None, EN_B2, 2))),
+)
+
+
+def test_a_repeated_queer_ref_kept_in_its_first_scene_is_kept_in_every_scene(tmp_path: Path) -> None:
+    claude = _KeepInLoneScene()
+    claude.bible = {1: EMPTY_BIBLE, 2: EMPTY_BIBLE}
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1]}
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=QUEER_KEPT_FIRST_SCENES, lens=QUEER_LENS)
+    assert [(outcome.key, outcome.chapter, outcome.outcome, outcome.bucket) for outcome in outcomes[:2]] == [
+        ("1", 1, "kept_for_plot", "queer"),
+        ("1", 2, "kept_for_plot", "queer"),
+    ]
+    assert _dialog_entries(tmp_path) == set()
+
+
+def test_a_queer_ref_repeated_across_scenes_is_drafted_for_every_occurrence_and_intended_for_each(tmp_path: Path) -> None:
+    claude = _queer_repeat_claude()
+    _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=QUEER_REPEAT_SCENES, lens=QUEER_LENS)
+    [speaker_call] = _speaker_draft_calls(claude)
+    assert _draft_refs(speaker_call) == [(NS_A, "1"), (NS_A, "1")]
+    intents = [
+        (_target(parts), json.loads(_part(parts, "Target line:\n"))["bucket"])
+        for _, parts, schema in claude.calls
+        if schema is INTENT_SCHEMA
+    ]
+    assert intents == [((NS_A, "1"), "queer"), ((NS_A, "1"), "queer")]
+
+
 # One speaker with two trans-candidate lines in one scene, so one trans pick holds both lines. Not game text.
 PAIR_SCENES = (Scene("made-up-scene-pair", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_X, EN_A2, 1))),)
 
