@@ -148,7 +148,7 @@ def test_redirected_is_near_half_and_stable() -> None:
 
 
 def test_selection_order_and_rewritten_set() -> None:
-    assert queering.SELECTIONS == ("queer", "trans", "untouched", "redirect", "not-redirected")
+    assert queering.SELECTIONS == ("queer", "world", "nonbinary", "trans", "untouched", "redirect", "not-redirected")
     assert frozenset({"queer", "redirect"}) == queering.REWRITTEN
 
 
@@ -218,6 +218,13 @@ def test_order_ignores_input_order_and_duplicates() -> None:
 def test_queer_and_trans_salts_are_distinct_and_order_differently() -> None:
     assert queering.QUEER_SALT != queering.TRANS_SALT
     assert queering.order(SYNTH_UNITS, queering.QUEER_SALT) != queering.order(SYNTH_UNITS, queering.TRANS_SALT)
+
+
+def test_every_side_salt_is_distinct_and_orders_the_same_units_differently() -> None:
+    salts = [queering.QUEER_SALT, queering.WORLD_SALT, queering.NONBINARY_SALT, queering.TRANS_SALT]
+    assert len(set(salts)) == len(salts)
+    orders = [queering.order(SYNTH_UNITS, salt) for salt in salts]
+    assert all(orders[i] != orders[j] for i in range(len(orders)) for j in range(i + 1, len(orders)))
 
 
 def test_reason_ids_name_the_two_screen_questions() -> None:

@@ -633,10 +633,10 @@ DRAFT_SCHEMA: dict[str, Any] = {
 PICK_WINDOW = 3
 
 PICK_DRAFT_INSTRUCTIONS = (
-    "Decide for one pick whether a trans detail fits one of its lines. The pick's lines are listed across their scenes, and "
-    "each one comes with a window of the scene lines three before and three after it. Choose at most one line to change: "
-    "add a light, natural trans detail to it, and only where that line allows it, such as a detail that the speaker is "
-    'trans. Otherwise choose no change. Never force a detail, and never write a "she\'s trans" aside. Return JSON with '
+    "Decide for one pick whether its bucket's edit fits one of its lines. The bucket is named below, and its edit is the rule "
+    "labeled [<bucket>-bucket] in the intent rule. The pick's lines are listed across their scenes, and each one comes with a "
+    "window of the scene lines three before and three after it. Choose at most one line to change: make the bucket's edit to "
+    "it, and only where that line allows it. Otherwise choose no change. Never force an edit. Return JSON with "
     "keep, namespace, key, intent and drafts. Set keep to true, namespace, key and intent to empty strings and drafts to "
     "an empty array when no line changes. Otherwise set keep to false, name the chosen line by namespace and key, give the "
     "intent of the change, and give one or more candidate English lines in drafts. Keep every {...} placeholder and every "

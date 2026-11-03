@@ -1724,10 +1724,16 @@ def test_pick_draft_instructions_keep_the_placeholder_tag_and_length_rules_witho
     assert "Keep every {...} placeholder" in PICK_DRAFT_INSTRUCTIONS
     assert "every <text ...>...</> tag" in PICK_DRAFT_INSTRUCTIONS
     assert "Stay within 120% of each English line's length" in PICK_DRAFT_INSTRUCTIONS
-    assert "she's trans" in PICK_DRAFT_INSTRUCTIONS
     assert "nonbinary" not in PICK_DRAFT_INSTRUCTIONS.lower()
     assert "partner" not in PICK_DRAFT_INSTRUCTIONS.lower()
     assert "they/them" not in PICK_DRAFT_INSTRUCTIONS
+
+
+@pytest.mark.parametrize("bucket", ["world", "nonbinary", "trans"])
+def test_pick_draft_instructions_name_no_single_bucket_and_point_at_the_bucket_label(bucket: str) -> None:
+    assert bucket not in PICK_DRAFT_INSTRUCTIONS.lower()
+    assert "-bucket]" in PICK_DRAFT_INSTRUCTIONS
+    assert "she's trans" not in PICK_DRAFT_INSTRUCTIONS
 
 
 def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(tmp_path: Path) -> None:

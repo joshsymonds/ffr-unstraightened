@@ -12,8 +12,8 @@ CORE_LINES = 475
 CORE_ARCS = 20
 REDIRECT_PERCENT = 50
 
-Selection = Literal["queer", "trans", "untouched", "redirect", "not-redirected"]
-SELECTIONS: tuple[Selection, ...] = ("queer", "trans", "untouched", "redirect", "not-redirected")
+Selection = Literal["queer", "world", "nonbinary", "trans", "untouched", "redirect", "not-redirected"]
+SELECTIONS: tuple[Selection, ...] = ("queer", "world", "nonbinary", "trans", "untouched", "redirect", "not-redirected")
 REWRITTEN: frozenset[Selection] = frozenset({"queer", "redirect"})
 
 ANTAGONIST_PREFIXES = ("villain", "antagonis")
@@ -21,6 +21,8 @@ ANTAGONIST_WORDS = frozenset({"nemesis", "archenemy", "archvillain"})
 FLIRT_PREFIX = "flirt"
 
 QUEER_SALT = "queer"
+WORLD_SALT = "world"
+NONBINARY_SALT = "nonbinary"
 TRANS_SALT = "trans"
 ROMANCE = "romance"
 GENDER_ROLES = "gender-roles"
