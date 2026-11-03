@@ -46,6 +46,7 @@ from ffrd.pipeline.stages import (
     JUDGE_SCHEMA,
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
+    TRANS_DRAFT_SCHEMA,
     Ask,
     Bindings,
     Scene,
@@ -466,6 +467,12 @@ def _is_scene_arc(parts: Sequence[str]) -> bool:
     return any(part.startswith("Scene rubric:\n") for part in parts)
 
 
+def _trans_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
+    """The speaker lines a trans draft call is about, under each of its scenes."""
+    scenes = json.loads(_part(parts, "Scenes:\n"))
+    return [(line["namespace"], line["key"]) for scene in scenes for line in scene["speaker_lines"]]
+
+
 def _target(parts: Sequence[str]) -> tuple[str, str]:
     ref = json.loads(_part(parts, "Target line:\n"))
     return ref["namespace"], ref["key"]
@@ -488,6 +495,14 @@ def _line_targets(parts: Sequence[str]) -> list[tuple[tuple[str, str], dict[str,
 
 def _related_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
     return [(ref["namespace"], ref["key"]) for ref in json.loads(_part(parts, "Related lines:\n"))]
+
+
+# A trans answer that keeps its line unchanged, and the change entry a trans answer gives. Not game text.
+TRANS_KEEP: dict[str, Any] = {"keep": True, "intent": "", "drafts": []}
+
+
+def _trans_change(intent: str, drafts: list[str]) -> dict[str, Any]:
+    return {"keep": False, "intent": intent, "drafts": drafts}
 
 
 class FakeClaude:
@@ -513,6 +528,8 @@ class FakeClaude:
         self.drafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         # Answers for draft calls that carry a reviewer note, by the one line they name. Not game text.
         self.redrafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
+        # Answers for trans draft calls, by the one line they name: keep, intent and drafts. A line without an answer is kept. Not game text.
+        self.trans: dict[tuple[str, str], dict[str, Any] | Unfinished | Rejected] = {}
         self.judgments: dict[str, dict[str, bool]] = {}
         self.judge_failures: dict[str, Unfinished | Rejected] = {}
         self.consistent: dict[str, bool] = {}
@@ -578,6 +595,8 @@ class FakeClaude:
                 if isinstance(answer, Unfinished | Rejected):
                     return answer
             return {"drafts": [{"namespace": namespace, "key": key, "drafts": answers[(namespace, key)]} for namespace, key in refs]}
+        if schema is TRANS_DRAFT_SCHEMA:
+            return self._trans(parts)
         if schema is JUDGE_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.judge_failures:
@@ -622,6 +641,16 @@ class FakeClaude:
             if (line["namespace"], line["key"]) in self.flags
         ]
         return {"flagged": flagged}
+
+    def _trans(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
+        lines: list[dict[str, Any]] = []
+        # The model answers each ref once, so a ref repeated across scenes gets one entry. Not game text.
+        for namespace, key in dict.fromkeys(_trans_refs(parts)):
+            answer = self.trans.get((namespace, key), TRANS_KEEP)
+            if isinstance(answer, Unfinished | Rejected):
+                return answer
+            lines.append({"namespace": namespace, "key": key, **answer})
+        return {"lines": lines}
 
     def _rescreen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
         question = json.loads(_part(parts, "Triage question:\n"))["id"]
@@ -4436,7 +4465,14 @@ def test_provisional_scene_lines_leave_out_a_scene_without_a_chapter_one_line(tm
 
 
 # Queering phase 1 fixtures. Made-up speakers, notes and lines. Not game text.
-QUEER_LENS = replace(LENS_OBJ, selection="queering")
+ROMANCE_ID = queering.ROMANCE
+GENDER_ID = queering.GENDER_ROLES
+QUEER_TRIAGE = (
+    TriageQuestion(ROMANCE_ID, "Made-up question one. Not game text."),
+    TriageQuestion(GENDER_ID, "Made-up question two. Not game text."),
+)
+QUEER_LENS = replace(LENS_OBJ, selection="queering", triage=QUEER_TRIAGE)
+QUEER_ALL = replace(QUEER_LENS, queer_share=100)
 NOTES_VILLAIN = {"speaker": "made-up-speaker-a", "notes": "Made-up villain notes. Not game text.", "gender": "made-up-gender-a"}
 NOTES_FLIRT = {"speaker": "made-up-speaker-c", "notes": "Made-up flirt notes. Not game text.", "gender": "made-up-gender-c"}
 QUEER_BIBLE: dict[str, Any] = {"characters": [NOTES_VILLAIN, NOTES_FLIRT], "facts": [], "callbacks": [], "arcs": []}
@@ -4450,16 +4486,16 @@ QUEER_SCENE_A = Scene(
 )
 QUEER_SCENE_B = Scene("made-up-scene-b", (_line(NS_B, "1", "made-up-speaker-b", EN_B1, 2), _line(NS_B, "2", None, EN_B2, 2)))
 QUEER_SCENES = (QUEER_SCENE_A, QUEER_SCENE_B, SCENE_C)
-# Buckets are the run-wide ranking of the three marked units: speaker b, the speakerless line of scene a and the speakerless line of scene c. Not game text.
+# The romance pool is speaker b, the speakerless line of scene a and the speakerless line of scene c. At share 100 every unit is picked. Not game text.
 EXPECTED_QUEER_OUTCOMES = [
     Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
-    Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="trans"),
-    Outcome(NS_A, "3", 1, "made-up-speaker-c", (BETA,), "untouched", None, None, bucket="not-redirected"),
-    Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "2", 1, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "3", 1, "made-up-speaker-c", (GENDER_ID,), "untouched", None, None, bucket="not-redirected"),
+    Outcome(NS_B, "1", 2, "made-up-speaker-b", (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
     Outcome(NS_B, "2", 2, None, (), "untouched", None, None),
-    Outcome(NS_C, "1", None, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
+    Outcome(NS_C, "1", None, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
 ]
-QUEER_FLAGS = {(NS_A, "2"): [ALPHA], (NS_A, "3"): [BETA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
+QUEER_FLAGS = {(NS_A, "2"): [ROMANCE_ID], (NS_A, "3"): [GENDER_ID], (NS_B, "1"): [ROMANCE_ID], (NS_C, "1"): [ROMANCE_ID]}
 SCREEN_ELIGIBLE = "Eligible lines, flag only these:\n"
 
 
@@ -4492,7 +4528,7 @@ def _screen_casts(claude: FakeClaude) -> dict[tuple[str, str], list[tuple[str, o
 def test_queering_screens_only_markable_lines_on_opus_and_writes_each_marked_line_with_its_bucket(tmp_path: Path) -> None:
     claude = _queer_claude()
     jev = FakeJev(JEV_HIGH)
-    outcomes = _run(tmp_path, claude, [], jev=jev, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    outcomes = _run(tmp_path, claude, [], jev=jev, scenes=QUEER_SCENES, lens=QUEER_ALL)
     assert _screens(claude) == [
         (claude_module.OPUS, [{"namespace": NS_A, "key": "2"}, {"namespace": NS_A, "key": "3"}]),
         (claude_module.OPUS, [{"namespace": NS_B, "key": "1"}, {"namespace": NS_B, "key": "2"}]),
@@ -4501,20 +4537,64 @@ def test_queering_screens_only_markable_lines_on_opus_and_writes_each_marked_lin
     assert outcomes == EXPECTED_QUEER_OUTCOMES
     assert jev.calls == []
     assert {model for model, _, schema in claude.calls if schema is SCREEN_SCHEMA} == {claude_module.OPUS}
-    # The bible, one batch per scene, one per phase-two unit (speaker b and the speakerless line of scene a), and the arc judge.
-    assert claude.batches == 7
+    # The bible, one batch per scene, one per phase-two unit (speaker b and the speakerless lines of scenes a and c), and the arc judge.
+    assert claude.batches == 8
     records = [json.loads(line) for line in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()]
     assert ["bucket" in record for record in records] == [outcome.bucket is not None for outcome in EXPECTED_QUEER_OUTCOMES]
 
 
 def test_queering_screen_cast_marks_only_the_flirt_entries_with_a_flirt_key(tmp_path: Path) -> None:
     claude = _queer_claude()
-    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_ALL)
     assert _screen_casts(claude) == {
         (NS_A, "1"): [("made-up-speaker-a", "absent"), ("made-up-speaker-c", True)],
         (NS_B, "1"): [],
         (NS_C, "1"): [],
     }
+
+
+MARKS_FILE = "marks.jsonl"
+
+
+def _marks(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "work" / LENS / MARKS_FILE
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+QUEER_MARKS = [
+    {"run": RUN, "namespace": NS_A, "key": "2", "speaker": None, "chapter": 1, "questions": [ROMANCE_ID]},
+    {"run": RUN, "namespace": NS_A, "key": "3", "speaker": "made-up-speaker-c", "chapter": 1, "questions": [GENDER_ID]},
+    {"run": RUN, "namespace": NS_B, "key": "1", "speaker": "made-up-speaker-b", "chapter": 2, "questions": [ROMANCE_ID]},
+    {"run": RUN, "namespace": NS_C, "key": "1", "speaker": None, "chapter": None, "questions": [ROMANCE_ID]},
+]
+
+
+def test_queering_writes_one_mark_per_marked_line_with_its_questions_and_no_text(tmp_path: Path) -> None:
+    _run(tmp_path, _queer_claude(), [], jev=None, scenes=QUEER_SCENES, lens=QUEER_ALL)
+    assert _marks(tmp_path) == QUEER_MARKS
+    text = (tmp_path / "work" / LENS / MARKS_FILE).read_text(encoding="utf-8")
+    assert not any(english in text for english in (EN_A1, EN_A2, EN_A3, EN_B1, EN_B2, EN_C1))
+
+
+def test_marks_list_a_lines_questions_in_lens_triage_order(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    claude.flags = {**QUEER_FLAGS, (NS_A, "2"): [GENDER_ID, ROMANCE_ID]}
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_ALL)
+    assert _marks(tmp_path)[0]["questions"] == [ROMANCE_ID, GENDER_ID]
+
+
+def test_a_rerun_replaces_the_marks_file(tmp_path: Path) -> None:
+    _run(tmp_path, _queer_claude(), [], jev=None, scenes=QUEER_SCENES, lens=QUEER_ALL)
+    # The same inputs replay the stored screens, so the rerun marks the same lines under its own run id. Appending would double the file.
+    _run(tmp_path, _queer_claude(), [], jev=None, scenes=QUEER_SCENES, lens=QUEER_ALL, run_id="made-up-second-run")
+    assert _marks(tmp_path) == [{**mark, "run": "made-up-second-run"} for mark in QUEER_MARKS]
+
+
+def test_a_lens_without_selection_writes_no_marks_file(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    claude.flags = {(NS_A, "2"): [ALPHA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=LENS_OBJ)
+    assert not (tmp_path / "work" / LENS / MARKS_FILE).exists()
 
 
 def test_unstraightening_screen_cast_carries_no_flirt_key(tmp_path: Path) -> None:
@@ -4562,7 +4642,7 @@ WINDOW_SCENE_THREE = Scene(
 def test_queering_screen_cast_holds_only_the_scene_window_and_keeps_the_flirt_flag(tmp_path: Path) -> None:
     claude = FakeClaude()
     claude.bible = {1: _queer_window_bible(1), 2: _queer_window_bible(2), 3: _queer_window_bible(3)}
-    _run(tmp_path, claude, [], jev=None, scenes=(WINDOW_SCENE_ONE, WINDOW_SCENE_TWO, WINDOW_SCENE_THREE), lens=QUEER_LENS)
+    _run(tmp_path, claude, [], jev=None, scenes=(WINDOW_SCENE_ONE, WINDOW_SCENE_TWO, WINDOW_SCENE_THREE), lens=QUEER_ALL)
     casts: dict[tuple[str, str], list[tuple[str, int, object]]] = {}
     for _, parts, schema in claude.calls:
         if schema is SCREEN_SCHEMA:
@@ -4600,7 +4680,7 @@ def test_queering_scene_without_a_markable_line_makes_no_call_and_leaves_every_l
     claude = _queer_claude()
     claude.bible = {1: {**QUEER_BIBLE, "characters": [NOTES_VILLAIN]}}
     scene = Scene("made-up-scene-a", (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 1),))
-    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(scene,), lens=QUEER_LENS)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(scene,), lens=QUEER_ALL)
     assert _screens(claude) == []
     assert outcomes == [Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None)]
 
@@ -4608,14 +4688,14 @@ def test_queering_scene_without_a_markable_line_makes_no_call_and_leaves_every_l
 def test_queering_failed_screen_leaves_every_line_of_its_scene_unfinished(tmp_path: Path) -> None:
     claude = _queer_claude()
     claude.screen_failure_refs = {(NS_A, "3"): Unfinished("Made-up screen failure. Not game text.")}
-    outcomes = _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_LENS)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=QUEER_ALL)
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "unfinished", None, None),
         Outcome(NS_A, "2", 1, None, (), "unfinished", None, None),
         Outcome(NS_A, "3", 1, "made-up-speaker-c", (), "unfinished", None, None),
-        Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus", bucket="queer"),
+        Outcome(NS_B, "1", 2, "made-up-speaker-b", (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
         Outcome(NS_B, "2", 2, None, (), "untouched", None, None),
-        Outcome(NS_C, "1", None, None, (ALPHA,), "changed", None, "opus", bucket="trans"),
+        Outcome(NS_C, "1", None, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
     ]
 
 
@@ -4636,22 +4716,22 @@ PHASE_SCENES = (
         (_line(NS_B, "1", PHASE_SPEAKER, EN_B1, 2), _line(NS_B, "2", None, EN_B2, 2), _line(NS_B, "3", "made-up-speaker-a", EN_A4, 2)),
     ),
 )
-PHASE_FLAGS = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [ALPHA], (NS_A, "3"): [BETA], (NS_B, "1"): [ALPHA], (NS_B, "2"): [ALPHA]}
+PHASE_FLAGS = {
+    (NS_A, "1"): [ROMANCE_ID],
+    (NS_A, "2"): [ROMANCE_ID],
+    (NS_A, "3"): [GENDER_ID],
+    (NS_B, "1"): [ROMANCE_ID],
+    (NS_B, "2"): [ROMANCE_ID],
+}
 PHASE_DRAFTS = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1], (NS_B, "2"): [OPUS_B2]}
 PHASE_OUTCOMES = [
-    Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "changed", None, "opus", bucket="queer"),
-    Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
-    Outcome(NS_A, "3", 1, "made-up-speaker-c", (BETA,), "untouched", None, None, bucket="not-redirected"),
-    Outcome(NS_B, "1", 2, PHASE_SPEAKER, (ALPHA,), "changed", None, "opus", bucket="queer"),
-    Outcome(NS_B, "2", 2, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "2", 1, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_A, "3", 1, "made-up-speaker-c", (GENDER_ID,), "untouched", None, None, bucket="not-redirected"),
+    Outcome(NS_B, "1", 2, PHASE_SPEAKER, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_B, "2", 2, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
     Outcome(NS_B, "3", 2, "made-up-speaker-a", (), "untouched", None, None),
 ]
-
-
-@pytest.fixture
-def every_line_queer(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Every line outside the core cast and the antagonists lands in the queer bucket, so these fixtures need no hash value. Not game text.
-    monkeypatch.setattr(queering, "QUEER_PERCENT", 100)
 
 
 def _phase_claude() -> FakeClaude:
@@ -4664,7 +4744,7 @@ def _phase_claude() -> FakeClaude:
 
 def _phase(tmp_path: Path, claude: FakeClaude) -> list[Outcome]:
     # FakeRenderer({}) voices nothing, so each draft is its own candidate and every shipped text is the opus draft.
-    return _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=QUEER_LENS)
+    return _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=QUEER_ALL)
 
 
 def _speaker_draft_calls(claude: FakeClaude) -> list[list[str]]:
@@ -4683,7 +4763,7 @@ def _dialog_records(tmp_path: Path) -> dict[tuple[str, str], dict[str, Any]]:
     return records
 
 
-def test_queering_drafts_a_speakers_selected_lines_across_scenes_in_one_call(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_drafts_a_speakers_selected_lines_across_scenes_in_one_call(tmp_path: Path) -> None:
     claude = _phase_claude()
     _phase(tmp_path, claude)
     speaker_calls = _speaker_draft_calls(claude)
@@ -4692,15 +4772,13 @@ def test_queering_drafts_a_speakers_selected_lines_across_scenes_in_one_call(tmp
     assert _draft_refs(speaker_calls[0]) == [(NS_A, "1"), (NS_B, "1")]
 
 
-def test_queering_drafts_a_speakerless_selected_line_once_per_scene(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_drafts_a_speakerless_selected_line_once_per_scene(tmp_path: Path) -> None:
     claude = _phase_claude()
     _phase(tmp_path, claude)
     assert sorted(_draft_refs(parts) for parts in _scene_draft_calls(claude)) == [[(NS_A, "2")], [(NS_B, "2")]]
 
 
-def test_queering_intent_carries_each_selected_lines_bucket_and_untouched_or_not_redirected_lines_get_none(
-    tmp_path: Path, every_line_queer: None
-) -> None:
+def test_queering_intent_carries_each_selected_lines_bucket_and_untouched_or_not_redirected_lines_get_none(tmp_path: Path) -> None:
     claude = _phase_claude()
     _phase(tmp_path, claude)
     intents = sorted(
@@ -4711,7 +4789,7 @@ def test_queering_intent_carries_each_selected_lines_bucket_and_untouched_or_not
     assert intents == [((NS_A, "1"), "queer"), ((NS_A, "2"), "queer"), ((NS_B, "1"), "queer"), ((NS_B, "2"), "queer")]
 
 
-def test_queering_gates_and_writes_each_selected_line_to_dialog_with_its_vanilla_hash(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_gates_and_writes_each_selected_line_to_dialog_with_its_vanilla_hash(tmp_path: Path) -> None:
     claude = _phase_claude()
     outcomes = _phase(tmp_path, claude)
     assert outcomes == PHASE_OUTCOMES
@@ -4723,7 +4801,7 @@ def test_queering_gates_and_writes_each_selected_line_to_dialog_with_its_vanilla
     }
 
 
-def test_queering_redo_listed_selected_line_is_redrafted_with_its_note(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_redo_listed_selected_line_is_redrafted_with_its_note(tmp_path: Path) -> None:
     _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{PHASE_NOTE}"\n')
     claude = _phase_claude()
     claude.redrafts = {(NS_A, "1"): [REDRAFT_A1]}
@@ -4731,48 +4809,54 @@ def test_queering_redo_listed_selected_line_is_redrafted_with_its_note(tmp_path:
     noted = [parts for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA and f"Reviewer note:\n{PHASE_NOTE}" in parts]
     assert [_draft_refs(parts) for parts in noted] == [[(NS_A, "1")]]
     assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
-        NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "changed", None, "opus", redo=True, bucket="queer"
+        NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "changed", None, "opus", redo=True, bucket="queer"
     )
     assert _dialog_records(tmp_path)[(NS_A, "1")]["text"] == REDRAFT_A1
 
 
-def test_queering_intent_keep_stays_unchanged_and_keeps_its_bucket(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_intent_keep_stays_unchanged_and_keeps_its_bucket(tmp_path: Path) -> None:
     claude = _phase_claude()
     claude.keeps = {(NS_A, "1"): "plot"}
     outcomes = _phase(tmp_path, claude)
     assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
-        NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "kept_for_plot", None, None, keep_reason="plot", bucket="queer"
+        NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "kept_for_plot", None, None, keep_reason="plot", bucket="queer"
     )
     assert [_draft_refs(parts) for parts in _speaker_draft_calls(claude)] == [[(NS_B, "1")]]
     assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
 
 
-def test_queering_arc_revert_fails_a_selected_line_and_keeps_its_bucket(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_arc_revert_fails_a_selected_line_and_keeps_its_bucket(tmp_path: Path) -> None:
     claude = _phase_claude()
     claude.bible = {1: PHASE_BIBLE_ONE, 2: {**PHASE_BIBLE_TWO, "arcs": [ARC_A_ENTRY]}}
     claude.arc = [_arc_verdict(False, (NS_A, "1")), _arc_verdict(False, (NS_A, "1"))]
     outcomes = _phase(tmp_path, claude)
-    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "gate_failed", "arc", None, bucket="queer")
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
+        NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "gate_failed", "arc", None, bucket="queer"
+    )
     assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
 
 
-def test_queering_chapter_one_report_is_written_after_phase_two_and_counts_its_changes(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_chapter_one_report_is_written_after_phase_two_and_counts_its_changes(tmp_path: Path) -> None:
     _phase(tmp_path, _phase_claude())
     lines = _c01_path(tmp_path).read_text(encoding="utf-8").splitlines()
     assert lines[0] == "chapter 1: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched"
     assert "total: 2 changed, 0 kept for plot, 0 gate failed, 0 unfinished, 1 untouched" in lines
 
 
-def test_queering_failed_speaker_draft_leaves_each_of_its_lines_unfinished_with_its_bucket(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_failed_speaker_draft_leaves_each_of_its_lines_unfinished_with_its_bucket(tmp_path: Path) -> None:
     claude = _phase_claude()
     claude.drafts[(NS_A, "1")] = Unfinished("Made-up draft failure. Not game text.")
     outcomes = _phase(tmp_path, claude)
-    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), "unfinished", None, None, bucket="queer")
-    assert _outcome_of(outcomes, (NS_B, "1")) == Outcome(NS_B, "1", 2, PHASE_SPEAKER, (ALPHA,), "unfinished", None, None, bucket="queer")
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
+        NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "unfinished", None, None, bucket="queer"
+    )
+    assert _outcome_of(outcomes, (NS_B, "1")) == Outcome(
+        NS_B, "1", 2, PHASE_SPEAKER, (ROMANCE_ID,), "unfinished", None, None, bucket="queer"
+    )
     assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "2")}
 
 
-# A made-up speaker marked in two scenes, with a speakerless marked line in scene a. Over both scenes the speakerless line ranks first and the speaker second, so the speaker is trans on both lines. Scene b alone would rank the speaker queer. Not game text.
+# A made-up speaker marked in two scenes, with a speakerless marked line in scene a. The pool is those two units, and the seeded order picks one of them. Not game text.
 CROSS_SPEAKER = "made-up-speaker-e"
 NOTES_CROSS = {"speaker": CROSS_SPEAKER, "notes": "Made-up quiet guard notes. Not game text.", "gender": "made-up-gender-e"}
 CROSS_SCENES = (
@@ -4784,34 +4868,38 @@ CROSS_SCENES = (
 def test_queering_speaker_marked_in_two_scenes_gets_one_bucket_on_both_lines(tmp_path: Path) -> None:
     claude = FakeClaude()
     claude.bible = {1: {"characters": [NOTES_CROSS], "facts": [], "callbacks": [], "arcs": []}}
-    claude.flags = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [ALPHA], (NS_B, "1"): [ALPHA]}
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_A, "2"): [ROMANCE_ID], (NS_B, "1"): [ROMANCE_ID]}
     claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1]}
-    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=CROSS_SCENES, lens=QUEER_LENS)
+    outcomes = _run(
+        tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=CROSS_SCENES, lens=replace(QUEER_LENS, queer_share=50)
+    )
+    # Share 50 of a pool of two units picks the one the seeded order draws first.
+    first = queering.order([CROSS_SPEAKER, queering.unit(NS_A, "2", None)], queering.QUEER_SALT)[0]
+    speaker = "queer" if first == CROSS_SPEAKER else "untouched"
+    speakerless = "queer" if first != CROSS_SPEAKER else "untouched"
     assert {(outcome.namespace, outcome.key): outcome.bucket for outcome in outcomes} == {
-        (NS_A, "1"): "trans",
-        (NS_A, "2"): "queer",
-        (NS_B, "1"): "trans",
+        (NS_A, "1"): speaker,
+        (NS_A, "2"): speakerless,
+        (NS_B, "1"): speaker,
     }
 
 
 # Queering phase 2 coherence, judge and base tests, on the phase fixtures above. Made-up lines. Not game text.
 def _queer_coherence_claude() -> FakeClaude:
     claude = FakeClaude()
-    claude.flags = {D1: [ALPHA], D2: [ALPHA]}
+    claude.flags = {D1: [ROMANCE_ID], D2: [ROMANCE_ID]}
     claude.drafts = {D1: [OPUS_D1], D2: [OPUS_D2]}
     return claude
 
 
-def test_queering_scene_with_two_selected_changes_reverts_a_line_the_coherence_check_names_on_both_passes(
-    tmp_path: Path, every_line_queer: None
-) -> None:
+def test_queering_scene_with_two_selected_changes_reverts_a_line_the_coherence_check_names_on_both_passes(tmp_path: Path) -> None:
     claude = _queer_coherence_claude()
     claude.coherence = [_verdict(False, D1), _verdict(False, D1)]
-    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=QUEER_LENS)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=QUEER_ALL)
     assert len(_coherence_calls(claude)) == 2
     assert outcomes == [
-        Outcome(NS_C, "2", 3, None, (ALPHA,), "gate_failed", "scene", None, bucket="queer"),
-        Outcome(NS_C, "3", 3, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+        Outcome(NS_C, "2", 3, None, (ROMANCE_ID,), "gate_failed", "scene", None, bucket="queer"),
+        Outcome(NS_C, "3", 3, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
     ]
     assert _dialog_entries(tmp_path) == {D2}
 
@@ -4821,19 +4909,19 @@ def test_queering_scene_with_two_selected_changes_reverts_a_line_the_coherence_c
     [Unfinished("Made-up coherence failure. Not game text."), Rejected("Made-up coherence rejection. Not game text.")],
 )
 def test_queering_scene_with_two_selected_changes_leaves_both_unfinished_when_coherence_fails(
-    tmp_path: Path, every_line_queer: None, failure: Unfinished | Rejected
+    tmp_path: Path, failure: Unfinished | Rejected
 ) -> None:
     claude = _queer_coherence_claude()
     claude.coherence = [failure]
-    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=QUEER_LENS)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=(SCENE_D,), lens=QUEER_ALL)
     assert outcomes == [
-        Outcome(NS_C, "2", 3, None, (ALPHA,), "unfinished", None, None, bucket="queer"),
-        Outcome(NS_C, "3", 3, None, (ALPHA,), "unfinished", None, None, bucket="queer"),
+        Outcome(NS_C, "2", 3, None, (ROMANCE_ID,), "unfinished", None, None, bucket="queer"),
+        Outcome(NS_C, "3", 3, None, (ROMANCE_ID,), "unfinished", None, None, bucket="queer"),
     ]
     assert _dialog_entries(tmp_path) == set()
 
 
-def test_queering_selected_line_candidates_are_judged_before_they_ship(tmp_path: Path, every_line_queer: None) -> None:
+def test_queering_selected_line_candidates_are_judged_before_they_ship(tmp_path: Path) -> None:
     claude = _phase_claude()
     _phase(tmp_path, claude)
     judged = _judged(claude, JUDGE_SCHEMA)
@@ -4850,7 +4938,7 @@ def test_queering_selected_line_candidates_are_judged_before_they_ship(tmp_path:
     [("minimal_change", "gate_failed", "minimal_change"), ("plot", "kept_for_plot", "plot")],
 )
 def test_queering_selected_line_whose_first_candidate_fails_the_judge_is_retried_once_through_its_scene_then_fails_its_gate(
-    tmp_path: Path, every_line_queer: None, failed: str, kind: Literal["gate_failed", "kept_for_plot"], gate: str
+    tmp_path: Path, failed: str, kind: Literal["gate_failed", "kept_for_plot"], gate: str
 ) -> None:
     claude = _phase_claude()
     claude.judgments = {**claude.judgments, OPUS_A1: _judgment(**{failed: False})}
@@ -4864,23 +4952,21 @@ def test_queering_selected_line_whose_first_candidate_fails_the_judge_is_retried
     assert any(part.startswith("Targets:\n") for part in retries[0])
     assert _draft_refs(retries[0]) == [(NS_A, "1")]
     assert any(part == f"The previous candidates failed the {failed} gate. Write candidates that pass it." for part in retries[0])
-    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ALPHA,), kind, gate, None, bucket="queer")
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), kind, gate, None, bucket="queer")
     assert (NS_A, "1") not in _dialog_records(tmp_path)
     assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
 
 
-def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(
-    tmp_path: Path, every_line_queer: None
-) -> None:
+def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
     _base_file(tmp_path, _base_record(NS_A, "2", EN_A2, BASE_A2))
     _base_ledger(tmp_path, [(NS_A, "2", EN_A2, BASE_A2)])
     claude = _phase_claude()
     _seed_base(tmp_path, claude.bible, PHASE_SCENES)
-    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=replace(QUEER_LENS, base=BASE))
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=PHASE_SCENES, lens=replace(QUEER_ALL, base=BASE))
     prompts = [part for _, parts, _ in claude.calls for part in parts]
     assert not any(EN_A2 in text for text in prompts)
     assert any(BASE_A2 in text for text in prompts)
-    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer")
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer")
     chapter_one = tomllib.loads((tmp_path / "repo" / "dialog" / LENS / "chapter-01.toml").read_text(encoding="utf-8"))
     assert list(chapter_one[NS_A]["2"]) == BASE_FIELD_ORDER
     assert chapter_one[NS_A]["2"] == {
@@ -4888,7 +4974,7 @@ def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_has
         "base": vanilla_hash(BASE_A2),
         "text": OPUS_A2,
         "lens": LENS,
-        "reason": [ALPHA],
+        "reason": [ROMANCE_ID],
         "writer": "opus",
         "verdict": "passed",
         "run": RUN,
@@ -4908,13 +4994,13 @@ def test_queering_through_takes_the_core_cast_from_the_whole_game_bible(tmp_path
     monkeypatch.setattr(queering, "CORE_ARCS", 1)
     claude = FakeClaude()
     claude.bible = {2: THROUGH_BIBLE}
-    claude.flags = {(NS_A, "2"): [ALPHA]}
+    claude.flags = {(NS_A, "2"): [ROMANCE_ID]}
     claude.drafts = {(NS_A, "2"): [OPUS_A2]}
-    outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=QUEER_LENS, through=1)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=QUEER_ALL, through=1)
     assert _screens(claude) == [(claude_module.OPUS, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
-        Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+        Outcome(NS_A, "2", 1, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
     ]
 
 
@@ -4928,14 +5014,572 @@ def test_queering_through_chained_run_takes_the_core_cast_from_the_seeded_whole_
     _seed_base(tmp_path, {2: THROUGH_BIBLE}, THROUGH_SCENES)
     claude = FakeClaude()
     claude.bible = {}
-    claude.flags = {(NS_A, "2"): [ALPHA]}
+    claude.flags = {(NS_A, "2"): [ROMANCE_ID]}
     claude.drafts = {(NS_A, "2"): [OPUS_A2]}
-    outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=replace(QUEER_LENS, base=BASE), through=1)
+    outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=replace(QUEER_ALL, base=BASE), through=1)
     assert _screens(claude) == [(claude_module.OPUS, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
-        Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+        Outcome(NS_A, "2", 1, None, (ROMANCE_ID,), "changed", None, "opus", bucket="queer"),
     ]
+
+
+# Selection loop fixtures: made-up speakers with one romance line each in their own scene, and a made-up speaker with a gender-roles line only. Not game text.
+REFILL_X = "made-up-speaker-x"
+REFILL_Y = "made-up-speaker-y"
+REFILL_Z = "made-up-speaker-z"
+REFILL_REF = {REFILL_X: (NS_A, "1"), REFILL_Y: (NS_B, "1"), REFILL_Z: (NS_C, "1")}
+REFILL_DRAFTS = {(NS_A, "1"): [OPUS_A1], (NS_B, "1"): [OPUS_B1], (NS_C, "1"): [OPUS_C1]}
+REFILL_SCENES = (
+    Scene("made-up-scene-x", (_line(NS_A, "1", REFILL_X, EN_A1, 1),)),
+    Scene("made-up-scene-y", (_line(NS_B, "1", REFILL_Y, EN_B1, 2),)),
+    Scene("made-up-scene-z", (_line(NS_C, "1", REFILL_Z, EN_C1, 3),)),
+)
+
+
+def _refill_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE, 2: EMPTY_BIBLE, 3: EMPTY_BIBLE}
+    claude.flags = {ref: [ROMANCE_ID] for ref in REFILL_REF.values()}
+    claude.drafts = dict(REFILL_DRAFTS)
+    return claude
+
+
+def _refill_run(tmp_path: Path, claude: FakeClaude, lens: Lens) -> list[Outcome]:
+    return _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=REFILL_SCENES, lens=lens)
+
+
+def _selection(tmp_path: Path) -> dict[str, Any]:
+    return json.loads((tmp_path / "work" / LENS / report.SELECTION).read_text(encoding="utf-8"))
+
+
+def test_selection_at_share_100_picks_the_whole_pool_in_one_round(tmp_path: Path) -> None:
+    outcomes = _refill_run(tmp_path, _refill_claude(), replace(QUEER_LENS, queer_share=100))
+    assert [(outcome.outcome, outcome.bucket) for outcome in outcomes] == [("changed", "queer")] * 3
+    assert _selection(tmp_path)["queer"] == {
+        "share": 100,
+        "pool": 3,
+        "target": 3,
+        "rounds": [{"tried": 3, "passed": 3}],
+        "achieved": 3,
+        "exhausted": False,
+    }
+
+
+def test_selection_at_share_0_draws_nothing_and_makes_no_draft_call(tmp_path: Path) -> None:
+    claude = _refill_claude()
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0))
+    assert [outcome.bucket for outcome in outcomes] == ["untouched"] * 3
+    assert not any(schema is DRAFT_SCHEMA for _, _, schema in claude.calls)
+    assert _selection(tmp_path)["queer"] == {"share": 0, "pool": 3, "target": 0, "rounds": [], "achieved": 0, "exhausted": False}
+
+
+@pytest.mark.parametrize("failure", ["judge", "keep"])
+def test_selection_refills_past_a_pick_whose_lines_all_fail_or_keep(tmp_path: Path, failure: Literal["judge", "keep"]) -> None:
+    first, second, third = queering.order(list(REFILL_REF), queering.QUEER_SALT)
+    claude = _refill_claude()
+    if failure == "judge":
+        claude.judgments = {REFILL_DRAFTS[REFILL_REF[first]][0]: _judgment(minimal_change=False)}
+    else:
+        claude.keeps = {REFILL_REF[first]: "plot"}
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=34))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    if failure == "judge":
+        assert (by_speaker[first].outcome, by_speaker[first].gate) == ("gate_failed", "minimal_change")
+    else:
+        assert by_speaker[first].outcome == "kept_for_plot"
+    assert (by_speaker[second].outcome, by_speaker[second].bucket) == ("changed", "queer")
+    assert by_speaker[third].bucket == "untouched"
+    assert _selection(tmp_path)["queer"] == {
+        "share": 34,
+        "pool": 3,
+        "target": 1,
+        "rounds": [{"tried": 1, "passed": 0}, {"tried": 1, "passed": 1}],
+        "achieved": 1,
+        "exhausted": False,
+    }
+
+
+def test_selection_stops_when_the_pool_runs_out_and_marks_it_exhausted(tmp_path: Path) -> None:
+    claude = _refill_claude()
+    claude.judgments = {text: _judgment(minimal_change=False) for texts in REFILL_DRAFTS.values() for text in texts}
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=67))
+    assert [outcome.outcome for outcome in outcomes] == ["gate_failed"] * 3
+    assert _selection(tmp_path)["queer"] == {
+        "share": 67,
+        "pool": 3,
+        "target": 2,
+        "rounds": [{"tried": 2, "passed": 0}, {"tried": 1, "passed": 0}],
+        "achieved": 0,
+        "exhausted": True,
+    }
+
+
+TRANS_INTENT = "Made-up trans intent. Not game text."
+TRANS_DRAFTS = {
+    REFILL_X: "Made-up trans rewrite of x. Not game text.",
+    REFILL_Y: "Made-up trans rewrite of y. Not game text.",
+    REFILL_Z: "Made-up trans rewrite of z. Not game text.",
+}
+
+
+def _trans_refill_claude() -> FakeClaude:
+    """The refill claude with every speaker's trans answer a change. Each speaker's drafts are its own trans text, so a retry returns the same text. Not game text."""
+    claude = _refill_claude()
+    claude.drafts = {ref: [TRANS_DRAFTS[speaker]] for speaker, ref in REFILL_REF.items()}
+    claude.trans = {ref: _trans_change(TRANS_INTENT, [TRANS_DRAFTS[speaker]]) for speaker, ref in REFILL_REF.items()}
+    return claude
+
+
+def _trans_calls(claude: FakeClaude) -> list[list[str]]:
+    return [parts for _, parts, schema in claude.calls if schema is TRANS_DRAFT_SCHEMA]
+
+
+def test_trans_pick_follows_the_trans_seeded_order_and_gates_with_the_answers_intent_and_drafts(tmp_path: Path) -> None:
+    trans_first = queering.order(list(REFILL_REF), queering.TRANS_SALT)[0]
+    assert trans_first != queering.order(list(REFILL_REF), queering.QUEER_SALT)[0]
+    claude = _trans_refill_claude()
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0, trans_share=34))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker[trans_first].outcome, by_speaker[trans_first].bucket) == ("changed", "trans")
+    assert [by_speaker[speaker].bucket for speaker in REFILL_REF if speaker != trans_first] == ["untouched", "untouched"]
+    # A trans line gets no per-line intent and no first draft call. Its judge reads the answer's intent.
+    assert _intended_refs(claude) == []
+    assert _first_drafted_refs(claude) == []
+    assert {_part(parts, "Intent:\n") for _, parts, schema in claude.calls if schema is JUDGE_SCHEMA} == {TRANS_INTENT}
+    assert _selection(tmp_path)["trans"] == {
+        "share": 34,
+        "pool": 3,
+        "target": 1,
+        "rounds": [{"tried": 1, "passed": 1}],
+        "achieved": 1,
+        "exhausted": False,
+    }
+
+
+def test_trans_draft_is_one_call_per_pick_across_its_scenes_and_marks_its_unmarked_lines_trans(tmp_path: Path) -> None:
+    scenes = (
+        Scene("made-up-scene-x", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_Y, EN_A2, 1))),
+        Scene("made-up-scene-y", (_line(NS_B, "1", REFILL_X, EN_B1, 2),)),
+    )
+    claude = FakeClaude()
+    outcomes = _run(
+        tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=scenes, lens=replace(QUEER_LENS, queer_share=0, trans_share=100)
+    )
+    calls = _trans_calls(claude)
+    assert len(calls) == 2
+    assert {tuple(sorted(_trans_refs(parts))) for parts in calls} == {((NS_A, "1"), (NS_B, "1")), ((NS_A, "2"),)}
+    # No speaker here is flagged, so every line is unmarked, and each still takes the trans bucket of its pick.
+    assert [(outcome.speaker, outcome.bucket) for outcome in outcomes] == [(REFILL_X, "trans"), (REFILL_Y, "trans"), (REFILL_X, "trans")]
+
+
+# Made-up scenes for one trans pick whose line repeats across two scenes, with a second speaker in the later one. Not game text.
+REPEATED_TRANS_SCENES = (
+    Scene("made-up-scene-x-early", (_line(NS_A, "1", REFILL_X, EN_A1, 1),)),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2), _line(NS_B, "1", REFILL_Y, EN_B1, 2))),
+)
+
+
+def test_a_trans_pick_whose_ref_repeats_across_scenes_takes_one_answer_for_every_occurrence(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=REPEATED_TRANS_SCENES,
+        lens=replace(QUEER_LENS, queer_share=0, trans_share=100),
+    )
+    assert [(outcome.speaker, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, "changed", "trans"),
+        (REFILL_X, "changed", "trans"),
+        (REFILL_Y, "changed", "trans"),
+    ]
+    # The repeated ref is named once in its pick's call, so the one answer matches the call's expected lines.
+    assert sorted(tuple(_trans_refs(parts)) for parts in _trans_calls(claude)) == [((NS_A, "1"),), ((NS_B, "1"),)]
+    assert _selection(tmp_path)["trans"]["achieved"] == 2
+
+
+# Made-up scenes where the repeated trans ref shares its first scene with a second change, so that scene's coherence can revert it. Not game text.
+COHERENT_TRANS_SCENES = (
+    Scene("made-up-scene-x-early", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_C, "1", REFILL_Z, EN_C1, 1))),
+    Scene("made-up-scene-x-late", (_line(NS_A, "1", REFILL_X, EN_A1, 2),)),
+)
+
+
+def test_coherence_revert_of_a_repeated_trans_ref_in_its_first_scene_fails_every_occurrence(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    claude.coherence = [_verdict(False, (NS_A, "1")), _verdict(False, (NS_A, "1"))]
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=COHERENT_TRANS_SCENES,
+        lens=replace(QUEER_LENS, queer_share=0, trans_share=100),
+    )
+    assert [(outcome.speaker, outcome.outcome, outcome.gate, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, "gate_failed", "scene", "trans"),
+        (REFILL_Z, "changed", None, "trans"),
+        (REFILL_X, "gate_failed", "scene", "trans"),
+    ]
+    assert _dialog_entries(tmp_path) == {(NS_C, "1")}
+
+
+def test_trans_draft_failure_leaves_each_of_the_picks_lines_unfinished_with_the_trans_bucket(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    claude.trans[REFILL_REF[REFILL_X]] = Unfinished("Made-up transport failure. Not game text.")
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0, trans_share=100))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker[REFILL_X].outcome, by_speaker[REFILL_X].bucket) == ("unfinished", "trans")
+    assert [(by_speaker[speaker].outcome, by_speaker[speaker].bucket) for speaker in (REFILL_Y, REFILL_Z)] == [("changed", "trans")] * 2
+    assert _selection(tmp_path)["trans"] == {
+        "share": 100,
+        "pool": 3,
+        "target": 3,
+        "rounds": [{"tried": 3, "passed": 2}],
+        "achieved": 2,
+        "exhausted": True,
+    }
+
+
+def test_kept_trans_line_stays_unchanged_and_a_pick_with_no_surviving_change_is_refilled(tmp_path: Path) -> None:
+    first, second, third = queering.order(list(REFILL_REF), queering.TRANS_SALT)
+    claude = _trans_refill_claude()
+    claude.trans[REFILL_REF[first]] = TRANS_KEEP
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0, trans_share=34))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker[first].outcome, by_speaker[first].bucket) == ("untouched", "trans")
+    assert (by_speaker[second].outcome, by_speaker[second].bucket) == ("changed", "trans")
+    assert by_speaker[third].bucket == "untouched"
+    assert REFILL_REF[first] not in _judged_refs(claude)
+    assert _selection(tmp_path)["trans"] == {
+        "share": 34,
+        "pool": 3,
+        "target": 1,
+        "rounds": [{"tried": 1, "passed": 0}, {"tried": 1, "passed": 1}],
+        "achieved": 1,
+        "exhausted": False,
+    }
+
+
+def test_trans_pick_whose_changes_all_fail_the_judge_is_refilled(tmp_path: Path) -> None:
+    first, second, _ = queering.order(list(REFILL_REF), queering.TRANS_SALT)
+    claude = _trans_refill_claude()
+    claude.judgments = {TRANS_DRAFTS[first]: _judgment(minimal_change=False)}
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0, trans_share=34))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker[first].outcome, by_speaker[first].gate, by_speaker[first].bucket) == ("gate_failed", "minimal_change", "trans")
+    assert (by_speaker[second].outcome, by_speaker[second].bucket) == ("changed", "trans")
+    assert _selection(tmp_path)["trans"] == {
+        "share": 34,
+        "pool": 3,
+        "target": 1,
+        "rounds": [{"tried": 1, "passed": 0}, {"tried": 1, "passed": 1}],
+        "achieved": 1,
+        "exhausted": False,
+    }
+
+
+def test_trans_pool_that_runs_out_is_marked_exhausted(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    claude.judgments = {text: _judgment(minimal_change=False) for text in TRANS_DRAFTS.values()}
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0, trans_share=67))
+    assert [(outcome.outcome, outcome.bucket) for outcome in outcomes] == [("gate_failed", "trans")] * 3
+    assert _selection(tmp_path)["trans"] == {
+        "share": 67,
+        "pool": 3,
+        "target": 2,
+        "rounds": [{"tried": 2, "passed": 0}, {"tried": 1, "passed": 0}],
+        "achieved": 0,
+        "exhausted": True,
+    }
+
+
+def test_trans_share_100_at_queer_share_0_picks_every_eligible_character(tmp_path: Path) -> None:
+    outcomes = _refill_run(tmp_path, _trans_refill_claude(), replace(QUEER_LENS, queer_share=0, trans_share=100))
+    assert [(outcome.outcome, outcome.bucket) for outcome in outcomes] == [("changed", "trans")] * 3
+    assert _selection(tmp_path)["trans"] == {
+        "share": 100,
+        "pool": 3,
+        "target": 3,
+        "rounds": [{"tried": 3, "passed": 3}],
+        "achieved": 3,
+        "exhausted": False,
+    }
+
+
+def test_trans_never_draws_a_queer_pick_and_its_exhausted_pool_is_reported(tmp_path: Path) -> None:
+    queer_first = queering.order(list(REFILL_REF), queering.QUEER_SALT)[0]
+    claude = _trans_refill_claude()
+    outcomes = _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=34, trans_share=100))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker[queer_first].outcome, by_speaker[queer_first].bucket) == ("changed", "queer")
+    others = [speaker for speaker in REFILL_REF if speaker != queer_first]
+    assert [(by_speaker[speaker].outcome, by_speaker[speaker].bucket) for speaker in others] == [("changed", "trans")] * 2
+    assert REFILL_REF[queer_first] not in [ref for parts in _trans_calls(claude) for ref in _trans_refs(parts)]
+    selection = _selection(tmp_path)
+    assert selection["queer"]["achieved"] == 1
+    assert selection["trans"] == {
+        "share": 100,
+        "pool": 3,
+        "target": 3,
+        "rounds": [{"tried": 2, "passed": 2}],
+        "achieved": 2,
+        "exhausted": True,
+    }
+
+
+def test_a_trans_pick_is_not_redrafted_in_a_later_round(tmp_path: Path) -> None:
+    trans_order = queering.order(list(REFILL_REF), queering.TRANS_SALT)
+    claude = _trans_refill_claude()
+    claude.trans[REFILL_REF[trans_order[0]]] = TRANS_KEEP
+    claude.trans[REFILL_REF[trans_order[1]]] = TRANS_KEEP
+    _refill_run(tmp_path, claude, replace(QUEER_LENS, queer_share=0, trans_share=67))
+    assert _selection(tmp_path)["trans"]["rounds"] == [{"tried": 2, "passed": 0}, {"tried": 1, "passed": 1}]
+    # Round two drafts only the new pick. The two picks that kept their lines in round one are not drafted again.
+    assert sorted(tuple(_trans_refs(parts)) for parts in _trans_calls(claude)) == sorted((REFILL_REF[speaker],) for speaker in trans_order)
+
+
+# Later-round fixtures: made-up speakers with romance lines in made-up scenes. Round one picks the first two units in the seeded order and round two the third, at share 67 of three. Not game text.
+LATER_SPEAKERS = ["made-up-speaker-x", "made-up-speaker-y", "made-up-speaker-z"]
+LATER_DRAFTS = {(NS_A, "1"): OPUS_A1, (NS_A, "2"): OPUS_A2, (NS_A, "3"): OPUS_A3, (NS_B, "1"): OPUS_B1, (NS_C, "1"): OPUS_C1}
+
+
+def _later_claude(refs: Sequence[tuple[str, str]], bible: dict[int, dict[str, Any] | Unfinished | Rejected]) -> FakeClaude:
+    claude = FakeClaude()
+    claude.bible = bible
+    claude.flags = {ref: [ROMANCE_ID] for ref in refs}
+    claude.drafts = {ref: [LATER_DRAFTS[ref]] for ref in refs}
+    return claude
+
+
+def _arc_bible(characters: list[str], beat: tuple[str, str]) -> dict[int, dict[str, Any] | Unfinished | Rejected]:
+    arc = {
+        "id": ARC_A,
+        "characters": characters,
+        "state": "Made-up state of arc a. Not game text.",
+        "beats": [{"line": {"namespace": beat[0], "key": beat[1]}, "kind": "setup", "earned": True}],
+    }
+    return {1: {**EMPTY_BIBLE, "arcs": [arc]}, 2: EMPTY_BIBLE, 3: EMPTY_BIBLE}
+
+
+def _later_run(tmp_path: Path, claude: FakeClaude, scenes: Sequence[Scene]) -> list[Outcome]:
+    return _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=scenes, lens=replace(QUEER_LENS, queer_share=67))
+
+
+def _intended_refs(claude: FakeClaude) -> list[tuple[str, str]]:
+    return [_target(parts) for _, parts, schema in claude.calls if schema is INTENT_SCHEMA]
+
+
+def _first_drafted_refs(claude: FakeClaude) -> list[tuple[str, str]]:
+    return [
+        ref
+        for _, parts, schema in claude.calls
+        if schema is DRAFT_SCHEMA and not any(part.startswith("The previous candidates failed") for part in parts)
+        for ref in _draft_refs(parts)
+    ]
+
+
+def _retried_refs(claude: FakeClaude) -> list[tuple[str, str]]:
+    return [
+        ref
+        for _, parts, schema in claude.calls
+        if schema is DRAFT_SCHEMA and any(part.startswith("The previous candidates failed") for part in parts)
+        for ref in _draft_refs(parts)
+    ]
+
+
+def _judged_refs(claude: FakeClaude) -> list[tuple[str, str]]:
+    return [ref for ref, _ in _judged(claude, JUDGE_SCHEMA)]
+
+
+def _coherence_rewrites(claude: FakeClaude) -> list[list[tuple[str, str]]]:
+    """The rewritten lines of each scene coherence call, in call order."""
+    return [
+        [(line["namespace"], line["key"]) for line in json.loads(_part(parts, "Scene lines:\n")) if line["rewrite"] is not None]
+        for _, parts, schema in claude.calls
+        if schema is coherence.SCHEMA
+    ]
+
+
+def _arc_ids(claude: FakeClaude) -> list[str]:
+    return [json.loads(_part(parts, "Arc:\n"))["id"] for _, parts, schema in claude.calls if schema is arcs.SCHEMA]
+
+
+def test_later_round_does_not_rejudge_an_earlier_pick_that_no_new_pick_touches(tmp_path: Path) -> None:
+    # The first pick has two lines in one scene and an arc of its own. The second pick's judge fails, and the third pick shares no scene or arc with anyone.
+    first, second, third = queering.order(LATER_SPEAKERS, queering.QUEER_SALT)
+    scenes = (
+        Scene("made-up-scene-x", (_line(NS_A, "1", first, EN_A1, 1), _line(NS_A, "2", first, EN_A2, 1))),
+        Scene("made-up-scene-y", (_line(NS_B, "1", second, EN_B1, 2),)),
+        Scene("made-up-scene-z", (_line(NS_C, "1", third, EN_C1, 3),)),
+    )
+    claude = _later_claude([(NS_A, "1"), (NS_A, "2"), (NS_B, "1"), (NS_C, "1")], _arc_bible([first], (NS_A, "1")))
+    claude.judgments = {OPUS_B1: _judgment(minimal_change=False)}
+    outcomes = _later_run(tmp_path, claude, scenes)
+    assert _selection(tmp_path)["queer"]["rounds"] == [{"tried": 2, "passed": 1}, {"tried": 1, "passed": 1}]
+    assert [(outcome.speaker, outcome.outcome) for outcome in outcomes] == [
+        (first, "changed"),
+        (first, "changed"),
+        (second, "gate_failed"),
+        (third, "changed"),
+    ]
+    # Each pick's lines are intended once and judged once across both rounds. The failed pick is drafted once and gets its one gate retry, both in round one.
+    assert sorted(_intended_refs(claude)) == sorted([(NS_A, "1"), (NS_A, "2"), (NS_B, "1"), (NS_C, "1")])
+    assert sorted(_first_drafted_refs(claude)) == sorted([(NS_A, "1"), (NS_A, "2"), (NS_B, "1"), (NS_C, "1")])
+    assert _retried_refs(claude) == [(NS_B, "1")]
+    assert sorted(_judged_refs(claude)) == sorted([(NS_A, "1"), (NS_A, "2"), (NS_B, "1"), (NS_C, "1")])
+    # The first scene and the first arc are checked once, in round one, and not again when the third pick arrives.
+    assert _coherence_rewrites(claude) == [[(NS_A, "1"), (NS_A, "2")]]
+    assert _arc_ids(claude) == [ARC_A]
+
+
+def test_later_round_rejudges_a_scene_that_a_new_pick_shares(tmp_path: Path) -> None:
+    # The third pick's line sits in the first pick's scene, so the scene's coherence check runs again with it. The arc holds the first pick alone.
+    first, second, third = queering.order(LATER_SPEAKERS, queering.QUEER_SALT)
+    scenes = (
+        Scene("made-up-scene-x", (_line(NS_A, "1", first, EN_A1, 1), _line(NS_A, "2", first, EN_A2, 1), _line(NS_A, "3", third, EN_A3, 1))),
+        Scene("made-up-scene-y", (_line(NS_B, "1", second, EN_B1, 2),)),
+    )
+    claude = _later_claude([(NS_A, "1"), (NS_A, "2"), (NS_A, "3"), (NS_B, "1")], _arc_bible([first], (NS_A, "1")))
+    claude.judgments = {OPUS_B1: _judgment(minimal_change=False)}
+    _later_run(tmp_path, claude, scenes)
+    assert _selection(tmp_path)["queer"]["rounds"] == [{"tried": 2, "passed": 1}, {"tried": 1, "passed": 1}]
+    assert _coherence_rewrites(claude) == [[(NS_A, "1"), (NS_A, "2")], [(NS_A, "1"), (NS_A, "2"), (NS_A, "3")]]
+    assert _arc_ids(claude) == [ARC_A]
+
+
+def test_later_round_rejudges_an_arc_that_a_new_pick_shares(tmp_path: Path) -> None:
+    # The third pick speaks in the arc with the first pick, so the arc judge runs again with its line. The scenes hold one pick each.
+    first, second, third = queering.order(LATER_SPEAKERS, queering.QUEER_SALT)
+    scenes = (
+        Scene("made-up-scene-x", (_line(NS_A, "1", first, EN_A1, 1), _line(NS_A, "2", first, EN_A2, 1))),
+        Scene("made-up-scene-y", (_line(NS_B, "1", second, EN_B1, 2),)),
+        Scene("made-up-scene-z", (_line(NS_C, "1", third, EN_C1, 3),)),
+    )
+    claude = _later_claude([(NS_A, "1"), (NS_A, "2"), (NS_B, "1"), (NS_C, "1")], _arc_bible([first, third], (NS_A, "1")))
+    claude.judgments = {OPUS_B1: _judgment(minimal_change=False)}
+    _later_run(tmp_path, claude, scenes)
+    assert _selection(tmp_path)["queer"]["rounds"] == [{"tried": 2, "passed": 1}, {"tried": 1, "passed": 1}]
+    assert _coherence_rewrites(claude) == [[(NS_A, "1"), (NS_A, "2")]]
+    assert _arc_ids(claude) == [ARC_A, ARC_A]
+
+
+def test_gender_roles_only_lines_never_select(tmp_path: Path) -> None:
+    scene = Scene(
+        "made-up-scene-gender",
+        (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_B, "1", "made-up-speaker-g", EN_B1, 1)),
+    )
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE}
+    claude.flags = {(NS_A, "1"): [ROMANCE_ID], (NS_B, "1"): [GENDER_ID]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_B, "1"): [OPUS_B1]}
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=(scene,), lens=replace(QUEER_LENS, queer_share=100))
+    assert [(outcome.speaker, outcome.outcome, outcome.bucket) for outcome in outcomes] == [
+        (REFILL_X, "changed", "queer"),
+        ("made-up-speaker-g", "untouched", "untouched"),
+    ]
+    assert not any((NS_B, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
+    selection = _selection(tmp_path)
+    assert selection["gender_roles"] == {"lines": 1, "characters": 1}
+    assert selection["queer"]["pool"] == 1
+
+
+# Selection counts fixtures: a flirt, an antagonist, a plain speaker, a gender-roles speaker and a speakerless romance line. Made-up speakers, notes and lines. Not game text.
+COUNT_FLIRT = "made-up-speaker-f"
+COUNT_VILLAIN = "made-up-speaker-v"
+COUNT_GENDER = "made-up-speaker-g"
+COUNT_PLAIN = "made-up-speaker-k"
+# A chapter's bible names only the speakers that speak in that chapter.
+COUNT_BIBLE_ONE: dict[str, Any] = {
+    "characters": [
+        {"speaker": REFILL_X, "notes": "Made-up quiet notes. Not game text.", "gender": "made-up-gender-x"},
+        {"speaker": COUNT_FLIRT, "notes": "Made-up flirt notes. Not game text.", "gender": "made-up-gender-f"},
+        {"speaker": COUNT_GENDER, "notes": "Made-up quiet notes. Not game text.", "gender": "made-up-gender-g"},
+    ],
+    "facts": [],
+    "callbacks": [],
+    "arcs": [],
+}
+COUNT_BIBLE_TWO: dict[str, Any] = {
+    "characters": [
+        {"speaker": REFILL_X, "notes": "Made-up quiet notes. Not game text.", "gender": "made-up-gender-x"},
+        {"speaker": COUNT_VILLAIN, "notes": "Made-up villain notes. Not game text.", "gender": "made-up-gender-v"},
+        {"speaker": COUNT_PLAIN, "notes": "Made-up quiet notes. Not game text.", "gender": "made-up-gender-k"},
+    ],
+    "facts": [],
+    "callbacks": [],
+    "arcs": [],
+}
+COUNT_SCENES = (
+    Scene(
+        "made-up-scene-count-one",
+        (
+            _line(NS_A, "1", REFILL_X, EN_A1, 1),
+            _line(NS_A, "2", None, EN_A2, 1),
+            _line(NS_A, "3", COUNT_FLIRT, EN_A3, 1),
+            _line(NS_A, "4", COUNT_GENDER, EN_A4, 1),
+        ),
+    ),
+    Scene(
+        "made-up-scene-count-two",
+        (
+            _line(NS_B, "1", REFILL_X, EN_B1, 2),
+            _line(NS_B, "2", COUNT_VILLAIN, EN_B2, 2),
+            _line(NS_B, "3", COUNT_PLAIN, EN_A4, 2),
+        ),
+    ),
+)
+
+
+def test_selection_counts_are_exact(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.bible = {1: COUNT_BIBLE_ONE, 2: COUNT_BIBLE_TWO}
+    claude.flags = {
+        (NS_A, "1"): [ROMANCE_ID],
+        (NS_A, "2"): [ROMANCE_ID],
+        (NS_A, "3"): [ROMANCE_ID],
+        (NS_A, "4"): [GENDER_ID],
+        (NS_B, "1"): [ROMANCE_ID],
+    }
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1]}
+    # Every eligible character's lines change on the trans side, so the first trans pick passes whichever speaker the queer side leaves.
+    claude.trans = {
+        (NS_A, "1"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
+        (NS_B, "1"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
+        (NS_A, "4"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
+        (NS_B, "3"): _trans_change(TRANS_INTENT, [TRANS_DRAFTS[REFILL_X]]),
+    }
+    _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=COUNT_SCENES,
+        lens=replace(QUEER_LENS, queer_share=50, trans_share=34),
+    )
+    assert _selection(tmp_path) == {
+        "romance": {"lines": 4, "characters": 2, "speakerless": 1},
+        "gender_roles": {"lines": 1, "characters": 1},
+        "eligible_characters": 3,
+        "queer": {"share": 50, "pool": 2, "target": 1, "rounds": [{"tried": 1, "passed": 1}], "achieved": 1, "exhausted": False},
+        "trans": {"share": 34, "pool": 3, "target": 1, "rounds": [{"tried": 1, "passed": 1}], "achieved": 1, "exhausted": False},
+    }
+
+
+def test_flirt_line_on_the_redirect_half_keeps_the_redirect_bucket(tmp_path: Path) -> None:
+    key = next(str(k) for k in range(200) if queering.redirected(NS_A, str(k)))
+    claude = FakeClaude()
+    claude.bible = {1: {"characters": [NOTES_FLIRT], "facts": [], "callbacks": [], "arcs": []}}
+    claude.flags = {(NS_A, key): [ROMANCE_ID]}
+    claude.drafts = {(NS_A, key): [OPUS_A1]}
+    scene = Scene("made-up-scene-flirt", (_line(NS_A, key, NOTES_FLIRT["speaker"], EN_A1, 1),))
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=(scene,), lens=QUEER_LENS)
+    assert [outcome.bucket for outcome in outcomes] == ["redirect"]
 
 
 BASE_STORE_KEYS = [

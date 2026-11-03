@@ -1,7 +1,9 @@
 import argparse
+import copy
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,8 +47,9 @@ DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|char
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 QUEERING_LINE = (
-    r"queering (marked: [0-9]+|marked speakers: [0-9]+, no speaker: [0-9]+|bucket (queer|trans|untouched): [0-9]+"
-    r"|speakers (queer|trans|untouched): [0-9]+, no speaker: [0-9]+|chosen lines: [0-9]+, converted: [0-9]+"
+    r"queering (romance: [0-9]+ lines, [0-9]+ characters, [0-9]+ speakerless|gender roles: [0-9]+ lines, [0-9]+ characters"
+    r"|eligible characters: [0-9]+|(queer|trans) target: [0-9]+ \([0-9]+% of [0-9]+ = [0-9]+\.[0-9]{2}\)"
+    r"|(queer|trans) round [0-9]+: tried [0-9]+, passed [0-9]+|(queer|trans) achieved: [0-9]+ of [0-9]+(, pool exhausted)?"
     r"|flirt marked: [0-9]+, redirect half: [0-9]+"
     r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
 )
@@ -190,6 +193,13 @@ def _write_recall(repo: Path, content: bytes = RECALL_VALID) -> Path:
     path = repo / "work" / LENS / "recall.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
+    return path.resolve()
+
+
+def _write_selection(repo: Path, content: bytes | None = None) -> Path:
+    path = repo / "work" / LENS / report.SELECTION
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(SELECTION_VALID if content is None else content)
     return path.resolve()
 
 
@@ -381,16 +391,44 @@ QUEERING_RECORDS = (
     _record(chapter=2, speaker=SPEAKER_TEN, outcome="untouched"),
 )
 
-EXPECTED_QUEERING = [
-    "queering marked: 9",
-    "queering marked speakers: 2, no speaker: 1",
-    "queering bucket queer: 4",
-    "queering bucket trans: 1",
-    "queering bucket untouched: 1",
-    "queering speakers queer: 2, no speaker: 1",
-    "queering speakers trans: 1, no speaker: 0",
-    "queering speakers untouched: 1, no speaker: 0",
-    "queering chosen lines: 5, converted: 2",
+# Made-up selection counts: queer took two rounds and reached its target; trans ran out of pool short
+# of its target. Not game text.
+SELECTION_OBJECT: dict[str, object] = {
+    "romance": {"lines": 4, "characters": 3, "speakerless": 1},
+    "gender_roles": {"lines": 2, "characters": 2},
+    "eligible_characters": 5,
+    "queer": {
+        "share": 40,
+        "pool": 7,
+        "target": 3,
+        "rounds": [{"tried": 4, "passed": 2}, {"tried": 3, "passed": 1}],
+        "achieved": 3,
+        "exhausted": False,
+    },
+    "trans": {
+        "share": 60,
+        "pool": 4,
+        "target": 2,
+        "rounds": [{"tried": 2, "passed": 1}, {"tried": 2, "passed": 0}],
+        "achieved": 1,
+        "exhausted": True,
+    },
+}
+SELECTION_VALID = _bytes(SELECTION_OBJECT)
+EXPECTED_SELECTION = [
+    "queering romance: 4 lines, 3 characters, 1 speakerless",
+    "queering gender roles: 2 lines, 2 characters",
+    "queering eligible characters: 5",
+    "queering queer target: 3 (40% of 7 = 2.80)",
+    "queering queer round 1: tried 4, passed 2",
+    "queering queer round 2: tried 3, passed 1",
+    "queering queer achieved: 3 of 3",
+    "queering trans target: 2 (60% of 4 = 2.40)",
+    "queering trans round 1: tried 2, passed 1",
+    "queering trans round 2: tried 2, passed 0",
+    "queering trans achieved: 1 of 2, pool exhausted",
+]
+EXPECTED_OUTCOME_LINES = [
     "queering flirt marked: 3, redirect half: 2",
     "queering changed queer: 1",
     "queering changed trans: 1",
@@ -401,9 +439,12 @@ EXPECTED_QUEERING = [
 ]
 
 
-def test_queering_block_prints_exact_counts_after_redo_and_before_recall(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_queering_block_prints_selection_counts_and_outcomes_after_redo_and_before_recall(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
     _write(repo, _lines(*QUEERING_RECORDS))
+    _write_selection(repo)
     _write_arcs(repo)
     _write_recall(repo)
     _invoke()
@@ -413,37 +454,82 @@ def test_queering_block_prints_exact_counts_after_redo_and_before_recall(repo: P
     lines = out.splitlines()
     redo = lines.index("redo: 0 listed, 0 changed, 0 gate failed")
     assert lines[redo + 1 :] == [
-        *EXPECTED_QUEERING,
+        *EXPECTED_SELECTION,
+        *EXPECTED_OUTCOME_LINES,
         "recall made-up-first-id: 4 disagreements, 1 confirmed",
         "recall made-up-second-id: 0 disagreements, 0 confirmed",
     ]
 
 
-# Made-up outcomes for the marked-speaker and chosen-line edges: a speaker seen only in the redirect
-# bucket does not count, a speaker seen only in the untouched bucket does, a chosen line with no
-# speaker does, and a redirect line is never chosen. Not game text.
-QUEERING_EDGE_RECORDS = (
-    _record(chapter=1, speaker=SPEAKER_TWO, outcome="changed", bucket="redirect"),
-    _record(chapter=1, speaker=SPEAKER_TEN, outcome="untouched", bucket="untouched"),
-    _record(chapter=1, speaker=None, outcome="changed", bucket="trans"),
-    _record(chapter=1, speaker=None, outcome="untouched", bucket="redirect"),
-)
-
-
-def test_marked_speakers_and_chosen_lines_count_only_their_buckets(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_missing_selection_file_fails_naming_the_file(repo: Path) -> None:
     (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
-    _write(repo, _lines(*QUEERING_EDGE_RECORDS))
+    _write(repo, _lines(*QUEERING_RECORDS))
     _write_arcs(repo)
     _write_recall(repo)
-    _invoke()
-    out = capsys.readouterr().out
-    for line in out.splitlines():
-        assert LINE.fullmatch(line), line
-    lines = out.splitlines()
-    marked = lines.index("queering marked: 4")
-    assert lines[marked + 1] == "queering marked speakers: 1, no speaker: 1"
-    untouched = lines.index("queering speakers untouched: 1, no speaker: 0")
-    assert lines[untouched + 1] == "queering chosen lines: 1, converted: 1"
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert "selection.json" in message
+    assert "SENTINEL" not in message
+
+
+MISSING = object()
+
+
+def _broken(*keys: str | int, value: object = MISSING) -> bytes:
+    # Made-up selection with one field at the given path replaced, or removed when no value is given. Not game text.
+    root: dict[str, Any] = copy.deepcopy(SELECTION_OBJECT)
+    node: Any = root
+    for key in keys[:-1]:
+        node = node[key]
+    if value is MISSING:
+        del node[keys[-1]]
+    else:
+        node[keys[-1]] = value
+    return _bytes(root)
+
+
+BAD_SELECTION = [
+    pytest.param(b"SENTINEL-NOT-JSON {\n", "is not valid JSON", id="not-json"),
+    pytest.param(b'["SENTINEL-ARRAY"]\n', "is not a JSON object", id="not-object"),
+    pytest.param(_broken("romance"), "field romance is missing", id="romance-missing"),
+    pytest.param(
+        _broken("romance", "lines", value="SENTINEL-LINES"), "field romance.lines must be a non-negative integer", id="romance-type"
+    ),
+    pytest.param(
+        _broken("romance", "speakerless", value=-1), "field romance.speakerless must be a non-negative integer", id="romance-negative"
+    ),
+    pytest.param(
+        _broken("gender_roles", "characters", value=True), "field gender_roles.characters must be a non-negative integer", id="gender-bool"
+    ),
+    pytest.param(_broken("eligible_characters"), "field eligible_characters is missing", id="eligible-missing"),
+    pytest.param(_broken("queer", "share", value=2.5), "field queer.share must be a non-negative integer", id="share-float"),
+    pytest.param(_broken("queer", "rounds", value="SENTINEL-ROUNDS"), "field queer.rounds must be a list", id="rounds-type"),
+    pytest.param(_broken("queer", "rounds", 0, value="SENTINEL-ROUND"), "field queer.rounds.0 must be an object", id="round-type"),
+    pytest.param(
+        _broken("queer", "rounds", 0, "tried", value="SENTINEL-TRIED"),
+        "field queer.rounds.0.tried must be a non-negative integer",
+        id="tried-type",
+    ),
+    pytest.param(_broken("queer", "rounds", 1, "passed"), "field queer.rounds.1.passed is missing", id="passed-missing"),
+    pytest.param(_broken("queer", "achieved"), "field queer.achieved is missing", id="achieved-missing"),
+    pytest.param(_broken("trans", "exhausted", value=1), "field trans.exhausted must be true or false", id="exhausted-type"),
+]
+
+
+@pytest.mark.parametrize(("bad", "fragment"), BAD_SELECTION)
+def test_invalid_selection_fails_naming_file_and_field_but_not_the_value(repo: Path, bad: bytes, fragment: str) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
+    _write(repo, _lines(*QUEERING_RECORDS))
+    path = _write_selection(repo, bad)
+    _write_arcs(repo)
+    _write_recall(repo)
+    with pytest.raises(Fail) as raised:
+        _invoke()
+    message = str(raised.value)
+    assert str(path) in message
+    assert fragment in message
+    assert "SENTINEL" not in message
 
 
 def test_lens_without_selection_prints_no_queering_line(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:

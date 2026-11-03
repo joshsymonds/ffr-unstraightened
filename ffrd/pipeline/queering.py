@@ -1,27 +1,29 @@
-"""Queering selection: the core cast and antagonists that stay vanilla, the flirt, the run-wide ranking that picks queer and trans speakers, and the redirect half of the flirt. Inputs are plain bible records, speaker ids, line refs and counts."""
+"""Queering selection: the core cast and antagonists that stay vanilla, the flirt, the seeded order and target that pick the queer side, and the redirect half of the flirt. Inputs are plain bible records, speaker ids, line refs and counts."""
 
 import hashlib
 import re
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from typing import Any, Literal
 
 from ffrd.game import Fail
 
 CORE_LINES = 475
 CORE_ARCS = 20
-QUEER_PERCENT = 15
-TRANS_PERCENT = 5
 REDIRECT_PERCENT = 50
 
-Bucket = Literal["queer", "trans", "untouched"]
 Selection = Literal["queer", "trans", "untouched", "redirect", "not-redirected"]
 SELECTIONS: tuple[Selection, ...] = ("queer", "trans", "untouched", "redirect", "not-redirected")
-REWRITTEN: frozenset[Selection] = frozenset({"queer", "trans", "redirect"})
+REWRITTEN: frozenset[Selection] = frozenset({"queer", "redirect"})
 
 ANTAGONIST_PREFIXES = ("villain", "antagonis")
 ANTAGONIST_WORDS = frozenset({"nemesis", "archenemy", "archvillain"})
 FLIRT_PREFIX = "flirt"
+
+QUEER_SALT = "queer"
+TRANS_SALT = "trans"
+ROMANCE = "romance"
+GENDER_ROLES = "gender-roles"
 
 
 def core_cast(bibles: Sequence[Mapping[str, Any]], line_counts: Mapping[str, int]) -> frozenset[str]:
@@ -58,24 +60,16 @@ def flirt(bibles: Sequence[Mapping[str, Any]]) -> str | None:
     return leaders[0]
 
 
-def rank(
-    marked: Sequence[tuple[str, str, str | None]], core: Collection[str], antagonists: Collection[str], flirt: str | None
-) -> dict[tuple[str, str], Bucket]:
-    """Rank the units of the marked lines across the run. A speaker is one unit and each speakerless line is its own unit, identified by its namespace and key. Units sort by the SHA-256 of their id: the first ceiling of QUEER_PERCENT of them are queer, the next ceiling of TRANS_PERCENT of the rest are trans. Core, antagonist and flirt lines are not ranked."""
-    units: defaultdict[str, list[tuple[str, str]]] = defaultdict(list)
-    for namespace, key, speaker in marked:
-        if speaker and (speaker in core or speaker in antagonists or speaker == flirt):
-            continue
-        units[speaker if speaker else f"{namespace}/{key}"].append((namespace, key))
-    order = sorted(units, key=lambda unit: (hashlib.sha256(unit.encode("utf-8")).digest(), unit))
-    queer_end = _ceil_share(QUEER_PERCENT, len(order))
-    trans_end = queer_end + min(_ceil_share(TRANS_PERCENT, len(order)), len(order) - queer_end)
-    buckets: dict[tuple[str, str], Bucket] = {}
-    for position, unit in enumerate(order):
-        bucket: Bucket = "queer" if position < queer_end else "trans" if position < trans_end else "untouched"
-        for ref in units[unit]:
-            buckets[ref] = bucket
-    return buckets
+def unit(namespace: str, key: str, speaker: str | None) -> str:
+    return speaker if speaker else f"{namespace}/{key}"
+
+
+def order(units: Iterable[str], salt: str) -> list[str]:
+    return sorted(set(units), key=lambda unit: (hashlib.sha256(f"{salt}/{unit}".encode()).digest(), unit))
+
+
+def target(share: int, size: int) -> int:
+    return (share * size + 50) // 100
 
 
 def redirected(namespace: str, key: str) -> bool:
@@ -90,10 +84,11 @@ def markable(speaker: str | None, core: Collection[str], antagonists: Collection
     return speaker not in core and speaker not in antagonists
 
 
-def select(namespace: str, key: str, speaker: str | None, flirt: str | None, ranked: Mapping[tuple[str, str], Bucket]) -> Selection:
-    if flirt is not None and speaker == flirt:
-        return "redirect" if redirected(namespace, key) else "not-redirected"
-    return ranked.get((namespace, key), "untouched")
+def selectable(speaker: str | None, core: Collection[str], antagonists: Collection[str], flirt: str | None) -> bool:
+    """A unit the queer side may pick: a speakerless line, or a speaker outside the core cast, the antagonists and the flirt."""
+    if not speaker:
+        return True
+    return speaker not in core and speaker not in antagonists and speaker != flirt
 
 
 def _characters(bibles: Sequence[Mapping[str, Any]]) -> Iterator[Mapping[str, Any]]:
@@ -107,7 +102,3 @@ def _words(notes: str) -> list[str]:
 
 def _share(text: str) -> int:
     return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big") % 100
-
-
-def _ceil_share(percent: int, units: int) -> int:
-    return -(-percent * units // 100)
