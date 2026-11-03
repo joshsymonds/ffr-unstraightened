@@ -1201,12 +1201,13 @@ USAGE = (
     ),
 )
 
-# Sums for the latest run only. Not game text.
+# Sums for the latest run only. Prompt tokens per call are (input + cache read + cache write) / calls, rounded:
+# stage A is 15 / 2 = 7.5 rounds to 8, stage B is 13 / 1, the total is 28 / 3 = 9.33 rounds to 9. Not game text.
 EXPECTED_USAGE = (
     f"usage run {RUN_LATEST}\n"
-    f"usage {STAGE_A} {MODEL_X}: 2 calls, 8 input, 5 output, 3 cache read, 4 cache write, $0.75\n"
-    f"usage {STAGE_B} {MODEL_Y}: 1 calls, 10 input, 5 output, 2 cache read, 1 cache write, $1.50\n"
-    "usage total: 3 calls, 18 input, 10 output, 5 cache read, 5 cache write, $2.25\n"
+    f"usage {STAGE_A} {MODEL_X}: 2 calls, 8 input, 5 output, 3 cache read, 4 cache write, 8 prompt tokens per call, $0.75\n"
+    f"usage {STAGE_B} {MODEL_Y}: 1 calls, 10 input, 5 output, 2 cache read, 1 cache write, 13 prompt tokens per call, $1.50\n"
+    "usage total: 3 calls, 18 input, 10 output, 5 cache read, 5 cache write, 9 prompt tokens per call, $2.25\n"
 )
 
 

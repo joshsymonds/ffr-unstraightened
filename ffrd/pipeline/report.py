@@ -455,10 +455,11 @@ def _queering_lines(records: list[Record]) -> list[str]:
 
 
 def _usage_totals(entries: list[Usage]) -> str:
+    prompt = sum(e.input_tokens + e.cache_read_tokens + e.cache_creation_tokens for e in entries)
     return (
         f"{len(entries)} calls, {sum(e.input_tokens for e in entries)} input, {sum(e.output_tokens for e in entries)} output, "
         f"{sum(e.cache_read_tokens for e in entries)} cache read, {sum(e.cache_creation_tokens for e in entries)} cache write, "
-        f"${sum(e.cost_usd for e in entries):.2f}"
+        f"{round(prompt / len(entries))} prompt tokens per call, ${sum(e.cost_usd for e in entries):.2f}"
     )
 
 

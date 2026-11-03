@@ -24,7 +24,9 @@ from ffrd.pipeline.arcs import (
     context,
     judge,
     judge_scene,
+    line_context,
     lines,
+    scene_arcs,
     with_changes,
 )
 from ffrd.pipeline.claude import Rejected, Unfinished
@@ -897,3 +899,367 @@ def test_scene_arc_stored_key_is_unchanged_without_base_rewrites(
     judge_scene(store, SCENE_LENS, [ARC], SCENES, REWRITES, SCENE_REFS, Fake(_answer(True)), base_rewrites=base_rewrites)
 
     assert store.finished() == [SCENE_ARC_KEY]
+
+
+# Made-up chapter three bible, lines and scenes for the chapter windows. Not game text.
+BIBLE_THREE = {
+    "chapter": 3,
+    "characters": [
+        {"speaker": "Ash", "notes": "Made-up note about Ash in chapter three. Not game text."},
+    ],
+    "arcs": [
+        {
+            "id": "arc-a",
+            "characters": ["Ash"],
+            "state": "Made-up state three. Not game text.",
+            "beats": [
+                {
+                    "line": {"namespace": "ST_C03_001_01", "key": "1"},
+                    "kind": "reversal",
+                    "earned": True,
+                }
+            ],
+        },
+    ],
+}
+
+WINDOW_BIBLES = [BIBLE_ONE, BIBLE_UNPLACED, BIBLE_TWO, BIBLE_THREE]
+UNPLACED_LAST_BIBLES = [BIBLE_ONE, BIBLE_TWO, BIBLE_UNPLACED]
+
+LINE_BRIN_TWO = SceneLine(
+    "ST_C02_001_01", "3", "Brin", "Made-up Brin line two. Not game text.", "Made-up Japanese seven. Not game text.", 2
+)
+LINE_ASH_THREE = SceneLine(
+    "ST_C03_001_01", "1", "Ash", "Made-up Ash line three. Not game text.", "Made-up Japanese eight. Not game text.", 3
+)
+LINE_BRIN_THREE = SceneLine(
+    "ST_C03_001_01", "2", "Brin", "Made-up Brin line three. Not game text.", "Made-up Japanese nine. Not game text.", 3
+)
+LINE_ASH_UNPLACED = SceneLine(
+    "ST_C00_002_02", "1", "Ash", "Made-up unplaced Ash line. Not game text.", "Made-up Japanese ten. Not game text.", None
+)
+LINE_BRIN_UNPLACED = SceneLine(
+    "ST_C00_002_03", "1", "Brin", "Made-up unplaced Brin line. Not game text.", "Made-up Japanese eleven. Not game text.", None
+)
+LINE_SPEAKERLESS = SceneLine(
+    "ST_C00_001_05", "7", None, "Made-up speakerless line. Not game text.", "Made-up Japanese twelve. Not game text.", None
+)
+SCENE_WINDOW = Scene("made-up-scene-window", (LINE_ASH_TWO, LINE_BRIN_TWO, LINE_ASH_THREE, LINE_ASH_UNPLACED))
+SCENE_UNPLACED = Scene("made-up-scene-unplaced", (LINE_ASH_UNPLACED, LINE_SPEAKERLESS))
+SCENE_NARRATION = Scene("made-up-scene-narration", (LINE_SPEAKERLESS,))
+
+
+def test_line_context_keeps_only_arcs_with_the_line_speaker() -> None:
+    arcs = consolidate(BIBLES)
+
+    result = line_context(arcs, BIBLES, ["Ash", "Brin"], LINE_ASH_TWO)
+
+    assert [arc["id"] for arc in result["arcs"]] == ["arc-a"]
+
+
+def test_speakerless_line_gets_every_arc_with_a_scene_speaker_in_given_order() -> None:
+    arcs = consolidate(BIBLES)
+
+    assert [arc["id"] for arc in line_context(arcs, BIBLES, ["Corr", None], LINE_SPEAKERLESS)["arcs"]] == ["arc-a"]
+    result = line_context(list(reversed(arcs)), BIBLES, ["Brin", None], LINE_SPEAKERLESS)
+    assert [arc["id"] for arc in result["arcs"]] == ["arc-c", "arc-b", "arc-a"]
+
+
+def test_speakerless_line_with_no_scene_speaker_gets_no_arcs_and_no_characters() -> None:
+    arcs = consolidate(BIBLES)
+
+    assert line_context(arcs, BIBLES, [None], LINE_SPEAKERLESS) == {"arcs": [], "characters": []}
+
+
+def test_placed_line_keeps_beats_of_its_chapter_and_the_one_before() -> None:
+    arcs = consolidate(WINDOW_BIBLES)
+
+    result = line_context(arcs, WINDOW_BIBLES, ["Ash"], LINE_ASH_TWO)
+
+    assert result["arcs"] == [
+        {
+            "id": "arc-a",
+            "characters": ["Ash", "Brin", "Corr"],
+            "states": [{"chapter": 2, "state": "Made-up state two. Not game text."}],
+            "beats": [
+                {
+                    "line": {"namespace": "ST_C01_001_01", "key": "1"},
+                    "kind": "setup",
+                    "earned": False,
+                    "chapter": 1,
+                }
+            ],
+        }
+    ]
+
+
+def test_placed_line_drops_beats_outside_its_chapter_and_the_one_before() -> None:
+    arcs = consolidate(WINDOW_BIBLES)
+
+    result = line_context(arcs, WINDOW_BIBLES, ["Ash"], LINE_ASH_THREE)
+
+    assert result["arcs"][0]["beats"] == [
+        {
+            "line": {"namespace": "ST_C03_001_01", "key": "1"},
+            "kind": "reversal",
+            "earned": True,
+            "chapter": 3,
+        }
+    ]
+
+
+def test_placed_line_state_is_its_chapters_or_else_the_latest_earlier_numbered_one() -> None:
+    arcs = consolidate(WINDOW_BIBLES)
+
+    at_chapter = line_context(arcs, WINDOW_BIBLES, ["Brin"], LINE_BRIN_TWO)
+    assert next(arc for arc in at_chapter["arcs"] if arc["id"] == "arc-c")["states"] == [
+        {"chapter": 2, "state": "Made-up state for arc c. Not game text."}
+    ]
+    earlier_only = next(arc for arc in at_chapter["arcs"] if arc["id"] == "arc-b")
+    assert earlier_only["states"] == [{"chapter": 1, "state": "Made-up state for arc b. Not game text."}]
+
+    no_state = line_context(arcs, WINDOW_BIBLES, ["Brin"], LINE_BRIN_ONE)
+    assert next(arc for arc in no_state["arcs"] if arc["id"] == "arc-c")["states"] == []
+
+
+def test_placed_line_without_a_state_at_its_chapter_gets_the_highest_numbered_earlier_state() -> None:
+    bibles = [BIBLE_ONE, BIBLE_THREE, BIBLE_UNPLACED, BIBLE_TWO]
+    line = SceneLine("ST_C05_001_01", "1", "Ash", "Made-up Ash line five. Not game text.", "Made-up Japanese thirteen. Not game text.", 5)
+
+    result = line_context(consolidate(bibles), bibles, ["Ash"], line)
+
+    assert result["arcs"][0]["states"] == [{"chapter": 3, "state": "Made-up state three. Not game text."}]
+
+
+def test_placed_line_notes_come_from_its_chapter_and_latest_earlier_bible_with_notes() -> None:
+    arcs = consolidate(WINDOW_BIBLES)
+
+    assert line_context(arcs, WINDOW_BIBLES, ["Ash"], LINE_ASH_TWO)["characters"] == [
+        {"notes": "Made-up note about Ash in chapter one. Not game text.", "chapter": 1},
+    ]
+    assert line_context(arcs, WINDOW_BIBLES, ["Ash"], LINE_ASH_THREE)["characters"] == [
+        {"notes": "Made-up note about Ash in chapter one. Not game text.", "chapter": 1},
+        {"notes": "Made-up note about Ash in chapter three. Not game text.", "chapter": 3},
+    ]
+    assert line_context(arcs, WINDOW_BIBLES, ["Brin"], LINE_BRIN_THREE)["characters"] == [
+        {"notes": "Made-up note about Brin in chapter two. Not game text.", "chapter": 2},
+    ]
+
+
+def test_unplaced_line_gets_last_listed_state_no_beats_and_last_notes() -> None:
+    arcs = consolidate(UNPLACED_LAST_BIBLES)
+
+    assert line_context(arcs, UNPLACED_LAST_BIBLES, ["Brin"], LINE_BRIN_UNPLACED) == {
+        "arcs": [
+            {
+                "id": "arc-a",
+                "characters": ["Ash", "Brin", "Corr"],
+                "states": [{"chapter": None, "state": "Made-up later state. Not game text."}],
+                "beats": [],
+            },
+            {
+                "id": "arc-b",
+                "characters": ["Brin"],
+                "states": [{"chapter": 1, "state": "Made-up state for arc b. Not game text."}],
+                "beats": [],
+            },
+            {
+                "id": "arc-c",
+                "characters": ["Brin"],
+                "states": [{"chapter": 2, "state": "Made-up state for arc c. Not game text."}],
+                "beats": [],
+            },
+        ],
+        "characters": [{"notes": "Made-up note about Brin in chapter two. Not game text.", "chapter": 2}],
+    }
+    assert line_context(arcs, UNPLACED_LAST_BIBLES, ["Ash"], LINE_ASH_UNPLACED)["characters"] == [
+        {
+            "notes": "Made-up note about Ash, unplaced. Not game text.",
+            "gender": "Made-up gender value. Not game text.",
+            "chapter": None,
+        },
+    ]
+
+
+def test_scene_arcs_window_each_placed_chapter_and_dedupe_states_in_arc_order() -> None:
+    arcs = consolidate(WINDOW_BIBLES)
+
+    assert scene_arcs(arcs, SCENE_WINDOW) == [
+        {
+            "id": "arc-a",
+            "characters": ["Ash", "Brin", "Corr"],
+            "states": [
+                {"chapter": 2, "state": "Made-up state two. Not game text."},
+                {"chapter": 3, "state": "Made-up state three. Not game text."},
+            ],
+            "beats": [
+                {
+                    "line": {"namespace": "ST_C01_001_01", "key": "1"},
+                    "kind": "setup",
+                    "earned": False,
+                    "chapter": 1,
+                },
+                {
+                    "line": {"namespace": "ST_C03_001_01", "key": "1"},
+                    "kind": "reversal",
+                    "earned": True,
+                    "chapter": 3,
+                },
+            ],
+        },
+        {
+            "id": "arc-b",
+            "characters": ["Brin"],
+            "states": [{"chapter": 1, "state": "Made-up state for arc b. Not game text."}],
+            "beats": [],
+        },
+        {
+            "id": "arc-c",
+            "characters": ["Brin"],
+            "states": [{"chapter": 2, "state": "Made-up state for arc c. Not game text."}],
+            "beats": [
+                {
+                    "line": {"namespace": "ST_C02_001_01", "key": "1"},
+                    "kind": "setup",
+                    "earned": False,
+                    "chapter": 2,
+                }
+            ],
+        },
+    ]
+
+
+def test_scene_with_no_placed_line_gets_last_listed_states_and_no_beats() -> None:
+    arcs = consolidate(UNPLACED_LAST_BIBLES)
+
+    assert scene_arcs(arcs, SCENE_UNPLACED) == [
+        {
+            "id": "arc-a",
+            "characters": ["Ash", "Brin", "Corr"],
+            "states": [{"chapter": None, "state": "Made-up later state. Not game text."}],
+            "beats": [],
+        },
+    ]
+
+
+def test_scene_with_no_scene_speaker_has_no_arcs() -> None:
+    assert scene_arcs(consolidate(WINDOW_BIBLES), SCENE_NARRATION) == []
+
+
+def test_line_context_and_scene_arcs_leave_inputs_unchanged() -> None:
+    bibles = copy.deepcopy(WINDOW_BIBLES)
+    snapshot = copy.deepcopy(WINDOW_BIBLES)
+    arcs = consolidate(bibles)
+    arcs_snapshot = copy.deepcopy(arcs)
+
+    line_context(arcs, bibles, ["Ash"], LINE_ASH_THREE)
+    scene_arcs(arcs, SCENE_WINDOW)
+
+    assert bibles == snapshot
+    assert arcs == arcs_snapshot
+
+
+# Made-up based lens for the judge window: a changed line in chapter three, a judged line in chapter five that is not rewritten, and an unplaced changed line. Not game text.
+BASED_LENS = replace(LENS, base="made-up-base-lens")
+BASED_SCENE_LENS = replace(SCENE_LENS, base="made-up-base-lens")
+WINDOW_CHANGED = SceneLine(
+    "ST_C03_010_01", "1", "Ash", "Made-up window line three. Not game text.", "Made-up Japanese nine. Not game text.", 3
+)
+WINDOW_JUDGED = SceneLine(
+    "ST_C05_010_01", "1", "Ash", "Made-up window line five. Not game text.", "Made-up Japanese ten. Not game text.", 5
+)
+WINDOW_UNPLACED = SceneLine(
+    "ST_C00_010_01", "1", "Ash", "Made-up window unplaced line. Not game text.", "Made-up Japanese eleven. Not game text.", None
+)
+WINDOW_SCENES = [Scene("made-up-window-scene", (WINDOW_CHANGED, WINDOW_JUDGED, WINDOW_UNPLACED))]
+WINDOW_REWRITES = {
+    _ref(WINDOW_CHANGED): "Made-up window rewrite three. Not game text.",
+    _ref(WINDOW_UNPLACED): "Made-up window rewrite unplaced. Not game text.",
+}
+UNPLACED_REWRITES = {_ref(WINDOW_UNPLACED): "Made-up window rewrite unplaced. Not game text."}
+BEAT_CH1 = {"line": {"namespace": "ST_C01_010_01", "key": "1"}, "kind": "setup", "earned": False, "chapter": 1}
+BEAT_CH2 = {"line": {"namespace": "ST_C02_010_01", "key": "1"}, "kind": "setup", "earned": False, "chapter": 2}
+BEAT_CH3 = {"line": {"namespace": "ST_C03_010_01", "key": "2"}, "kind": "payoff", "earned": True, "chapter": 3}
+BEAT_CH4 = {"line": {"namespace": "ST_C04_010_01", "key": "1"}, "kind": "reversal", "earned": True, "chapter": 4}
+BEAT_CH5 = {"line": {"namespace": "ST_C05_010_01", "key": "1"}, "kind": "payoff", "earned": True, "chapter": 5}
+BEAT_UNPLACED = {"line": {"namespace": "ST_C00_010_02", "key": "1"}, "kind": "setup", "earned": False, "chapter": None}
+WINDOW_ARC = {
+    "id": "made-up-window-arc. Not game text.",
+    "characters": ["Ash"],
+    "states": [
+        {"chapter": 1, "state": "Made-up window state one. Not game text."},
+        {"chapter": 3, "state": "Made-up window state three. Not game text."},
+    ],
+    "beats": [BEAT_CH1, BEAT_CH2, BEAT_CH3, BEAT_CH4, BEAT_CH5, BEAT_UNPLACED],
+}
+# Chapter three's changed line keeps chapters two, three and four; chapters one and five and the unplaced beat drop.
+WINDOWED_ARC = {**WINDOW_ARC, "beats": [BEAT_CH2, BEAT_CH3, BEAT_CH4]}
+
+
+def test_based_lens_arc_judge_prompt_keeps_only_beats_within_one_chapter_of_a_changed_line(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge(Store(tmp_path), BASED_LENS, [WINDOW_ARC], WINDOW_SCENES, WINDOW_REWRITES, ask)
+
+    _, parts, _ = ask.calls[0]
+    assert "Arc:\n" + _j(WINDOWED_ARC) in parts
+
+
+def test_based_lens_scene_arc_prompt_keeps_only_beats_within_one_chapter_of_a_changed_line(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge_scene(Store(tmp_path), BASED_SCENE_LENS, [WINDOW_ARC], WINDOW_SCENES, WINDOW_REWRITES, {_ref(WINDOW_CHANGED)}, ask)
+
+    _, parts, _ = ask.calls[0]
+    assert "Arc:\n" + _j(WINDOWED_ARC) in parts
+
+
+def test_based_lens_arc_whose_changed_lines_are_all_unplaced_shows_no_beats(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge(Store(tmp_path), BASED_LENS, [WINDOW_ARC], WINDOW_SCENES, UNPLACED_REWRITES, ask)
+
+    _, parts, _ = ask.calls[0]
+    assert "Arc:\n" + _j({**WINDOW_ARC, "beats": []}) in parts
+
+
+def test_based_lens_window_leaves_judged_lines_and_states_as_without_a_base(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge(Store(tmp_path), BASED_LENS, [WINDOW_ARC], WINDOW_SCENES, WINDOW_REWRITES, ask)
+
+    _, parts, _ = ask.calls[0]
+    assert "Arc lines:\n" + _j(_line_dicts(lines(WINDOW_ARC, WINDOW_SCENES, WINDOW_REWRITES), WINDOW_REWRITES)) in parts
+    assert "Arc:\n" + _j({**WINDOWED_ARC, "states": WINDOW_ARC["states"]}) in parts
+
+
+def test_based_lens_window_is_the_stored_arc_input_for_arc_judge(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+
+    judge(store, BASED_LENS, [WINDOW_ARC], WINDOW_SCENES, WINDOW_REWRITES, Fake(_answer(True)))
+
+    first = {"arc": WINDOWED_ARC, "lines": _line_dicts(lines(WINDOW_ARC, WINDOW_SCENES, WINDOW_REWRITES), WINDOW_REWRITES)}
+    assert store.finished() == [result_key(STAGE, first, BASED_LENS.stage_text("judge"))]
+
+
+def test_based_lens_window_is_the_stored_arc_input_for_scene_arc(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+
+    judge_scene(store, BASED_SCENE_LENS, [WINDOW_ARC], WINDOW_SCENES, WINDOW_REWRITES, {_ref(WINDOW_CHANGED)}, Fake(_answer(True)))
+
+    first = {
+        "arc": WINDOWED_ARC,
+        "lines": _line_dicts(lines(WINDOW_ARC, WINDOW_SCENES, WINDOW_REWRITES), WINDOW_REWRITES),
+        "scene_refs": [_ref_dict(WINDOW_CHANGED)],
+    }
+    scene_text = f"{BASED_SCENE_LENS.stage_text('judge')}\n{BASED_SCENE_LENS.stage_text('scene')}"
+    assert store.finished() == [result_key(SCENE_STAGE, first, scene_text)]
+
+
+def test_unbased_lens_arc_judge_prompt_keeps_every_beat_of_the_arc(tmp_path: Path) -> None:
+    ask = Fake(_answer(True))
+
+    judge(Store(tmp_path), LENS, [WINDOW_ARC], WINDOW_SCENES, WINDOW_REWRITES, ask)
+
+    _, parts, _ = ask.calls[0]
+    assert "Arc:\n" + _j(WINDOW_ARC) in parts

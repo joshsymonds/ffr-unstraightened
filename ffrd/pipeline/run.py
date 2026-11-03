@@ -381,7 +381,10 @@ def _first_drafts(
 
 def _neighbourhood(ctx: _Context, scene: Scene, line: SceneLine) -> tuple[tuple[Mapping[str, Any], ...], Mapping[str, Any]]:
     """The bible callbacks that touch a line and the arc context of its scene's speakers, which names the scene's base rewrites when the lens has a base."""
-    context = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
+    if ctx.lens.base is None:
+        context = arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), line.speaker)
+    else:
+        context = arcs.line_context(ctx.arcs, ctx.bibles, _speakers(scene), line)
     rewrites = [
         {"namespace": scene_line.namespace, "key": scene_line.key, **ctx.base_rewrites[(scene_line.namespace, scene_line.key)]}
         for scene_line in scene.lines
@@ -523,7 +526,9 @@ def _with_plans(refs: frozenset[tuple[str, str]], changes: Sequence[Change]) -> 
 
 
 def _scene_arcs(ctx: _Context, scene: Scene) -> Sequence[Mapping[str, Any]]:
-    return arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), None)["arcs"]
+    if ctx.lens.base is None:
+        return arcs.context(ctx.arcs, ctx.bibles, _speakers(scene), None)["arcs"]
+    return arcs.scene_arcs(ctx.arcs, scene)
 
 
 def _coherent(ctx: _Context, scene: Scene, outcomes: list[Outcome], changes: list[Change], ask: Ask) -> tuple[list[Outcome], list[Change]]:

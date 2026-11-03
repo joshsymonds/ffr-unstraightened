@@ -128,10 +128,74 @@ def cast(bibles: Sequence[Mapping[str, Any]], speakers: Collection[str | None]) 
     ]
 
 
+def line_context(
+    arcs: Sequence[Mapping[str, Any]],
+    bibles: Sequence[Mapping[str, Any]],
+    speakers: Collection[str | None],
+    line: SceneLine,
+) -> dict[str, Any]:
+    """Arcs of the line's speaker (any scene speaker when the line has none), windowed to the line's chapter, and the speaker's character notes for it."""
+    if line.speaker is None:
+        names = {name for name in speakers if name is not None}
+        involved = [arc for arc in arcs if any(name in names for name in arc["characters"])]
+    else:
+        involved = [arc for arc in arcs if line.speaker in arc["characters"]]
+    chapters = [] if line.chapter is None else [line.chapter]
+    return {
+        "arcs": [_windowed(arc, chapters) for arc in involved],
+        "characters": _line_notes(bibles, line.speaker, line.chapter) if line.speaker is not None else [],
+    }
+
+
+def scene_arcs(arcs: Sequence[Mapping[str, Any]], scene: Scene) -> list[dict[str, Any]]:
+    """Arcs of the scene's speakers, windowed over every placed chapter among its lines; with none placed, each arc's last listed state."""
+    names = {line.speaker for line in scene.lines if line.speaker is not None}
+    chapters = {line.chapter for line in scene.lines if line.chapter is not None}
+    return [_windowed(arc, chapters) for arc in arcs if any(name in names for name in arc["characters"])]
+
+
+def _windowed(arc: Mapping[str, Any], chapters: Collection[int]) -> dict[str, Any]:
+    """The arc's beats of each chapter and the one before, and one state per chapter; with no chapter, the last listed state and no beats."""
+    if chapters:
+        window = {number for chapter in chapters for number in (chapter - 1, chapter)}
+        beats = [beat for beat in arc["beats"] if beat["chapter"] in window]
+        picked = {state["chapter"] for chapter in chapters if (state := _state(arc["states"], chapter)) is not None}
+        states = [state for state in arc["states"] if state["chapter"] in picked]
+    else:
+        beats = []
+        states = arc["states"][-1:]
+    return {"id": arc["id"], "characters": list(arc["characters"]), "states": states, "beats": beats}
+
+
+def _state(states: Sequence[Mapping[str, Any]], chapter: int) -> Mapping[str, Any] | None:
+    """The state recorded at the chapter, else the latest numbered state before it."""
+    at_chapter = next((state for state in states if state["chapter"] == chapter), None)
+    if at_chapter is not None:
+        return at_chapter
+    earlier = [state for state in states if state["chapter"] is not None and state["chapter"] < chapter]
+    return max(earlier, key=lambda state: state["chapter"], default=None)
+
+
+def _line_notes(bibles: Sequence[Mapping[str, Any]], speaker: str, chapter: int | None) -> list[dict[str, Any]]:
+    """The speaker's entries from the chapter's bibles, preceded by the latest earlier bible holding one; unplaced, the last bible in list order holding one."""
+    if chapter is None:
+        chosen = [bible for bible in bibles if _entries(bible, speaker)][-1:]
+    else:
+        earlier = [bible for bible in bibles if bible["chapter"] is not None and bible["chapter"] < chapter and _entries(bible, speaker)]
+        chosen = [
+            *sorted(earlier, key=lambda bible: bible["chapter"])[-1:],
+            *(bible for bible in bibles if bible["chapter"] == chapter),
+        ]
+    return [entry for bible in chosen for entry in _entries(bible, speaker)]
+
+
 def _notes(bibles: Sequence[Mapping[str, Any]], speaker: str) -> list[dict[str, Any]]:
+    return [entry for bible in bibles for entry in _entries(bible, speaker)]
+
+
+def _entries(bible: Mapping[str, Any], speaker: str) -> list[dict[str, Any]]:
     return [
         {**{key: value for key, value in entry.items() if key != "speaker"}, "chapter": bible["chapter"]}
-        for bible in bibles
         for entry in bible["characters"]
         if entry["speaker"] == speaker
     ]
@@ -219,7 +283,7 @@ def _judge_arc(
         after_lines=(),
         extra_inputs={},
     )
-    return _verdicts(store, stage, arc, arc_lines, rewrites, ask)
+    return _verdicts(store, stage, _judged_arc(lens, arc, arc_lines, rewrites), arc_lines, rewrites, ask)
 
 
 def _judge_scene_arc(
@@ -250,7 +314,21 @@ def _judge_scene_arc(
         after_lines=(f"Scene-pass lines:\n{_json(refs)}",),
         extra_inputs={"scene_refs": refs},
     )
-    return _verdicts(store, stage, arc, arc_lines, rewrites, ask)
+    return _verdicts(store, stage, _judged_arc(lens, arc, arc_lines, rewrites), arc_lines, rewrites, ask)
+
+
+def _judged_arc(
+    lens: Lens,
+    arc: Mapping[str, Any],
+    arc_lines: Sequence[SceneLine],
+    rewrites: Mapping[tuple[str, str], str],
+) -> Mapping[str, Any]:
+    """The arc a judge sees. A based lens's arc keeps only the beats within one chapter of a placed changed line; beats without a chapter drop."""
+    if lens.base is None:
+        return arc
+    chapters = {line.chapter for line in arc_lines if _ref(line) in rewrites and line.chapter is not None}
+    window = {number for chapter in chapters for number in (chapter - 1, chapter, chapter + 1)}
+    return {**arc, "beats": [beat for beat in arc["beats"] if beat["chapter"] in window]}
 
 
 def _verdicts(

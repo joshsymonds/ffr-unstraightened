@@ -2340,6 +2340,94 @@ def test_arc_judge_lists_the_base_rewrite_of_its_arc_line(tmp_path: Path) -> Non
         assert _base_rewrites_of(parts) == [{"namespace": NS_A, "key": "1", "lens": BASE, "reasons": [BASE_REASON]}]
 
 
+# Made-up four-chapter arc of one speaker for the chained run's chapter window. Not game text.
+WIN_ARC = "made-up-arc-window"
+WIN_SPEAKER = "made-up-speaker-a"
+WIN_STATES = {chapter: f"Made-up window state of chapter {chapter}. Not game text." for chapter in range(1, 5)}
+WIN_NOTES = {chapter: f"Made-up window notes of chapter {chapter}. Not game text." for chapter in range(1, 5)}
+WIN_BEAT_LINES = {1: (NS_A, "1"), 2: (NS_B, "1"), 3: (NS_C, "2"), 4: (NS_C, "4")}
+EN_WIN_A = "Made-up window line of chapter one. Not game text."
+EN_WIN_B = "Made-up window line of chapter two. Not game text."
+EN_WIN_C = "Made-up window line of chapter three. Not game text."
+EN_WIN_D = "Made-up window line of chapter four. Not game text."
+WIN_SCENE_A = Scene("made-up-scene-window-a", (_line(NS_A, "1", WIN_SPEAKER, EN_WIN_A, 1),))
+WIN_SCENE_BC = Scene("made-up-scene-window-bc", (_line(NS_B, "1", WIN_SPEAKER, EN_WIN_B, 2), _line(NS_C, "2", WIN_SPEAKER, EN_WIN_C, 3)))
+WIN_SCENE_D = Scene("made-up-scene-window-d", (_line(NS_C, "4", WIN_SPEAKER, EN_WIN_D, 4),))
+WIN_SCENES = (WIN_SCENE_A, WIN_SCENE_BC, WIN_SCENE_D)
+
+
+def _window_bible(chapter: int) -> dict[str, Any]:
+    namespace, key = WIN_BEAT_LINES[chapter]
+    return {
+        "characters": [{"speaker": WIN_SPEAKER, "notes": WIN_NOTES[chapter], "gender": "made-up-gender-a"}],
+        "facts": [],
+        "callbacks": [],
+        "arcs": [
+            {
+                "id": WIN_ARC,
+                "characters": [WIN_SPEAKER],
+                "state": WIN_STATES[chapter],
+                "beats": [{"line": {"namespace": namespace, "key": key}, "kind": "setup", "earned": True}],
+            }
+        ],
+    }
+
+
+def _win_arc(state_chapters: Sequence[int], beat_chapters: Sequence[int]) -> dict[str, Any]:
+    beats = [
+        {
+            "line": {"namespace": WIN_BEAT_LINES[chapter][0], "key": WIN_BEAT_LINES[chapter][1]},
+            "kind": "setup",
+            "earned": True,
+            "chapter": chapter,
+        }
+        for chapter in beat_chapters
+    ]
+    states = [{"chapter": chapter, "state": WIN_STATES[chapter]} for chapter in state_chapters]
+    return {"id": WIN_ARC, "characters": [WIN_SPEAKER], "states": states, "beats": beats}
+
+
+def _win_notes(chapter: int) -> dict[str, Any]:
+    return {"chapter": chapter, "gender": "made-up-gender-a", "notes": WIN_NOTES[chapter]}
+
+
+def _window_claude() -> FakeClaude:
+    claude = FakeClaude()
+    claude.flags = {(NS_A, "1"): [ALPHA], (NS_B, "1"): [ALPHA], (NS_C, "2"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_B, "1"): [OPUS_B1], (NS_C, "2"): [OPUS_D1]}
+    return claude
+
+
+def test_chained_line_stages_receive_the_arcs_of_the_line_chapter_window_and_the_notes_of_the_chapters_it_reads(tmp_path: Path) -> None:
+    _base_dir(tmp_path)
+    _seed_base(tmp_path, {chapter: _window_bible(chapter) for chapter in range(1, 5)}, WIN_SCENES)
+    claude = _window_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=WIN_SCENES, lens=replace(LENS_OBJ, base=BASE))
+    # A line in chapter one reads chapter one alone. A line in chapter two reads chapters one and two. A line in chapter three reads chapters two and three.
+    expected = {
+        (NS_A, "1"): {"arcs": [_win_arc([1], [1])], "characters": [_win_notes(1)]},
+        (NS_B, "1"): {"arcs": [_win_arc([2], [1, 2])], "characters": [_win_notes(1), _win_notes(2)]},
+        (NS_C, "2"): {"arcs": [_win_arc([3], [2, 3])], "characters": [_win_notes(2), _win_notes(3)]},
+    }
+    line_calls = [(schema, parts) for _, parts, schema in claude.calls if schema in LINE_SCHEMAS]
+    covered = {(LINE_SCHEMAS.index(schema), target) for schema, parts in line_calls for target, _ in _line_targets(parts)}
+    assert {(index, target) for index in (0, 1, 2) for target in expected} <= covered
+    for _, parts in line_calls:
+        for target, context in _line_targets(parts):
+            assert context == expected[target]
+
+
+def test_chained_coherence_receives_the_arcs_of_the_scene_chapter_window(tmp_path: Path) -> None:
+    _base_dir(tmp_path)
+    _seed_base(tmp_path, {chapter: _window_bible(chapter) for chapter in range(1, 5)}, WIN_SCENES)
+    claude = _window_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=WIN_SCENES, lens=replace(LENS_OBJ, base=BASE))
+    # The scene spans chapters two and three, so its window is chapters one to three: chapter four is outside it.
+    calls = _coherence_calls(claude)
+    assert len(calls) == 1
+    assert json.loads(_part(calls[0], "Arcs:\n")) == [_win_arc([2, 3], [1, 2, 3])]
+
+
 def test_unbased_runs_give_no_stage_coherence_or_arc_prompt_a_base_rewrites_key_or_part(tmp_path: Path) -> None:
     line_claude = _claude()
     jev = FakeJev(JEV_HIGH)
