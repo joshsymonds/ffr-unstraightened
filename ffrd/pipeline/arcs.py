@@ -283,7 +283,7 @@ def _judge_arc(
         after_lines=(),
         extra_inputs={},
     )
-    return _verdicts(store, stage, arc, arc_lines, rewrites, ask)
+    return _verdicts(store, stage, _judged_arc(lens, arc, arc_lines, rewrites), arc_lines, rewrites, ask)
 
 
 def _judge_scene_arc(
@@ -314,7 +314,21 @@ def _judge_scene_arc(
         after_lines=(f"Scene-pass lines:\n{_json(refs)}",),
         extra_inputs={"scene_refs": refs},
     )
-    return _verdicts(store, stage, arc, arc_lines, rewrites, ask)
+    return _verdicts(store, stage, _judged_arc(lens, arc, arc_lines, rewrites), arc_lines, rewrites, ask)
+
+
+def _judged_arc(
+    lens: Lens,
+    arc: Mapping[str, Any],
+    arc_lines: Sequence[SceneLine],
+    rewrites: Mapping[tuple[str, str], str],
+) -> Mapping[str, Any]:
+    """The arc a judge sees. A based lens's arc keeps only the beats within one chapter of a placed changed line; beats without a chapter drop."""
+    if lens.base is None:
+        return arc
+    chapters = {line.chapter for line in arc_lines if _ref(line) in rewrites and line.chapter is not None}
+    window = {number for chapter in chapters for number in (chapter - 1, chapter, chapter + 1)}
+    return {**arc, "beats": [beat for beat in arc["beats"] if beat["chapter"] in window]}
 
 
 def _verdicts(
