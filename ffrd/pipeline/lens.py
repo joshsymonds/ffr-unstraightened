@@ -14,11 +14,12 @@ Stage = Literal["triage", "screen", "intent", "judge", "scene"]
 
 ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge", "scene"})
-TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection", "romance_share", "world_share", "trans_share"})
+TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection", "romance_share", "world_share", "nonbinary_share", "trans_share"})
 SCENE_KEYS = frozenset({"patterns", "criteria", "plan", "rubric"})
 SCREEN_KEYS = frozenset({"criteria", "model"})
 DEFAULT_ROMANCE_SHARE = 15
-DEFAULT_WORLD_SHARE = 15
+DEFAULT_WORLD_SHARE = 10
+DEFAULT_NONBINARY_SHARE = 5
 DEFAULT_TRANS_SHARE = 5
 
 
@@ -55,6 +56,7 @@ class Lens:
     screen_model: str = OPUS
     romance_share: int = DEFAULT_ROMANCE_SHARE
     world_share: int = DEFAULT_WORLD_SHARE
+    nonbinary_share: int = DEFAULT_NONBINARY_SHARE
     trans_share: int = DEFAULT_TRANS_SHARE
 
     def stage_text(self, stage: Stage) -> str:
@@ -273,6 +275,7 @@ def load_lens(path: Path) -> Lens:
     screen_model = _screen_model(screen, report)
     romance_share = _share(data, "romance_share", DEFAULT_ROMANCE_SHARE, report)
     world_share = _share(data, "world_share", DEFAULT_WORLD_SHARE, report)
+    nonbinary_share = _share(data, "nonbinary_share", DEFAULT_NONBINARY_SHARE, report)
     trans_share = _share(data, "trans_share", DEFAULT_TRANS_SHARE, report)
     intent = _section(data, "intent", frozenset({"rule"}), report)
     rule = _text(intent, "rule", "intent", report) if intent is not None else ""
@@ -294,5 +297,6 @@ def load_lens(path: Path) -> Lens:
         screen_model=screen_model,
         romance_share=romance_share,
         world_share=world_share,
+        nonbinary_share=nonbinary_share,
         trans_share=trans_share,
     )

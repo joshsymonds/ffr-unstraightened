@@ -5,7 +5,8 @@
 base = "unstraightening"
 selection = "queering"
 romance_share = 15
-world_share = 15
+world_share = 10
+nonbinary_share = 5
 trans_share = 5
 
 [[triage]]
@@ -30,15 +31,17 @@ criteria = [
 
 [intent]
 rule = """
-You rewrite only the lines you are given: every romance line of a speaker chosen queer, drafted together; a line in the flirt's redirect half; one candidate line of a world pick; or one candidate line of a trans pick. Change only what the bucket or the flirt rule asks, and keep the story. Keep a line unchanged only for a reason from this keep list: no-hit when the line is not the shape its label names, protection when a protect rule below covers it, or plot when the partner appears or is named as a character elsewhere in the given context, or when the change would alter what happens.
+You rewrite only the lines you are given: every romance line of a speaker chosen queer, drafted together; a line in the flirt's redirect half; one candidate line of a world pick; one candidate line of a nonbinary pick; or one candidate line of a trans pick. Change only what the bucket or the flirt rule asks, and keep the story. Keep a line unchanged only for a reason from this keep list: no-hit when the line is not the shape its label names, protection when a protect rule below covers it, or plot when the partner appears or is named as a character elsewhere in the given context, or when the change would alter what happens.
 
-[minimal-fix] Change only the words the edit needs. Leave the rest of the line as written. Do not rewrite a whole line when one word or one clause carries the change. The world and trans buckets' own edit is allowed here.
+[minimal-fix] Change only the words the edit needs. Leave the rest of the line as written. Do not rewrite a whole line when one word or one clause carries the change. The world, nonbinary and trans buckets' own edit is allowed here.
 
 [same-partner] When a speaker has several romance lines in a queer pick, they are drafted together. Use the same partner in every line, with one gender, one set of pronouns and the same details.
 
 [queer-bucket] For the queer bucket, the speaker's romantic target becomes the same sex. Swap the gender of the partner or crush so the pairing is same-sex. For a man or woman speaker, the pursuit target changes gender too. Where the line can carry both a same-sex and an opposite-sex reading, a bi reading is fine. Keep everything else: the feeling, the bond and the details.
 
 [world-bucket] For a world pick, change one candidate line of the speaker: add a short same-sex partner mention, worked into a line already about the speaker's home, family, work or daily life. The partner must carry the line's point, so that deleting the mention would lose something. Put it in one short clause, with no labels and no explaining. Change no other line.
+
+[nonbinary-bucket] For a nonbinary pick, change one candidate line of the speaker: add a short mention of a specific partner, consistently called they/them wherever gender would otherwise show. The mention is worked into a line already about the speaker's home, family, work or daily life. The partner must carry the line's point, so that deleting the mention would lose something. Put it in one short clause, with no labels and no explaining. Change no other line.
 
 [trans-bucket] For a trans pick, change at most one candidate line of the speaker. Where the line naturally allows it, add one light, natural trans detail of one of four shapes: a family member's acceptance, possibly in progress; someone who backs the speaker; a name the speaker chose and likes; or ordinary present life with the speaker's gender a given. The detail must be recognizable as trans and must answer the line's own topic. Where the line does not allow it, keep it unchanged as no-hit. The detail is never forced. Never write a "she's trans" aside.
 
@@ -56,11 +59,11 @@ You rewrite only the lines you are given: every romance line of a speaker chosen
 
 [no-gender-joke-or-menace] The queerness is never the joke or the threat. Do not write a line whose humor or menace rests on a character's gender or queerness.
 
-[no-explaining] Do not explain the change in the line, and do not add a tokenistic detail. The world and trans buckets' own edit is neither an explanation nor a tokenistic detail.
+[no-explaining] Do not explain the change in the line, and do not add a tokenistic detail. The world, nonbinary and trans buckets' own edit is neither an explanation nor a tokenistic detail.
 
 [keep-voice] Keep the speaker's voice: their word choice, rhythm and manner.
 
-[no-new-detail] Add no name, object or motive the original line lacks, except the world and trans buckets' own edit.
+[no-new-detail] Add no name, object or motive the original line lacks, except the world, nonbinary and trans buckets' own edit.
 
 [no-contradiction] Keep the rewrite consistent with the speaker's other lines.
 
@@ -73,13 +76,15 @@ You judge one rewritten line against its original and the label it was drafted u
 
 [meaning] meaning protects the bond, not the gender. The same partner, feeling and details stay. The partner's or crush's gender, or the flirt's target, changes only as the bucket asks.
 
-[minimal-fix] Reject a rewrite that changes more than its edit needs. The world and trans buckets' own edit is allowed here.
+[minimal-fix] Reject a rewrite that changes more than its edit needs. The world, nonbinary and trans buckets' own edit is allowed here.
 
 [same-partner] Reject a rewrite that changes the partner's gender, pronouns or details from one of the speaker's lines to another.
 
 [queer-bucket] Reject a rewrite that changes more than the target's gender, or that leaves the pairing other than same-sex unless the line carries a bi reading.
 
-[world-bucket] Reject a rewrite that adds a same-sex partner mention which could be deleted without loss. Reject a rewrite that changes more than one line of a world or trans pick. Reject a rewrite that is not one short clause, or that puts a label or an explanation in the line.
+[world-bucket] Reject a rewrite that adds a same-sex partner mention which could be deleted without loss. Reject a rewrite that changes more than one line of a world, nonbinary or trans pick. Reject a rewrite that is not one short clause, or that puts a label or an explanation in the line.
+
+[nonbinary-bucket] Reject a rewrite whose partner's gender is unspecified rather than consistently they/them wherever gender would otherwise show. Reject a rewrite that uses a modern label (trans, transgender, transition, nonbinary, deadname) in the setting. Reject a rewrite whose partner mention could be deleted without loss. Reject a rewrite that is not one short clause, or that puts a label or an explanation in the line.
 
 [trans-bucket] Reject a "she's trans" aside. Reject a rewrite that forces a trans detail the line does not naturally allow. A light, natural trans detail is the bucket's edit only when it is one of the four shapes and answers the line's own topic. Reject a rewrite whose trans detail is too vague to read as trans. Reject a rewrite that states an old name. Reject a rewrite that volunteers transition history to a stranger. Reject a rewrite with body or medical talk. Reject a rewrite where pain is the whole story. Reject a rewrite that frames being trans as a secret or concealment. Reject a rewrite that uses a modern label (trans, transgender, transition, nonbinary, deadname) in the setting. Reject a rewrite that makes the player the validator or the rescuer. Reject a rewrite that makes a joke at the speaker's expense.
 
@@ -97,11 +102,11 @@ You judge one rewritten line against its original and the label it was drafted u
 
 [no-gender-joke-or-menace] Reject a rewrite whose humor or menace rests on the target's or partner's gender or queerness.
 
-[no-explaining] Reject a rewrite that explains the change or adds a tokenistic detail. The world and trans buckets' own edit is neither an explanation nor a tokenistic detail.
+[no-explaining] Reject a rewrite that explains the change or adds a tokenistic detail. The world, nonbinary and trans buckets' own edit is neither an explanation nor a tokenistic detail.
 
 [keep-voice] Reject a rewrite that breaks the speaker's voice.
 
-[no-new-detail] Reject a rewrite that adds a name, object or motive the original line lacks, except the world and trans buckets' own edit.
+[no-new-detail] Reject a rewrite that adds a name, object or motive the original line lacks, except the world, nonbinary and trans buckets' own edit.
 
 [no-contradiction] Reject a rewrite that contradicts the speaker's other lines.
 

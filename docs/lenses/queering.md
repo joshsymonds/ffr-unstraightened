@@ -15,7 +15,7 @@ The lens chains onto the unstraightening rewrites: it starts from their output i
 - Keep the story: its plot, relationships and stakes.
 - Keep every line the lens does not flag exactly as written.
 - Make a character outside the core cast's romance queer only in the shapes the triage names.
-- Add a same-sex partner mention or an own-gender trans detail to a character outside the core cast, one line at a time, only where the line allows it.
+- Add a same-sex partner mention, a they/them partner mention or an own-gender trans detail to a character outside the core cast, one line at a time, only where the line allows it.
 - Split the flirt's running gag, so a flirt aimed at a woman is redirected or generalized.
 - Never touch the flirt's sincere thread, or a flirt aimed at a minor.
 - Keep the core cast's sexuality and romances as written.
@@ -51,6 +51,12 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   the speaker's home, family, work or daily life. The partner must carry the line's point,
   so that deleting the mention would lose something. The mention takes one short clause,
   with no labels and no explaining.
+- `nonbinary-bucket`: for a nonbinary pick, the speaker gets one candidate line changed,
+  and no other. The change adds a short mention of a specific partner, consistently called
+  they/them wherever gender would otherwise show. The mention is worked into a line already
+  about the speaker's home, family, work or daily life. The partner must carry the line's
+  point, so that deleting the mention would lose something. The mention takes one short
+  clause, with no labels and no explaining.
 - `trans-bucket`: for a trans pick, at most one candidate line of the speaker changes. Where
   the line naturally allows it, one light, natural trans detail of one of four shapes: a
   family member's acceptance, possibly in progress; someone who backs the speaker; a name
@@ -61,18 +67,20 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
 - `same-partner`: when a speaker has several romance lines in a queer pick, they are drafted
   together. Use the same partner in every line, with one gender, one set of pronouns and the
   same details.
-- `minimal-fix`: change only the words the edit needs. A world or trans pick's own edit is
-  allowed.
+- `minimal-fix`: change only the words the edit needs. A world, nonbinary or trans pick's own
+  edit is allowed.
 - `already-queer`: a line whose pairing is already same-sex stays as written, and so does a
   line whose speaker, partner or crush is already trans or nonbinary. The intent keeps these
   as no-hit.
 
-Selection: three disjoint sides, each with its own salted seeded order, so a unit picked by
+Selection: four disjoint sides, each with its own salted seeded order, so a unit picked by
 one side is never picked by another. The romance side takes romance_share of the romance
 pool, where the romance pool is the eligible speakers with a romance line plus each
 speakerless romance line. The world side takes world_share of the eligible characters
 outside the romance pool, and the world pool is the eligible speakers outside the romance
-pool with an insertable mark. The trans side takes trans_share of all eligible characters,
+pool with an insertable mark. The nonbinary side takes nonbinary_share of the eligible
+characters outside the romance pool, and the nonbinary pool is the eligible speakers outside
+the romance pool with an insertable mark. The trans side takes trans_share of all eligible characters,
 and the trans pool is the eligible speakers with a trans-candidate mark, minus the other
 sides' picks. Speakerless lines are never trans picks. Eligible means not core cast, not an
 antagonist, and not the flirt. Each share is a whole number from 0 to 100, and its target is
@@ -106,15 +114,19 @@ It rejects a rewrite that breaks any of these labels.
 - `meaning`: meaning protects the bond, not the gender. The same partner, feeling and
   details stay. The partner's or crush's gender, or the flirt's target, changes only as
   the bucket asks.
-- `minimal-fix`: rejects a rewrite that changes more than its edit needs. A world or trans
-  pick's own edit is allowed.
+- `minimal-fix`: rejects a rewrite that changes more than its edit needs. A world, nonbinary or
+  trans pick's own edit is allowed.
 - `same-partner`: rejects a rewrite that changes the partner's gender, pronouns or
   details from one of the speaker's lines to another.
 - `queer-bucket`: rejects a rewrite that changes more than the target's gender, or that
   leaves the pairing other than same-sex unless the line carries a bi reading.
 - `world-bucket`: rejects a same-sex partner mention that could be deleted without loss, a
-  rewrite that changes more than one line of a world or trans pick, and a mention that is
+  rewrite that changes more than one line of a world, nonbinary or trans pick, and a mention that is
   not one short clause or puts a label or an explanation in the line.
+- `nonbinary-bucket`: rejects a rewrite whose partner's gender is unspecified rather than
+  consistently they/them, a modern label in the setting, a partner mention that could be
+  deleted without loss, and a mention that is not one short clause or puts a label or an
+  explanation in the line.
 - `trans-bucket`: rejects a "she's trans" aside and a forced trans detail. A trans detail
   that is not one of the four shapes, does not answer the line's own topic, or is too vague
   to read as trans is rejected too. It also rejects a rewrite that states an old name,
@@ -136,10 +148,10 @@ It rejects a rewrite that breaks any of these labels.
 - `no-gender-joke-or-menace`: rejects a rewrite whose humor or menace rests on the
   target's or partner's gender or queerness.
 - `no-explaining`: rejects a rewrite that explains the change or adds a tokenistic detail.
-  The world and trans buckets' own edit is neither.
+  The world, nonbinary and trans buckets' own edit is neither.
 - `keep-voice`: rejects a rewrite that breaks the speaker's voice.
 - `no-new-detail`: rejects a rewrite that adds a name, object or motive the original
-  line lacks, except the world and trans buckets' own edit.
+  line lacks, except the world, nonbinary and trans buckets' own edit.
 - `no-contradiction`: rejects a rewrite that contradicts the speaker's other lines.
 - `protect-plot`: rejects a rewrite that changes a plot fact, or that changes the scene's
   meaning to fit a label. A partner's or crush's gender is not a plot fact by itself, unless
@@ -159,7 +171,7 @@ The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 
 ## How it is checked
 
-The lens runs under the queering selection: an Opus marker, a Haiku candidate pass, three disjoint seeded refill sides (romance, world and trans), one draft call per pick, and no Jev.
+The lens runs under the queering selection: an Opus marker, a Haiku candidate pass, four disjoint seeded refill sides (romance, world, nonbinary and trans), one draft call per pick, and no Jev.
 The candidate pass asks, of each eligible non-romance speaker's lines, whether the line is insertable (about home, family, work or daily life) and whether it is trans-candidate (about family, a name, belonging, someone standing up for the speaker, or their past). Its marks go to `marks.jsonl` with no line text. They never change the keys of the Opus marker.
 
 The triage questions are used only for counts, with no Jev recheck. The marker reads the lines of characters outside the core cast who are not antagonists, and the flirt's. The lens test, `tests/lenses/test_queering.py`, pins the triage

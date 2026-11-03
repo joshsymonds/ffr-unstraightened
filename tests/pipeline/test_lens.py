@@ -444,12 +444,13 @@ def test_screen_model_does_not_change_screen_stage_text(tmp_path: Path) -> None:
 def test_lens_without_shares_has_default_shares(tmp_path: Path) -> None:
     lens = load_lens(write_lens(tmp_path, VALID))
     assert lens.romance_share == 15
-    assert lens.world_share == 15
+    assert lens.world_share == 10
+    assert lens.nonbinary_share == 5
     assert lens.trans_share == 5
     assert lens == EXPECTED_LENS
 
 
-SHARE_KEYS = ["romance_share", "world_share", "trans_share"]
+SHARE_KEYS = ["romance_share", "world_share", "nonbinary_share", "trans_share"]
 # Each case declares a share as TOML text, with the value the field should load. 0 and 100 are the bounds, both allowed.
 SHARE_VALID_VALUES: list[tuple[str, int]] = [
     ("0", 0),
@@ -465,9 +466,9 @@ def test_declared_share_loads_into_its_field(tmp_path: Path, key: str, text: str
     assert getattr(lens, key) == value
 
 
-def test_all_three_shares_declared_load_together(tmp_path: Path) -> None:
-    lens = load_lens(write_lens(tmp_path, "romance_share = 0\nworld_share = 100\ntrans_share = 50\n" + VALID))
-    assert lens == replace(EXPECTED_LENS, romance_share=0, world_share=100, trans_share=50)
+def test_all_four_shares_declared_load_together(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, "romance_share = 0\nworld_share = 100\nnonbinary_share = 7\ntrans_share = 50\n" + VALID))
+    assert lens == replace(EXPECTED_LENS, romance_share=0, world_share=100, nonbinary_share=7, trans_share=50)
 
 
 # Each case declares a share that is not a whole number from 0 to 100. A bool is not a number here, and "all" is no longer a value.
