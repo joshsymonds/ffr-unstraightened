@@ -4433,14 +4433,14 @@ QUEER_SCENE_A = Scene(
 )
 QUEER_SCENE_B = Scene("made-up-scene-b", (_line(NS_B, "1", "made-up-speaker-b", EN_B1, 2), _line(NS_B, "2", None, EN_B2, 2)))
 QUEER_SCENES = (QUEER_SCENE_A, QUEER_SCENE_B, SCENE_C)
-# Buckets are the frozen queering.select answers for these speakers. Not game text.
+# Buckets are the run-wide ranking of the three marked units: speaker b, the speakerless line of scene a and the speakerless line of scene c. Not game text.
 EXPECTED_QUEER_OUTCOMES = [
     Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
-    Outcome(NS_A, "2", 1, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
+    Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="trans"),
     Outcome(NS_A, "3", 1, "made-up-speaker-c", (BETA,), "untouched", None, None, bucket="not-redirected"),
-    Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "untouched", None, None, bucket="untouched"),
+    Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus", bucket="queer"),
     Outcome(NS_B, "2", 2, None, (), "untouched", None, None),
-    Outcome(NS_C, "1", None, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
+    Outcome(NS_C, "1", None, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
 ]
 QUEER_FLAGS = {(NS_A, "2"): [ALPHA], (NS_A, "3"): [BETA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
 SCREEN_ELIGIBLE = "Eligible lines, flag only these:\n"
@@ -4450,7 +4450,7 @@ def _queer_claude() -> FakeClaude:
     claude = FakeClaude()
     claude.bible = {1: QUEER_BIBLE}
     claude.flags = dict(QUEER_FLAGS)
-    claude.drafts = {(NS_C, "1"): [OPUS_C1]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1], (NS_C, "1"): [OPUS_C1]}
     return claude
 
 
@@ -4484,8 +4484,8 @@ def test_queering_screens_only_markable_lines_on_opus_and_writes_each_marked_lin
     assert outcomes == EXPECTED_QUEER_OUTCOMES
     assert jev.calls == []
     assert {model for model, _, schema in claude.calls if schema is SCREEN_SCHEMA} == {claude_module.OPUS}
-    # The bible, one batch per scene, the speakerless draft of scene c, and the arc judge.
-    assert claude.batches == 3 + len(QUEER_SCENES)
+    # The bible, one batch per scene, one per phase-two unit (speaker b and the speakerless line of scene a), and the arc judge.
+    assert claude.batches == 7
     records = [json.loads(line) for line in (tmp_path / "work" / LENS / report.OUTCOMES).read_text(encoding="utf-8").splitlines()]
     assert ["bucket" in record for record in records] == [outcome.bucket is not None for outcome in EXPECTED_QUEER_OUTCOMES]
 
@@ -4524,7 +4524,9 @@ def test_queering_failed_screen_leaves_every_line_of_its_scene_unfinished(tmp_pa
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "unfinished", None, None),
         Outcome(NS_A, "2", 1, None, (), "unfinished", None, None),
         Outcome(NS_A, "3", 1, "made-up-speaker-c", (), "unfinished", None, None),
-        *EXPECTED_QUEER_OUTCOMES[3:],
+        Outcome(NS_B, "1", 2, "made-up-speaker-b", (ALPHA,), "changed", None, "opus", bucket="queer"),
+        Outcome(NS_B, "2", 2, None, (), "untouched", None, None),
+        Outcome(NS_C, "1", None, None, (ALPHA,), "changed", None, "opus", bucket="trans"),
     ]
 
 
@@ -4681,6 +4683,28 @@ def test_queering_failed_speaker_draft_leaves_each_of_its_lines_unfinished_with_
     assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "2")}
 
 
+# A made-up speaker marked in two scenes, with a speakerless marked line in scene a. Over both scenes the speakerless line ranks first and the speaker second, so the speaker is trans on both lines. Scene b alone would rank the speaker queer. Not game text.
+CROSS_SPEAKER = "made-up-speaker-e"
+NOTES_CROSS = {"speaker": CROSS_SPEAKER, "notes": "Made-up quiet guard notes. Not game text.", "gender": "made-up-gender-e"}
+CROSS_SCENES = (
+    Scene("made-up-scene-a", (_line(NS_A, "1", CROSS_SPEAKER, EN_A1, 1), _line(NS_A, "2", None, EN_A2, 1))),
+    Scene("made-up-scene-b", (_line(NS_B, "1", CROSS_SPEAKER, EN_B1, 2),)),
+)
+
+
+def test_queering_speaker_marked_in_two_scenes_gets_one_bucket_on_both_lines(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.bible = {1: {"characters": [NOTES_CROSS], "facts": [], "callbacks": [], "arcs": []}}
+    claude.flags = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [ALPHA], (NS_B, "1"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_A, "2"): [OPUS_A2], (NS_B, "1"): [OPUS_B1]}
+    outcomes = _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=CROSS_SCENES, lens=QUEER_LENS)
+    assert {(outcome.namespace, outcome.key): outcome.bucket for outcome in outcomes} == {
+        (NS_A, "1"): "trans",
+        (NS_A, "2"): "queer",
+        (NS_B, "1"): "trans",
+    }
+
+
 # Queering phase 2 coherence, judge and base tests, on the phase fixtures above. Made-up lines. Not game text.
 def _queer_coherence_claude() -> FakeClaude:
     claude = FakeClaude()
@@ -4796,11 +4820,12 @@ def test_queering_through_takes_the_core_cast_from_the_whole_game_bible(tmp_path
     claude = FakeClaude()
     claude.bible = {2: THROUGH_BIBLE}
     claude.flags = {(NS_A, "2"): [ALPHA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2]}
     outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=QUEER_LENS, through=1)
     assert _screens(claude) == [(claude_module.OPUS, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
-        Outcome(NS_A, "2", 1, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
+        Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
     ]
 
 
@@ -4815,11 +4840,12 @@ def test_queering_through_chained_run_takes_the_core_cast_from_the_seeded_whole_
     claude = FakeClaude()
     claude.bible = {}
     claude.flags = {(NS_A, "2"): [ALPHA]}
+    claude.drafts = {(NS_A, "2"): [OPUS_A2]}
     outcomes = _run(tmp_path, claude, [], jev=None, scenes=THROUGH_SCENES, lens=replace(QUEER_LENS, base=BASE), through=1)
     assert _screens(claude) == [(claude_module.OPUS, [{"namespace": NS_A, "key": "2"}])]
     assert outcomes == [
         Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None),
-        Outcome(NS_A, "2", 1, None, (ALPHA,), "untouched", None, None, bucket="untouched"),
+        Outcome(NS_A, "2", 1, None, (ALPHA,), "changed", None, "opus", bucket="queer"),
     ]
 
 

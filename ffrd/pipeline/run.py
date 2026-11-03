@@ -832,7 +832,7 @@ def _marking(bibles: Sequence[Mapping[str, Any]], scenes: Sequence[Scene]) -> _M
 
 
 def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
-    """Phase 1 of queering: one Opus screen over the scene's markable lines. Each marked line is recorded untouched with its reasons and its bucket, and every other line untouched. A scene with no markable line makes no call."""
+    """Phase 1 of queering: one Opus screen over the scene's markable lines. Each marked line is recorded untouched with its reasons, and every other line untouched. Buckets are ranked once every scene is screened (_ranked). A scene with no markable line makes no call."""
     eligible = {
         (line.namespace, line.key)
         for line in scene.lines
@@ -844,15 +844,23 @@ def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[l
     marked = stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=claude.OPUS, eligible=eligible)
     if not isinstance(marked, dict):
         return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
-    outcomes: list[Outcome] = []
-    for line in scene.lines:
-        reasons = marked.get((line.namespace, line.key))
-        if reasons is None:
-            outcomes.append(_outcome(line, (), "untouched"))
-            continue
-        bucket = queering.select(line.namespace, line.key, line.speaker, marking.core, marking.antagonists, marking.flirt)
-        outcomes.append(replace(_outcome(line, reasons, "untouched"), bucket=bucket))
+    outcomes = [_outcome(line, marked.get((line.namespace, line.key), ()), "untouched") for line in scene.lines]
     return outcomes, [], _Recall(), _PassRecord()
+
+
+def _ranked(marking: _Marking, scenes: Sequence[list[Outcome]]) -> list[list[Outcome]]:
+    """Each marked line's bucket, ranked over every scene's marked lines together, so a speaker's lines share one bucket across scenes. The flirt keeps its redirect split."""
+    marked = [(outcome.namespace, outcome.key, outcome.speaker) for outcomes in scenes for outcome in outcomes if outcome.reasons]
+    ranked = queering.rank(marked, marking.core, marking.antagonists, marking.flirt)
+    return [
+        [
+            replace(outcome, bucket=queering.select(outcome.namespace, outcome.key, outcome.speaker, marking.flirt, ranked))
+            if outcome.reasons
+            else outcome
+            for outcome in outcomes
+        ]
+        for outcomes in scenes
+    ]
 
 
 def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
@@ -921,7 +929,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
 def _queered(
     ctx: _Context, scenes: Sequence[tuple[Scene, Ask]], outcomes: Sequence[list[Outcome]], batch: Callable[[], Ask]
 ) -> list[tuple[list[Outcome], list[Change]]]:
-    """Phase 2 of queering, once every scene's screen has marked its lines. Each line in a rewritten bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Every target then gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
+    """Phase 2 of queering, once every scene's screen has marked its lines and _ranked has bucketed them. Each line in a rewritten bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Every target then gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
     intents = [
         (index, scene, ask, line, marked)
         for index, ((scene, ask), scene_outcomes) in enumerate(zip(scenes, outcomes, strict=True))
@@ -1262,6 +1270,12 @@ def run(
 
     scene_items = [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)]
     scene_results = claude.fan_out(scene_pass, scene_items)
+    if ctx.marking is not None:
+        bucketed = _ranked(ctx.marking, [result[0] for result in scene_results])
+        scene_results = [
+            (scene_outcomes, scene_changes, recall, passed)
+            for scene_outcomes, (_, scene_changes, recall, passed) in zip(bucketed, scene_results, strict=True)
+        ]
     if selecting:
         phase_two = _queered(ctx, [(scene, ask) for _, scene, ask in scene_items], [result[0] for result in scene_results], batch)
         scene_results = [

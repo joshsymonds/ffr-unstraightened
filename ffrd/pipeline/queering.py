@@ -1,4 +1,4 @@
-"""Queering selection: the core cast and antagonists that stay vanilla, the flirt, the per-speaker bucket that picks queer and trans lines, and the redirect half of the flirt. Inputs are plain bible records, speaker ids, line refs and counts."""
+"""Queering selection: the core cast and antagonists that stay vanilla, the flirt, the run-wide ranking that picks queer and trans speakers, and the redirect half of the flirt. Inputs are plain bible records, speaker ids, line refs and counts."""
 
 import hashlib
 import re
@@ -58,15 +58,24 @@ def flirt(bibles: Sequence[Mapping[str, Any]]) -> str | None:
     return leaders[0]
 
 
-def bucket(namespace: str, key: str, speaker: str | None, core: Collection[str], antagonists: Collection[str]) -> Bucket:
-    if speaker and (speaker in core or speaker in antagonists):
-        return "untouched"
-    v = _share(speaker if speaker else f"{namespace}/{key}")
-    if v < QUEER_PERCENT:
-        return "queer"
-    if v < QUEER_PERCENT + TRANS_PERCENT:
-        return "trans"
-    return "untouched"
+def rank(
+    marked: Sequence[tuple[str, str, str | None]], core: Collection[str], antagonists: Collection[str], flirt: str | None
+) -> dict[tuple[str, str], Bucket]:
+    """Rank the units of the marked lines across the run. A speaker is one unit and each speakerless line is its own unit, identified by its namespace and key. Units sort by the SHA-256 of their id: the first ceiling of QUEER_PERCENT of them are queer, the next ceiling of TRANS_PERCENT of the rest are trans. Core, antagonist and flirt lines are not ranked."""
+    units: defaultdict[str, list[tuple[str, str]]] = defaultdict(list)
+    for namespace, key, speaker in marked:
+        if speaker and (speaker in core or speaker in antagonists or speaker == flirt):
+            continue
+        units[speaker if speaker else f"{namespace}/{key}"].append((namespace, key))
+    order = sorted(units, key=lambda unit: (hashlib.sha256(unit.encode("utf-8")).digest(), unit))
+    queer_end = _ceil_share(QUEER_PERCENT, len(order))
+    trans_end = queer_end + min(_ceil_share(TRANS_PERCENT, len(order)), len(order) - queer_end)
+    buckets: dict[tuple[str, str], Bucket] = {}
+    for position, unit in enumerate(order):
+        bucket: Bucket = "queer" if position < queer_end else "trans" if position < trans_end else "untouched"
+        for ref in units[unit]:
+            buckets[ref] = bucket
+    return buckets
 
 
 def redirected(namespace: str, key: str) -> bool:
@@ -81,12 +90,10 @@ def markable(speaker: str | None, core: Collection[str], antagonists: Collection
     return speaker not in core and speaker not in antagonists
 
 
-def select(
-    namespace: str, key: str, speaker: str | None, core: Collection[str], antagonists: Collection[str], flirt: str | None
-) -> Selection:
+def select(namespace: str, key: str, speaker: str | None, flirt: str | None, ranked: Mapping[tuple[str, str], Bucket]) -> Selection:
     if flirt is not None and speaker == flirt:
         return "redirect" if redirected(namespace, key) else "not-redirected"
-    return bucket(namespace, key, speaker, core, antagonists)
+    return ranked.get((namespace, key), "untouched")
 
 
 def _characters(bibles: Sequence[Mapping[str, Any]]) -> Iterator[Mapping[str, Any]]:
@@ -100,3 +107,7 @@ def _words(notes: str) -> list[str]:
 
 def _share(text: str) -> int:
     return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big") % 100
+
+
+def _ceil_share(percent: int, units: int) -> int:
+    return -(-percent * units // 100)
