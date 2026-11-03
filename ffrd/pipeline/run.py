@@ -832,7 +832,7 @@ def _marking(bibles: Sequence[Mapping[str, Any]], scenes: Sequence[Scene]) -> _M
 
 
 def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
-    """Phase 1 of queering: one Opus screen over the scene's markable lines. Each marked line is recorded untouched with its reasons, and every other line untouched. Buckets are ranked once every scene is screened (_ranked). A scene with no markable line makes no call."""
+    """Phase 1 of queering: one screen on the lens's model over the scene's markable lines. Each marked line is recorded untouched with its reasons, and every other line untouched. Buckets are ranked once every scene is screened (_ranked). A scene with no markable line makes no call."""
     eligible = {
         (line.namespace, line.key)
         for line in scene.lines
@@ -840,8 +840,8 @@ def _marked(ctx: _Context, scene: Scene, marking: _Marking, ask: Ask) -> tuple[l
     }
     if not eligible:
         return _every_line(scene, "untouched"), [], _Recall(), _PassRecord()
-    cast = [{**entry, "flirt": True} if entry["speaker"] == marking.flirt else entry for entry in arcs.cast(ctx.bibles, _speakers(scene))]
-    marked = stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=claude.OPUS, eligible=eligible)
+    cast = [{**entry, "flirt": True} if entry["speaker"] == marking.flirt else entry for entry in arcs.scene_cast(ctx.bibles, scene)]
+    marked = stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=ctx.lens.screen_model, eligible=eligible)
     if not isinstance(marked, dict):
         return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
     outcomes = [_outcome(line, marked.get((line.namespace, line.key), ()), "untouched") for line in scene.lines]
@@ -869,7 +869,7 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
     cast = arcs.cast(ctx.bibles, _speakers(scene))
 
     def screen() -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
-        return stages.screen(ctx.store, ctx.lens, scene, cast, ask)
+        return stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=ctx.lens.screen_model)
 
     def triage() -> dict[str, float] | RateLimited | Unfinished | Rejected | None:
         if ctx.jev is None:

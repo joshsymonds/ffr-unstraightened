@@ -22,6 +22,7 @@ id = "flirt-at-woman"
 question = "The party member whose running gag is flirting aims a running-gag flirt in this scene only at a woman or at women."
 
 [screen]
+model = "opus"
 criteria = [
     "[partner] Flag partner when a character outside the core cast talks about their own romantic partner, such as a spouse, lover, betrothed or ex, and the pairing reads as a cisgender man and a cisgender woman. Any character outside the core cast qualifies, a bigger recurring one as much as a passer-by. Flag only the speaker's own lines.",
     "[attraction] Flag attraction when a character outside the core cast talks about their own romantic attraction or crush, and it is aimed at a cisgender person of the opposite sex. Any character outside the core cast qualifies, a bigger recurring one as much as a passer-by. Flag only the speaker's own lines.",

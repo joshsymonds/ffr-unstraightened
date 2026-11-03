@@ -2158,6 +2158,23 @@ def test_rescreen_receives_the_scene_cast(tmp_path: Path) -> None:
         assert json.loads(_part(parts, "Cast:\n")) == [CAST_A]
 
 
+def test_default_screen_runs_on_the_lens_screen_model(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=None, lens=replace(LENS_OBJ, screen_model=claude_module.SONNET))
+    assert {model for model, _, schema in claude.calls if schema is SCREEN_SCHEMA} == {claude_module.SONNET}
+
+
+def test_default_screen_without_a_screen_model_stays_on_opus(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=None)
+    assert {model for model, _, schema in claude.calls if schema is SCREEN_SCHEMA} == {claude_module.OPUS}
+
+
+def test_queering_lens_names_its_screen_model_explicitly() -> None:
+    lens = tomllib.loads((Path(__file__).resolve().parents[2] / "lenses" / "queering.toml").read_text(encoding="utf-8"))
+    assert lens["screen"]["model"] == claude_module.OPUS
+
+
 # Made-up coherence scene: two flagged lines, both shipping unless the coherence check reverts them. Not game text.
 EN_D1 = "Made-up line one of scene d. Not game text."
 EN_D2 = "Made-up line two of scene d. Not game text."
@@ -4505,6 +4522,78 @@ def test_unstraightening_screen_cast_carries_no_flirt_key(tmp_path: Path) -> Non
     claude.flags = {}
     _run(tmp_path, claude, [], jev=None, scenes=(QUEER_SCENE_A,), lens=LENS_OBJ)
     assert _screen_casts(claude) == {(NS_A, "1"): [("made-up-speaker-a", "absent"), ("made-up-speaker-c", "absent")]}
+
+
+def _queer_window_bible(chapter: int) -> dict[str, Any]:
+    """A made-up bible with a plain speaker and a flirt, each with notes for this chapter. Not game text."""
+    return {
+        "characters": [
+            {
+                "speaker": "made-up-speaker-a",
+                "notes": f"Made-up notes of speaker a in chapter {chapter}. Not game text.",
+                "gender": "made-up-gender-a",
+            },
+            {
+                "speaker": "made-up-speaker-c",
+                "notes": f"Made-up flirt notes of speaker c in chapter {chapter}. Not game text.",
+                "gender": "made-up-gender-c",
+            },
+        ],
+        "facts": [],
+        "callbacks": [],
+        "arcs": [],
+    }
+
+
+WINDOW_SCENE_ONE = Scene(
+    "made-up-scene-one",
+    (_line(NS_A, "4", "made-up-speaker-a", EN_A1, 1), _line(NS_A, "5", "made-up-speaker-c", EN_A3, 1)),
+)
+WINDOW_SCENE_TWO = Scene(
+    "made-up-scene-two",
+    (_line(NS_A, "1", "made-up-speaker-a", EN_A1, 2), _line(NS_A, "3", "made-up-speaker-c", EN_A3, 2)),
+)
+WINDOW_SCENE_THREE = Scene(
+    "made-up-scene-three",
+    (_line(NS_B, "1", "made-up-speaker-a", EN_B1, 3), _line(NS_B, "2", "made-up-speaker-c", EN_B2, 3)),
+)
+
+
+def test_queering_screen_cast_holds_only_the_scene_window_and_keeps_the_flirt_flag(tmp_path: Path) -> None:
+    claude = FakeClaude()
+    claude.bible = {1: _queer_window_bible(1), 2: _queer_window_bible(2), 3: _queer_window_bible(3)}
+    _run(tmp_path, claude, [], jev=None, scenes=(WINDOW_SCENE_ONE, WINDOW_SCENE_TWO, WINDOW_SCENE_THREE), lens=QUEER_LENS)
+    casts: dict[tuple[str, str], list[tuple[str, int, object]]] = {}
+    for _, parts, schema in claude.calls:
+        if schema is SCREEN_SCHEMA:
+            first = json.loads(_part(parts, "Scene lines:\n"))[0]
+            cast = json.loads(_part(parts, "Cast:\n"))
+            casts[(first["namespace"], first["key"])] = [
+                (entry["speaker"], entry["chapter"], entry.get("flirt", "absent")) for entry in cast
+            ]
+    # Chapter 1 reads chapter 1 alone. Chapter 2 reads chapter 1, the latest earlier bible, and chapter 2; chapter 3 is absent.
+    # Chapter 3 reads chapters 2 and 3; chapter 1 is absent.
+    assert casts == {
+        (NS_A, "4"): [("made-up-speaker-a", 1, "absent"), ("made-up-speaker-c", 1, True)],
+        (NS_A, "1"): [
+            ("made-up-speaker-a", 1, "absent"),
+            ("made-up-speaker-c", 1, True),
+            ("made-up-speaker-a", 2, "absent"),
+            ("made-up-speaker-c", 2, True),
+        ],
+        (NS_B, "1"): [
+            ("made-up-speaker-a", 2, "absent"),
+            ("made-up-speaker-c", 2, True),
+            ("made-up-speaker-a", 3, "absent"),
+            ("made-up-speaker-c", 3, True),
+        ],
+    }
+
+
+def test_queering_screens_on_the_lens_screen_model(tmp_path: Path) -> None:
+    claude = _queer_claude()
+    _run(tmp_path, claude, [], jev=None, scenes=QUEER_SCENES, lens=replace(QUEER_LENS, screen_model=claude_module.SONNET))
+    assert [model for model, _ in _screens(claude)] == [claude_module.SONNET] * 3
 
 
 def test_queering_scene_without_a_markable_line_makes_no_call_and_leaves_every_line_untouched(tmp_path: Path) -> None:
