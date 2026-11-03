@@ -1068,7 +1068,7 @@ def _pick_unit(
             ref = (line.namespace, line.key)
             if ref in gated:
                 first, _ = gated[ref]
-                results[(index, *ref)] = (replace(first, chapter=line.chapter, reasons=marked.reasons), None)
+                results.setdefault((index, *ref), (replace(first, chapter=line.chapter, reasons=marked.reasons), None))
                 continue
             outcome, change = _pick_line(ctx, scene, line, marked, answer, ask)
             gated[ref] = (replace(outcome, bucket=marked.bucket), change)
@@ -1094,7 +1094,7 @@ def _pick_gated(
 def _queered(
     ctx: _Context, scenes: Sequence[tuple[Scene, Ask]], outcomes: Sequence[list[Outcome]], batch: Callable[[], Ask]
 ) -> list[tuple[list[Outcome], list[Change]]]:
-    """Phase 2 of queering, once every scene's screen has marked its lines and the round has bucketed them. Each line in a queer or redirect bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Each world, nonbinary and trans pick's lines are drafted in one call per pick. Every target then gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
+    """Phase 2 of queering, once every scene's screen has marked its lines and the round has bucketed them. Each line in a queer or redirect bucket is intended with its bucket. Each speaker's targets are drafted in one call across their scenes, and each speakerless target per scene. Each world, nonbinary and trans pick's lines are drafted in one call per pick. Each ref then takes the fate of its earliest occurrence, which alone gates as a line-pass line, and each scene settles its coherence. Every outcome of a marked line keeps its bucket. Returns each scene's outcomes and changes in run order."""
     intents = [
         (index, scene, ask, line, marked)
         for index, ((scene, ask), scene_outcomes) in enumerate(zip(scenes, outcomes, strict=True))
@@ -1138,21 +1138,29 @@ def _queered(
     for drafted in claude.fan_out(draft, units):
         firsts.update(drafted)
 
-    def gate(item: tuple[int, Scene, Ask, SceneLine, Outcome, stages.Target | Outcome]) -> tuple[Outcome, Change | None]:
-        index, scene, ask, line, marked, plan = item
+    # A ref's fate is that of its earliest occurrence in run order, which alone gates. Its later occurrences take that outcome with no change of their own.
+    earliest: dict[tuple[str, str], int] = {}
+    for position, (_, _, _, line, _) in enumerate(intents):
+        earliest.setdefault((line.namespace, line.key), position)
+
+    def gate(position: int) -> tuple[Outcome, Change | None]:
+        index, scene, ask, line, marked = intents[position]
+        plan = intended[position]
         if isinstance(plan, Outcome):
             outcome, change = plan, None
         else:
             outcome, change = _gated(ctx, scene, plan, marked.reasons, firsts[(index, line.namespace, line.key)], ask)
         return replace(outcome, bucket=marked.bucket), change
 
-    gated = dict(
-        zip(
-            [(index, line.namespace, line.key) for index, _, _, line, _ in intents],
-            claude.fan_out(gate, [(*intent, plan) for intent, plan in zip(intents, intended, strict=True)]),
-            strict=True,
-        )
-    )
+    fates = dict(zip(earliest, claude.fan_out(gate, list(earliest.values())), strict=True))
+    gated: dict[tuple[int, str, str], tuple[Outcome, Change | None]] = {}
+    for position, (index, _, _, line, marked) in enumerate(intents):
+        ref = (line.namespace, line.key)
+        if position == earliest[ref]:
+            gated[(index, *ref)] = fates[ref]
+        else:
+            first, _ = fates[ref]
+            gated.setdefault((index, *ref), (replace(first, chapter=line.chapter, reasons=marked.reasons, bucket=marked.bucket), None))
 
     gated.update(_pick_gated(ctx, scenes, outcomes, batch))
 
@@ -1160,13 +1168,15 @@ def _queered(
         scene, ask = scenes[index]
         settled: list[Outcome] = []
         changes: list[Change] = []
+        recorded: set[tuple[str, str]] = set()
         for line, marked in zip(scene.lines, outcomes[index], strict=True):
             result = gated.get((index, line.namespace, line.key))
             if result is None:
                 settled.append(marked)
                 continue
             settled.append(result[0])
-            if result[1] is not None:
+            if result[1] is not None and (line.namespace, line.key) not in recorded:
+                recorded.add((line.namespace, line.key))
                 changes.append(result[1])
         return _coherent(ctx, scene, settled, changes, ask)
 
