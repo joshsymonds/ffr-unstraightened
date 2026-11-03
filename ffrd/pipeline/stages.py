@@ -550,6 +550,40 @@ DRAFT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+TRANS_DRAFT_INSTRUCTIONS = (
+    "Decide for each of one speaker's lines whether a trans detail fits it. Add a light, natural trans detail only where "
+    "the line allows it: a detail that the speaker is trans, or a nonbinary partner who uses they/them on a romance line. "
+    'Otherwise keep the line unchanged. Never force a detail, and never write a "she\'s trans" aside. Return JSON with '
+    "lines, an array with one entry per speaker line, each with namespace, key, keep, intent and drafts. Set keep to true, "
+    "intent to an empty string and drafts to an empty array when the line stays unchanged. Otherwise set keep to false, "
+    "give the intent of the change, and give one or more candidate English lines in drafts. Keep every {...} placeholder "
+    "and every <text ...>...</> tag from the line's English, unchanged. Keep each English line's line breaks. Stay within "
+    "120% of each English line's length. Refer to lines only by namespace and key."
+)
+
+TRANS_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string"},
+                    "key": {"type": "string"},
+                    "keep": {"type": "boolean"},
+                    "intent": {"type": "string"},
+                    "drafts": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["namespace", "key", "keep", "intent", "drafts"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["lines"],
+    "additionalProperties": False,
+}
+
 
 def _target_dict(target: Target) -> dict[str, Any]:
     return {
@@ -641,6 +675,52 @@ def draft_speaker(
     except _Unanswered as unanswered:
         return unanswered.failure
     return {(entry["namespace"], entry["key"]): tuple(entry["drafts"]) for entry in entries}
+
+
+@dataclass(frozen=True)
+class TransDraft:
+    keep: bool
+    intent: str
+    drafts: tuple[str, ...]
+
+
+def trans_draft(
+    store: Store,
+    lens: Lens,
+    groups: Sequence[tuple[Scene, Sequence[SceneLine]]],
+    ask: Ask,
+) -> dict[tuple[str, str], TransDraft] | Unfinished | Rejected:
+    expected = sorted((line.namespace, line.key) for _scene, lines in groups for line in lines)
+    parts = [
+        TRANS_DRAFT_INSTRUCTIONS,
+        f"Intent rule:\n{lens.stage_text('intent')}",
+        "Scenes:\n"
+        + _json([{"scene": scene.key, "lines": _line_dicts(scene.lines), "speaker_lines": _line_dicts(lines)} for scene, lines in groups]),
+    ]
+
+    def call() -> list[dict[str, Any]]:
+        answer = ask(claude.OPUS, parts, TRANS_DRAFT_SCHEMA)
+        if isinstance(answer, Unfinished | Rejected):
+            raise _Unanswered(answer)
+        entries = answer["lines"]
+        if sorted((entry["namespace"], entry["key"]) for entry in entries) != expected:
+            raise _Unanswered(Rejected("trans entries do not name each line of the speaker once"))
+        for entry in entries:
+            if entry["keep"] and entry["drafts"]:
+                raise _Unanswered(Rejected("trans entry keeps a line but gives drafts for it"))
+            if not entry["keep"] and not (entry["intent"] and entry["drafts"]):
+                raise _Unanswered(Rejected("trans entry changes a line without an intent or drafts"))
+        return entries
+
+    inputs = {"scenes": [{**_inputs(scene), "targets": [_line_ref(line) for line in lines]} for scene, lines in groups]}
+    try:
+        entries = store.run("trans_draft", inputs, lens.stage_text("intent"), call).value
+    except _Unanswered as unanswered:
+        return unanswered.failure
+    return {
+        (entry["namespace"], entry["key"]): TransDraft(keep=entry["keep"], intent=entry["intent"], drafts=tuple(entry["drafts"]))
+        for entry in entries
+    }
 
 
 def render(store: Store, renderer: Renderer, speaker: str | None, text: str) -> str:
