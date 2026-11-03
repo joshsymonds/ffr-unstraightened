@@ -84,13 +84,13 @@ the romance pool with an insertable mark. The trans side takes trans_share of al
 and the trans pool is the eligible speakers with a trans-candidate mark, minus the other
 sides' picks. Speakerless lines are never trans picks. Eligible means not core cast, not an
 antagonist, and not the flirt. Each share is a whole number from 0 to 100, and its target is
-the share of its denominator rounded half up: a share of 100 takes the whole pool and a share
-of 0 draws nothing. A side that ends short of its target is reported exhausted, which happens
-only when its pool runs out. Each pool is sorted by a salted SHA-256 of its unit id, and each
-side has its own salt. Each side is refilled from the order until the target or the pool
-runs out, and a pick counts only when a changed line survives every judge. Every romance line
-of a queer pick converts, drafted together. A gender-roles mark never puts a unit in the
-queer pool.
+the share of its denominator rounded half up: a share of 100 targets the whole denominator,
+only the romance pool equals its denominator, and a share of 0 draws nothing. A side that
+ends short of its target is reported exhausted, which happens only when its pool runs out.
+Each pool is sorted by a salted SHA-256 of its unit id, and each side has its own salt. Each
+side is refilled from the order until the target or the pool runs out, and a pick counts only
+when a changed line survives every judge. Every romance line of a queer pick converts,
+drafted together. A gender-roles mark never puts a unit in the queer pool.
 
 ## The flirt
 

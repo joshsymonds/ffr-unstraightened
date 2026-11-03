@@ -247,7 +247,7 @@ BUCKET_PHRASES: tuple[str, ...] = (
     "the nonbinary pool is the eligible speakers outside the romance pool with an insertable mark",
     "the trans pool is the eligible speakers with a trans-candidate mark, minus the other sides' picks",
     "Speakerless lines are never trans picks",
-    "a share of 100 takes the whole pool",
+    "a share of 100 targets the whole denominator, only the romance pool equals its denominator, and a share of 0 draws nothing",
     "refilled from the order until the target or the pool runs out",
     "gender-roles mark never puts a unit in the queer pool",
 )
