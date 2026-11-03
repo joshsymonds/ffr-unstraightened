@@ -3,7 +3,7 @@
 import hashlib
 import re
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from typing import Any, Literal
 
 from ffrd.game import Fail
@@ -22,6 +22,11 @@ REWRITTEN: frozenset[Selection] = frozenset({"queer", "trans", "redirect"})
 ANTAGONIST_PREFIXES = ("villain", "antagonis")
 ANTAGONIST_WORDS = frozenset({"nemesis", "archenemy", "archvillain"})
 FLIRT_PREFIX = "flirt"
+
+QUEER_SALT = "queer"
+TRANS_SALT = "trans"
+ROMANCE = "romance"
+GENDER_ROLES = "gender-roles"
 
 
 def core_cast(bibles: Sequence[Mapping[str, Any]], line_counts: Mapping[str, int]) -> frozenset[str]:
@@ -56,6 +61,18 @@ def flirt(bibles: Sequence[Mapping[str, Any]]) -> str | None:
     if len(leaders) > 1:
         raise Fail(f"{len(leaders)} speakers tie for the most flirt entries ({top} each)")
     return leaders[0]
+
+
+def unit(namespace: str, key: str, speaker: str | None) -> str:
+    return speaker if speaker else f"{namespace}/{key}"
+
+
+def order(units: Iterable[str], salt: str) -> list[str]:
+    return sorted(set(units), key=lambda unit: (hashlib.sha256(f"{salt}/{unit}".encode()).digest(), unit))
+
+
+def target(share: int, size: int) -> int:
+    return (share * size + 50) // 100
 
 
 def rank(

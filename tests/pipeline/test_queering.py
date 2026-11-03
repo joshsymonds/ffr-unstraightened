@@ -260,5 +260,48 @@ def test_select_gives_each_other_line_its_ranked_bucket_or_untouched() -> None:
     assert queering.select("Made-up-ns", "3", SYNTH_B, None, ranked) == "untouched"
 
 
+def test_unit_is_speaker_or_namespace_and_key() -> None:
+    assert queering.unit("Made-up-ns", "7", SYNTH_A) == SYNTH_A
+    assert queering.unit("Made-up-ns", "7", None) == "Made-up-ns/7"
+    assert queering.unit("Made-up-ns", "7", "") == "Made-up-ns/7"
+
+
+@pytest.mark.parametrize(
+    ("share", "size", "expected"),
+    [(15, 20, 3), (15, 10, 2), (15, 3, 0), (5, 10, 1), (50, 1, 1), (100, 37, 37), (0, 37, 0)],
+)
+def test_target_rounds_share_of_size_half_up(share: int, size: int, expected: int) -> None:
+    assert queering.target(share, size) == expected
+
+
+SYNTH_UNITS = [f"Synth-{i}" for i in range(21)] + ["Made-up-ns/3", "Made-up-ns/4"]
+
+
+def _salted_order(units: list[str], salt: str) -> list[str]:
+    return sorted(units, key=lambda unit: (hashlib.sha256(f"{salt}/{unit}".encode()).digest(), unit))
+
+
+def test_order_sorts_units_by_salted_digest() -> None:
+    assert queering.order(SYNTH_UNITS, queering.QUEER_SALT) == _salted_order(SYNTH_UNITS, queering.QUEER_SALT)
+
+
+def test_order_ignores_input_order_and_duplicates() -> None:
+    expected = queering.order(SYNTH_UNITS, queering.QUEER_SALT)
+
+    assert queering.order(list(reversed(SYNTH_UNITS)), queering.QUEER_SALT) == expected
+    assert queering.order([*SYNTH_UNITS, *SYNTH_UNITS], queering.QUEER_SALT) == expected
+    assert len(expected) == len(set(SYNTH_UNITS))
+
+
+def test_queer_and_trans_salts_are_distinct_and_order_differently() -> None:
+    assert queering.QUEER_SALT != queering.TRANS_SALT
+    assert queering.order(SYNTH_UNITS, queering.QUEER_SALT) != queering.order(SYNTH_UNITS, queering.TRANS_SALT)
+
+
+def test_reason_ids_name_the_two_screen_questions() -> None:
+    assert queering.ROMANCE == "romance"
+    assert queering.GENDER_ROLES == "gender-roles"
+
+
 def test_haiku_model_name() -> None:
     assert claude.HAIKU == "haiku"
