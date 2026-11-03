@@ -59,14 +59,15 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   as no-hit.
 
 Selection: the queer and trans picks come from salted seeded orders, and the two are
-disjoint. Queer is round(queer_share% of the romance pool), where the romance pool is the
-eligible speakers with a romance line plus each speakerless romance line. Trans is
-round(trans_share% of every eligible character). Eligible means not core cast, not an
-antagonist, and not the flirt. Each pool is sorted by a salted SHA-256 of its unit id, and
-the queer and trans salts keep the two orders apart. Picks that end with no surviving change
-are refilled from the order until the target or the pool runs out. Every romance line of a
-queer pick converts, drafted together, and every line of a trans pick is drafted together.
-The gender-roles marks never select.
+disjoint. Queer takes queer_count of the romance pool, where the romance pool is the
+eligible speakers with a romance line plus each speakerless romance line. Trans takes
+trans_count of every eligible character. Eligible means not core cast, not an antagonist,
+and not the flirt. Each count is a whole number or `all`: a count above the pool takes the
+whole pool and is reported exhausted, and a count of `all` takes the whole pool. Each pool
+is sorted by a salted SHA-256 of its unit id, and the queer and trans salts keep the two
+orders apart. Picks that end with no surviving change are refilled from the order until the
+target or the pool runs out. Every romance line of a queer pick converts, drafted together,
+and every line of a trans pick is drafted together. The gender-roles marks never select.
 
 ## The flirt
 

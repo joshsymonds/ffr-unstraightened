@@ -1251,11 +1251,11 @@ def _refill(
 
 
 def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible: int, pool: int, refill: _Refill) -> None:
-    """Writes the counts of the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and each side's share, pool, target, rounds and achieved count, with whether its pool ran out."""
+    """Writes the counts of the queering selection beside the outcomes: the romance and gender-roles marks, the eligible characters, and each side's count, pool, target, rounds and achieved count, with whether it fell short of its count or, for all, of its pool."""
     romance = [outcome for outcome in marks if queering.ROMANCE in outcome.reasons]
     gender = [outcome for outcome in marks if queering.GENDER_ROLES in outcome.reasons]
-    queer_target = queering.target(lens.queer_share, pool)
-    trans_target = queering.target(lens.trans_share, eligible)
+    queer_target = queering.target(lens.queer_count, pool)
+    trans_target = queering.target(lens.trans_count, eligible)
     queer_achieved = len(refill.queer_passing)
     trans_achieved = len(refill.trans_passing)
     record = {
@@ -1267,20 +1267,20 @@ def _write_selection(path: Path, lens: Lens, marks: Sequence[Outcome], eligible:
         "gender_roles": {"lines": len(gender), "characters": _characters(gender)},
         "eligible_characters": eligible,
         "queer": {
-            "share": lens.queer_share,
+            "count": lens.queer_count,
             "pool": pool,
             "target": queer_target,
             "rounds": [{"tried": tried, "passed": passed} for tried, passed in refill.queer_rounds],
             "achieved": queer_achieved,
-            "exhausted": queer_achieved < queer_target,
+            "exhausted": queer_achieved < queering.requested(lens.queer_count, pool),
         },
         "trans": {
-            "share": lens.trans_share,
+            "count": lens.trans_count,
             "pool": eligible,
             "target": trans_target,
             "rounds": [{"tried": tried, "passed": passed} for tried, passed in refill.trans_rounds],
             "achieved": trans_achieved,
-            "exhausted": trans_achieved < trans_target,
+            "exhausted": trans_achieved < queering.requested(lens.trans_count, eligible),
         },
     }
     _write_atomic(path, json.dumps(record, ensure_ascii=False) + "\n")
@@ -1576,9 +1576,9 @@ def run(
             ctx.marking,
             screened,
             queering.order(pool, queering.QUEER_SALT),
-            queering.target(lens.queer_share, len(pool)),
+            queering.target(lens.queer_count, len(pool)),
             queering.order(speakers, queering.TRANS_SALT),
-            queering.target(lens.trans_share, len(speakers)),
+            queering.target(lens.trans_count, len(speakers)),
             batch,
         )
         outcomes, changes = refill.outcomes, refill.changes
