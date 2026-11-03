@@ -32,6 +32,7 @@ OUTCOME_LABELS = {
 }
 GATE = re.compile(r"[a-z0-9]+([-_][a-z0-9]+)*")
 QUEERING_BUCKETS = ("queer", "trans", "untouched")
+QUEERING_CHOSEN = ("queer", "trans")
 QUEERING_REWRITES = ("queer", "trans", "redirect")
 FLIRT_BUCKETS = frozenset({"redirect", "not-redirected"})
 Key = tuple[str, str]  # (namespace, key)
@@ -444,10 +445,16 @@ def _queering_lines(records: list[Record]) -> list[str]:
     changed = Counter(r.bucket for r in records if r.outcome == "changed")
     gate_failed = Counter(r.bucket for r in records if r.outcome == "gate_failed")
     lines = [f"queering marked: {sum(marked.values())}"]
+    marked_records = [r for r in records if r.bucket in QUEERING_BUCKETS]
+    marked_speakers = {r.speaker for r in marked_records if r.speaker is not None}
+    no_marked_speaker = sum(r.speaker is None for r in marked_records)
+    lines.append(f"queering marked speakers: {len(marked_speakers)}, no speaker: {no_marked_speaker}")
     lines += [f"queering bucket {bucket}: {marked[bucket]}" for bucket in QUEERING_BUCKETS]
     speakers = {b: {r.speaker for r in records if r.bucket == b and r.speaker is not None} for b in QUEERING_BUCKETS}
     no_speaker = Counter(r.bucket for r in records if r.bucket is not None and r.speaker is None)
     lines += [f"queering speakers {b}: {len(speakers[b])}, no speaker: {no_speaker[b]}" for b in QUEERING_BUCKETS]
+    chosen = [r for r in records if r.bucket in QUEERING_CHOSEN]
+    lines.append(f"queering chosen lines: {len(chosen)}, converted: {sum(r.outcome == 'changed' for r in chosen)}")
     lines.append(f"queering flirt marked: {flirt}, redirect half: {redirect}")
     lines += [f"queering changed {bucket}: {changed[bucket]}" for bucket in QUEERING_REWRITES]
     lines += [f"queering gate failed {bucket}: {gate_failed[bucket]}" for bucket in QUEERING_REWRITES]

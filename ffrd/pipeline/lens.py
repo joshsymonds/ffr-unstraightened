@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from ffrd.game import Fail
+from ffrd.pipeline.claude import OPUS, SONNET
 
 Stage = Literal["triage", "screen", "intent", "judge", "scene"]
 
@@ -15,6 +16,7 @@ ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge", "scene"})
 TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection"})
 SCENE_KEYS = frozenset({"patterns", "criteria", "plan", "rubric"})
+SCREEN_KEYS = frozenset({"criteria", "model"})
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class Lens:
     scene: SceneSection | None = None
     base: str | None = None
     selection: Literal["queering"] | None = None
+    screen_model: str = OPUS
 
     def stage_text(self, stage: Stage) -> str:
         section: object
@@ -227,6 +230,16 @@ def _selection(data: dict[str, object], report: _Report) -> Literal["queering"] 
     return None
 
 
+def _screen_model(screen: dict[str, object] | None, report: _Report) -> str:
+    if screen is None or "model" not in screen:
+        return OPUS
+    value = screen["model"]
+    if isinstance(value, str) and value in (OPUS, SONNET):
+        return value
+    report.add("screen.model", f'must be "{OPUS}" or "{SONNET}"')
+    return OPUS
+
+
 def load_lens(path: Path) -> Lens:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -239,8 +252,9 @@ def load_lens(path: Path) -> Lens:
     base = _base(data, name, report)
     selection = _selection(data, report)
     triage, triage_index = _triage(data, report)
-    screen = _section(data, "screen", frozenset({"criteria"}), report)
+    screen = _section(data, "screen", SCREEN_KEYS, report)
     criteria = _criteria(screen, "screen", report) if screen is not None else ()
+    screen_model = _screen_model(screen, report)
     intent = _section(data, "intent", frozenset({"rule"}), report)
     rule = _text(intent, "rule", "intent", report) if intent is not None else ""
     judge = _section(data, "judge", frozenset({"rubric"}), report)
@@ -258,4 +272,5 @@ def load_lens(path: Path) -> Lens:
         scene=scene,
         base=base,
         selection=selection,
+        screen_model=screen_model,
     )

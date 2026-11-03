@@ -45,8 +45,9 @@ DETAIL = r"  (reason [a-z0-9]+(?:-[a-z0-9]+)*|kept [a-z0-9]+(?:-[a-z0-9]+)*|char
 ARCS_LINE = r"arcs: [0-9]+, [0-9]+ with changes"
 REDO_LINE = r"redo: [0-9]+ listed, [0-9]+ changed, [0-9]+ gate failed"
 QUEERING_LINE = (
-    r"queering (marked: [0-9]+|bucket (queer|trans|untouched): [0-9]+"
-    r"|speakers (queer|trans|untouched): [0-9]+, no speaker: [0-9]+|flirt marked: [0-9]+, redirect half: [0-9]+"
+    r"queering (marked: [0-9]+|marked speakers: [0-9]+, no speaker: [0-9]+|bucket (queer|trans|untouched): [0-9]+"
+    r"|speakers (queer|trans|untouched): [0-9]+, no speaker: [0-9]+|chosen lines: [0-9]+, converted: [0-9]+"
+    r"|flirt marked: [0-9]+, redirect half: [0-9]+"
     r"|changed (queer|trans|redirect): [0-9]+|gate failed (queer|trans|redirect): [0-9]+)"
 )
 RECALL_LINE = r"recall [a-z0-9]+(?:-[a-z0-9]+)*: [0-9]+ disagreements, [0-9]+ confirmed"
@@ -382,12 +383,14 @@ QUEERING_RECORDS = (
 
 EXPECTED_QUEERING = [
     "queering marked: 9",
+    "queering marked speakers: 2, no speaker: 1",
     "queering bucket queer: 4",
     "queering bucket trans: 1",
     "queering bucket untouched: 1",
     "queering speakers queer: 2, no speaker: 1",
     "queering speakers trans: 1, no speaker: 0",
     "queering speakers untouched: 1, no speaker: 0",
+    "queering chosen lines: 5, converted: 2",
     "queering flirt marked: 3, redirect half: 2",
     "queering changed queer: 1",
     "queering changed trans: 1",
@@ -414,6 +417,33 @@ def test_queering_block_prints_exact_counts_after_redo_and_before_recall(repo: P
         "recall made-up-first-id: 4 disagreements, 1 confirmed",
         "recall made-up-second-id: 0 disagreements, 0 confirmed",
     ]
+
+
+# Made-up outcomes for the marked-speaker and chosen-line edges: a speaker seen only in the redirect
+# bucket does not count, a speaker seen only in the untouched bucket does, a chosen line with no
+# speaker does, and a redirect line is never chosen. Not game text.
+QUEERING_EDGE_RECORDS = (
+    _record(chapter=1, speaker=SPEAKER_TWO, outcome="changed", bucket="redirect"),
+    _record(chapter=1, speaker=SPEAKER_TEN, outcome="untouched", bucket="untouched"),
+    _record(chapter=1, speaker=None, outcome="changed", bucket="trans"),
+    _record(chapter=1, speaker=None, outcome="untouched", bucket="redirect"),
+)
+
+
+def test_marked_speakers_and_chosen_lines_count_only_their_buckets(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (repo / "lenses" / f"{LENS}.toml").write_text(QUEERING_LENS_TOML)
+    _write(repo, _lines(*QUEERING_EDGE_RECORDS))
+    _write_arcs(repo)
+    _write_recall(repo)
+    _invoke()
+    out = capsys.readouterr().out
+    for line in out.splitlines():
+        assert LINE.fullmatch(line), line
+    lines = out.splitlines()
+    marked = lines.index("queering marked: 4")
+    assert lines[marked + 1] == "queering marked speakers: 1, no speaker: 1"
+    untouched = lines.index("queering speakers untouched: 1, no speaker: 0")
+    assert lines[untouched + 1] == "queering chosen lines: 1, converted: 1"
 
 
 def test_lens_without_selection_prints_no_queering_line(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:

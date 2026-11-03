@@ -134,66 +134,69 @@ def test_flirt_tie_raises_fail_without_speaker_ids() -> None:
     assert SYNTH_B not in message
 
 
-def test_bucket_matches_hash_over_speaker_id() -> None:
-    for speaker in (f"Synth-{i}" for i in range(200)):
-        v = _share(speaker)
-        expected = "queer" if v < 15 else "trans" if v < 20 else "untouched"
-
-        assert queering.bucket("Made-up-ns", "1", speaker, frozenset(), frozenset()) == expected
+def _digest(text: str) -> bytes:
+    return hashlib.sha256(text.encode("utf-8")).digest()
 
 
-def test_bucket_is_per_speaker_across_keys() -> None:
-    for speaker in (f"Synth-{i}" for i in range(50)):
-        buckets = {queering.bucket(f"Made-up-ns-{n}", str(k), speaker, frozenset(), frozenset()) for n in range(3) for k in range(20)}
-
-        assert len(buckets) == 1
+def _speaker_lines(count: int) -> list[tuple[str, str, str | None]]:
+    return [("Made-up-ns", str(i), f"Synth-{i}") for i in range(count)]
 
 
-def test_bucket_hashes_ref_when_speakerless() -> None:
-    for key in (str(k) for k in range(200)):
-        v = _share(f"Made-up-ns/{key}")
-        expected = "queer" if v < 15 else "trans" if v < 20 else "untouched"
+@pytest.mark.parametrize(("count", "expected"), [(1, (1, 0)), (7, (2, 1)), (20, (3, 1)), (21, (4, 2))])
+def test_rank_gives_queer_and_trans_their_ceiling_shares(count: int, expected: tuple[int, int]) -> None:
+    buckets = list(queering.rank(_speaker_lines(count), frozenset(), frozenset(), None).values())
 
-        assert queering.bucket("Made-up-ns", key, None, frozenset(), frozenset()) == expected
-        assert queering.bucket("Made-up-ns", key, "", frozenset(), frozenset()) == expected
-
-
-def test_bucket_marks_speakerless_lines_by_ref_not_one_bucket() -> None:
-    buckets = {queering.bucket("Made-up-ns", str(k), None, frozenset(), frozenset()) for k in range(200)}
-
-    assert buckets == {"queer", "trans", "untouched"}
+    assert len(buckets) == count
+    assert (buckets.count("queer"), buckets.count("trans")) == expected
 
 
-def test_bucket_excludes_core_and_antagonist_speakers() -> None:
-    queer_id = next(
-        s for s in (f"Synth-{i}" for i in range(200)) if queering.bucket("Made-up-ns", "1", s, frozenset(), frozenset()) == "queer"
-    )
-    trans_id = next(
-        s for s in (f"Synth-{i}" for i in range(200)) if queering.bucket("Made-up-ns", "1", s, frozenset(), frozenset()) == "trans"
-    )
+def test_rank_orders_units_by_sha256_of_the_speaker_id() -> None:
+    speakers = [f"Synth-{i}" for i in range(21)]
+    order = sorted(speakers, key=_digest)
+    ranked = queering.rank(_speaker_lines(21), frozenset(), frozenset(), None)
 
-    assert queering.bucket("Made-up-ns", "1", queer_id, frozenset({queer_id}), frozenset()) == "untouched"
-    assert queering.bucket("Made-up-ns", "1", queer_id, frozenset(), frozenset({queer_id})) == "untouched"
-    assert queering.bucket("Made-up-ns", "1", trans_id, frozenset({trans_id}), frozenset()) == "untouched"
-    assert queering.bucket("Made-up-ns", "1", trans_id, frozenset(), frozenset({trans_id})) == "untouched"
+    assert {speaker: ranked[("Made-up-ns", str(i))] for i, speaker in enumerate(speakers)} == {
+        **{speaker: "queer" for speaker in order[:4]},
+        **{speaker: "trans" for speaker in order[4:6]},
+        **{speaker: "untouched" for speaker in order[6:]},
+    }
 
 
-def test_bucket_shares_near_targets() -> None:
-    counts = {"queer": 0, "trans": 0, "untouched": 0}
-    total = 20000
-    for i in range(total):
-        counts[queering.bucket("Made-up-ns", "1", f"Synth-{i}", frozenset(), frozenset())] += 1
+def test_rank_makes_each_speakerless_line_its_own_unit_by_namespace_and_key() -> None:
+    marked = [("Made-up-ns", str(i), None) for i in range(10)] + [("Other-ns", str(i), "") for i in range(11)]
+    units = [f"Made-up-ns/{i}" for i in range(10)] + [f"Other-ns/{i}" for i in range(11)]
+    order = sorted(units, key=_digest)
+    queer, trans = set(order[:4]), set(order[4:6])
+    ranked = queering.rank(marked, frozenset(), frozenset(), None)
 
-    assert abs(counts["queer"] / total - 0.15) < 0.01
-    assert abs(counts["trans"] / total - 0.05) < 0.01
-    assert abs(counts["untouched"] / total - 0.80) < 0.01
+    assert ranked == {
+        (namespace, key): "queer" if f"{namespace}/{key}" in queer else "trans" if f"{namespace}/{key}" in trans else "untouched"
+        for namespace, key, _ in marked
+    }
 
 
-def test_bucket_is_stable_across_calls() -> None:
-    first = [queering.bucket("Made-up-ns", str(k), f"Synth-{k}", frozenset(), frozenset()) for k in range(100)]
-    second = [queering.bucket("Made-up-ns", str(k), f"Synth-{k}", frozenset(), frozenset()) for k in range(100)]
+def test_rank_excludes_core_antagonist_and_flirt_lines() -> None:
+    ranked_lines = _speaker_lines(21)
+    excluded = [("Made-up-ns", "c", SYNTH_A), ("Made-up-ns", "a", SYNTH_B), ("Made-up-ns", "f", SYNTH_C)]
+    ranked = queering.rank([*ranked_lines, *excluded], frozenset({SYNTH_A}), frozenset({SYNTH_B}), SYNTH_C)
 
-    assert first == second
+    assert ranked == queering.rank(ranked_lines, frozenset(), frozenset(), None)
+    assert ("Made-up-ns", "c") not in ranked
+    assert ("Made-up-ns", "a") not in ranked
+    assert ("Made-up-ns", "f") not in ranked
+
+
+def test_rank_gives_every_marked_line_of_a_speaker_that_speakers_bucket() -> None:
+    marked = [*_speaker_lines(21), ("Other-ns", "1", "Synth-0"), ("Other-ns", "2", "Synth-0")]
+    ranked = queering.rank(marked, frozenset(), frozenset(), None)
+
+    assert ranked[("Other-ns", "1")] == ranked[("Made-up-ns", "0")] == ranked[("Other-ns", "2")]
+
+
+def test_rank_is_stable_across_input_order() -> None:
+    marked = [*_speaker_lines(21), ("Made-up-ns", "x", None)]
+
+    assert queering.rank(marked, frozenset(), frozenset(), None) == queering.rank(list(reversed(marked)), frozenset(), frozenset(), None)
 
 
 def test_redirected_matches_hash_over_ref() -> None:
@@ -236,43 +239,25 @@ def test_select_redirects_flirt_lines_both_ways() -> None:
     redirect_key = next(str(k) for k in range(200) if queering.redirected("Made-up-ns", str(k)))
     hold_key = next(str(k) for k in range(200) if not queering.redirected("Made-up-ns", str(k)))
 
-    assert queering.select("Made-up-ns", redirect_key, SYNTH_A, frozenset(), frozenset(), SYNTH_A) == "redirect"
-    assert queering.select("Made-up-ns", hold_key, SYNTH_A, frozenset(), frozenset(), SYNTH_A) == "not-redirected"
+    assert queering.select("Made-up-ns", redirect_key, SYNTH_A, SYNTH_A, {}) == "redirect"
+    assert queering.select("Made-up-ns", hold_key, SYNTH_A, SYNTH_A, {}) == "not-redirected"
 
 
-def test_select_redirects_core_cast_flirt_lines() -> None:
+def test_select_keeps_the_flirt_split_over_a_ranked_bucket() -> None:
     redirect_key = next(str(k) for k in range(200) if queering.redirected("Made-up-ns", str(k)))
     hold_key = next(str(k) for k in range(200) if not queering.redirected("Made-up-ns", str(k)))
+    ranked: dict[tuple[str, str], queering.Bucket] = {("Made-up-ns", redirect_key): "queer", ("Made-up-ns", hold_key): "trans"}
 
-    assert queering.select("Made-up-ns", redirect_key, SYNTH_A, frozenset({SYNTH_A}), frozenset(), SYNTH_A) == "redirect"
-    assert queering.select("Made-up-ns", hold_key, SYNTH_A, frozenset(), frozenset({SYNTH_A}), SYNTH_A) == "not-redirected"
-
-
-def test_select_gives_other_lines_their_bucket() -> None:
-    for i in range(200):
-        speaker = f"Synth-{i}"
-        assert queering.select("Made-up-ns", str(i), speaker, frozenset(), frozenset(), SYNTH_A) == queering.bucket(
-            "Made-up-ns", str(i), speaker, frozenset(), frozenset()
-        )
-        assert queering.select("Made-up-ns", str(i), None, frozenset(), frozenset(), SYNTH_A) == queering.bucket(
-            "Made-up-ns", str(i), None, frozenset(), frozenset()
-        )
+    assert queering.select("Made-up-ns", redirect_key, SYNTH_A, SYNTH_A, ranked) == "redirect"
+    assert queering.select("Made-up-ns", hold_key, SYNTH_A, SYNTH_A, ranked) == "not-redirected"
 
 
-def test_select_leaves_core_and_antagonist_lines_untouched() -> None:
-    assert queering.select("Made-up-ns", "1", SYNTH_B, frozenset({SYNTH_B}), frozenset(), SYNTH_A) == "untouched"
-    assert queering.select("Made-up-ns", "1", SYNTH_B, frozenset(), frozenset({SYNTH_B}), SYNTH_A) == "untouched"
+def test_select_gives_each_other_line_its_ranked_bucket_or_untouched() -> None:
+    ranked: dict[tuple[str, str], queering.Bucket] = {("Made-up-ns", "1"): "queer", ("Made-up-ns", "2"): "trans"}
 
-
-def test_select_without_flirt_equals_bucket() -> None:
-    for i in range(200):
-        speaker = f"Synth-{i}"
-        assert queering.select("Made-up-ns", str(i), speaker, frozenset(), frozenset(), None) == queering.bucket(
-            "Made-up-ns", str(i), speaker, frozenset(), frozenset()
-        )
-        assert queering.select("Made-up-ns", str(i), None, frozenset(), frozenset(), None) == queering.bucket(
-            "Made-up-ns", str(i), None, frozenset(), frozenset()
-        )
+    assert queering.select("Made-up-ns", "1", SYNTH_B, None, ranked) == "queer"
+    assert queering.select("Made-up-ns", "2", None, None, ranked) == "trans"
+    assert queering.select("Made-up-ns", "3", SYNTH_B, None, ranked) == "untouched"
 
 
 def test_haiku_model_name() -> None:

@@ -89,7 +89,7 @@ Set the game's Text Language to English before you play.
 | `ffrd install [--deck]` | Copies `build/FFRS-Unstraightened_P.pak`, `.utoc` and `.ucas` into `<game>/FFRS/Content/Paks/~mods`, whichever pak shape the last build wrote. It does not copy the `--ue4ss` folder. `--deck` copies them to a Steam Deck over `ssh`. |
 | `ffrd uninstall [--deck]` | Removes the mod files from `Paks/~mods`. `--deck` removes them from a Steam Deck over `ssh`. |
 | `ffrd leak-check` | Scans every commit reachable from HEAD for vanilla strings of 20 or more characters, in paths, file contents and messages. Prints `0` when clean. Otherwise prints a location and table key for each match, never the text, and exits 1. |
-| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json`, then `redo: n listed, m changed, k gate failed`: the lines on the redo list (those with `redo` true in `outcomes.jsonl`), how many of them changed and how many failed a gate, whatever the gate. For a lens with `selection = "queering"`, it then prints the queering counts: `queering marked: N`, `queering bucket queer|trans|untouched: N`, `queering speakers queer|trans|untouched: S, no speaker: M`, `queering flirt marked: N, redirect half: M`, `queering changed queer|trans|redirect: N` and `queering gate failed queer|trans|redirect: N`. Then it prints one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. When `work/<name>/usage.jsonl` holds an entry, it then prints a `usage run <id>` block for the latest run id, with calls, input, output, cache read and cache write tokens, prompt tokens per call (input plus cache read plus cache write, divided by calls, rounded) and cost in dollars per stage and model, then a total. Never prints line text. |
+| `ffrd report --lens <name>` | Counts the outcomes in `work/<name>/outcomes.jsonl` per chapter: changed, kept for plot, gate failed, unfinished and untouched. Also counts changed lines per lens reason id and per numbered character, gate failures per gate, and lines the intent stage kept per keep reason (`kept <reason>: n`). When `work/<name>/scenes.jsonl` exists, each block also counts the scene pass: eligible scenes, scenes flagged per pattern, plans, scenes kept per scene keep reason, planned lines (and how many were required), changed, replanned and reverted lines, scene-pass gate failures per gate, the most and the median changed lines per planned scene, and scene-pass changed lines per numbered character. Characters are numbers, never names. Lines without a chapter count under `unattributed`. After the blocks it prints `scenes: C of T from the scene table, F outside it`: `T` is the scenes in `vanilla/scenes.json`, `C` those holding at least one outcome line, and `F` the namespaces of outcome lines the table lacks; it fails when the scene table is missing. Then it prints `arcs: N, M with changes` from `work/<name>/arcs.json`, then `redo: n listed, m changed, k gate failed`: the lines on the redo list (those with `redo` true in `outcomes.jsonl`), how many of them changed and how many failed a gate, whatever the gate. For a lens with `selection = "queering"`, it then prints the queering counts: `queering marked: N`, `queering marked speakers: S, no speaker: M`, `queering bucket queer|trans|untouched: N`, `queering speakers queer|trans|untouched: S, no speaker: M`, `queering chosen lines: C, converted: V`, `queering flirt marked: N, redirect half: M`, `queering changed queer|trans|redirect: N` and `queering gate failed queer|trans|redirect: N`. Then it prints one `recall <id>: N disagreements, M confirmed` line per triage id from `recall.json`. When `work/<name>/usage.jsonl` holds an entry, it then prints a `usage run <id>` block for the latest run id, with calls, input, output, cache read and cache write tokens, prompt tokens per call (input plus cache read plus cache write, divided by calls, rounded) and cost in dollars per stage and model, then a total. Never prints line text. |
 | `ffrd diff --lens <name>` | Shows each rewrite in `dialog/<name>/` beside its vanilla English line, for chapters at or below the recorded chapter. Lines from later chapters and lines without a chapter are hidden. Requires recorded progress. Prints `# N shown, M withheld, K without a chapter` to stderr. |
 | `ffrd run --lens <name> [--no-jev] [--concurrency N] [--account N] [--through N]` | Rewrites the in-scope lines of the lens's scenes. Screens every scene and runs the Jev recall check unless `--no-jev` skips it. A lens with `selection = "queering"` runs the queering selection instead, which calls no Jev. Keeps up to `N` Claude calls in flight at once, 8 by default. `--account N` pins every Claude call of the run to cswap account `N`, skipping the 90% weekly filter for it, and a rate limit makes the run wait for that account's earliest reset and retry it, refusing before any Claude call unless `N` is a usable account. `--through N` keeps only the lines in chapters at or below `N`. Checks `ledger/<name>.jsonl` before any Claude call and appends to it at the end. Holds an exclusive lock on `work/<name>/.run.lock` for the whole run, so a second `ffrd run` of the same lens stops with an error before any Claude call. Writes `work/<name>/outcomes.jsonl`, `arcs.json` and `recall.json`, and each changed line to `dialog/<name>/`. Each model call appends one entry to `work/<name>/usage.jsonl`; stored results append none. See [Rewrite pipeline](#rewrite-pipeline). |
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
@@ -172,8 +172,9 @@ the run fails naming the chapter (`chapter N`, or `unplaced` for lines with no c
 asks for `ffrd run --lens <base>` first. Core cast, antagonists and flirt come from that
 bible. `--through` limits only the scenes the run works on.
 
-Second, the scenes run at the same time, each as its own batch. Opus screens every
-line of the scene against the screen criteria, with the cast notes from the bibles. Jev
+Second, the scenes run at the same time, each as its own batch. The screen checks
+every line of the scene against the screen criteria, with the cast notes from the bibles.
+It runs on the lens's screen model, Opus by default. Jev
 scores the scene for each triage question. For each triage id that scores 0.5 or more
 and that the screen flagged on no line, Opus rechecks the scene for that id, and the
 lines it flags join the screen's flags. Opus then writes an intent for each flagged
@@ -284,7 +285,7 @@ their outputs, and stops.
 
 #### Queering selection
 
-A lens with `selection = "queering"` runs the queering selection in place of the Opus screen
+A lens with `selection = "queering"` runs the queering selection in place of the default screen
 and the Jev recall check. It calls no Jev, runs no recheck and runs no scene pass. The lens
 is `lenses/queering.toml`, and its brief is in
 [docs/lenses/queering.md](docs/lenses/queering.md). The run works in two phases.
@@ -296,12 +297,17 @@ bible is built before `--through` is applied, from every in-scope scene of the g
 core cast is each speaker with at least 475 lines and 20 arcs. Core cast and antagonist
 lines are never marked, except the flirt's.
 
-Phase 1 is one Haiku screen per scene. It runs over the lines of speakers who are neither core
-cast nor antagonist, over the flirt's lines, and over lines with no speaker. Each marked line
-gets a bucket. For a speaker's lines the bucket is queer for 15% of speaker ids, trans for 5%,
-and untouched for the rest, chosen by a hash of the speaker id. A speakerless line is hashed
-by its namespace and key instead. The flirt's marked lines are split in half by a hash of
-their key: redirect and not-redirected.
+Phase 1 is one screen per scene, run on the lens's screen model: Opus by default, or Sonnet
+when the lens sets `model` in `[screen]`. It runs over the lines of speakers who are neither
+core cast nor antagonist, over the flirt's lines, and over lines with no speaker. Its cast
+notes are windowed to the scene's chapter bible and the most recent earlier one.
+
+Once every scene is screened, the marked speakers and each speakerless marked line are ranked
+together. A speaker is ranked by the SHA-256 of its speaker id, and a speakerless line by the
+SHA-256 of its namespace and key. The first ceil(15%) of the ranked items are queer, the next
+ceil(5%) are trans, and the rest are untouched. Every marked line of a chosen speaker carries
+its bucket. A `--through` run ranks only its own marked lines. The flirt's split is unchanged:
+its marked lines are split in half by a hash of their key, into redirect and not-redirected.
 
 Phase 2 starts after every scene is marked. It takes the marked lines in the queer, trans
 and redirect buckets. Each intent carries the line's bucket. The selected lines of each

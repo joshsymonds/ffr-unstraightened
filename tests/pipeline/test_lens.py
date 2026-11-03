@@ -383,6 +383,64 @@ def test_selection_problem_reported_with_other_problems_in_one_fail(tmp_path: Pa
     assert f"{path}: intent.rule is missing" in message
 
 
+SCREEN_CRITERIA_LINE = 'criteria = ["Made-up criterion one.", "Made-up criterion two."]\n'
+
+
+def with_screen_model(value: str) -> str:
+    assert VALID.count(SCREEN_CRITERIA_LINE) == 1
+    return VALID.replace(SCREEN_CRITERIA_LINE, SCREEN_CRITERIA_LINE + f"model = {value}\n")
+
+
+def test_lens_without_screen_model_defaults_to_opus(tmp_path: Path) -> None:
+    assert load_lens(write_lens(tmp_path, VALID)).screen_model == "opus"
+
+
+@pytest.mark.parametrize("model", ["opus", "sonnet"])
+def test_declared_screen_model_loads_into_screen_model_field(tmp_path: Path, model: str) -> None:
+    lens = load_lens(write_lens(tmp_path, with_screen_model(f'"{model}"')))
+    assert lens.screen_model == model
+    assert lens == replace(EXPECTED_LENS, screen_model=model)
+
+
+# Each case declares a screen model that is not one of the two Claude models.
+SCREEN_MODEL_INVALID_VALUES: list[tuple[str, str]] = [
+    ("other string", '"haiku"'),
+    ("capitalised", '"Sonnet"'),
+    ("empty", '""'),
+    ("integer", "5"),
+    ("array", '["opus"]'),
+    ("boolean", "true"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    SCREEN_MODEL_INVALID_VALUES,
+    ids=[case[0] for case in SCREEN_MODEL_INVALID_VALUES],
+)
+def test_malformed_screen_model_raises_fail_naming_file_and_field(tmp_path: Path, label: str, value: str) -> None:
+    path = write_lens(tmp_path, with_screen_model(value))
+    with pytest.raises(Fail, match=re.escape(f'{path}: screen.model must be "opus" or "sonnet"')):
+        load_lens(path)
+
+
+def test_screen_model_problem_reported_with_other_problems_in_one_fail(tmp_path: Path) -> None:
+    text = with_screen_model('"haiku"').replace('rule = "Made-up intent rule, café."', "")
+    path = write_lens(tmp_path, text)
+    with pytest.raises(Fail) as raised:
+        load_lens(path)
+    message = str(raised.value)
+    assert f'{path}: screen.model must be "opus" or "sonnet"' in message
+    assert f"{path}: intent.rule is missing" in message
+
+
+def test_screen_model_does_not_change_screen_stage_text(tmp_path: Path) -> None:
+    plain = load_lens(write_lens(tmp_path, VALID, name="plain"))
+    modelled = load_lens(write_lens(tmp_path, with_screen_model('"sonnet"'), name="modelled"))
+    assert modelled.stage_text("screen") == plain.stage_text("screen")
+    assert modelled.stage_text("screen") == '{"criteria": ["Made-up criterion one.", "Made-up criterion two."]}'
+
+
 README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
 FENCED_TOML = re.compile(r"^```toml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 
