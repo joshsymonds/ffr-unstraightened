@@ -514,6 +514,71 @@ def test_shares_do_not_change_stage_text(tmp_path: Path) -> None:
         assert shared.stage_text(stage) == plain.stage_text(stage)
 
 
+LEAVE_OUT_LINE = 'leave_out = ["made-up-a", "made-up-b"]\n'
+LEAVE_OUT_LIST_MESSAGE = "leave_out must be a list of one or more lens names"
+LEAVE_OUT_ENTRY_MESSAGE = "must be a lens name of lowercase letters, digits and single hyphens, like made-up-id"
+
+
+def test_declared_leave_out_loads_into_leave_out_field(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, LEAVE_OUT_LINE + VALID))
+    assert lens.leave_out == ("made-up-a", "made-up-b")
+    assert lens == replace(EXPECTED_LENS, leave_out=("made-up-a", "made-up-b"))
+
+
+def test_lens_without_leave_out_has_empty_leave_out(tmp_path: Path) -> None:
+    lens = load_lens(write_lens(tmp_path, VALID))
+    assert lens.leave_out == ()
+    assert lens == EXPECTED_LENS
+
+
+def test_leave_out_does_not_change_stage_text(tmp_path: Path) -> None:
+    plain = load_lens(write_lens(tmp_path, VALID_WITH_SCENE, name="plain"))
+    left_out = load_lens(write_lens(tmp_path, LEAVE_OUT_LINE + VALID_WITH_SCENE, name="left-out"))
+    for stage in ("triage", "screen", "intent", "judge", "scene"):
+        assert left_out.stage_text(stage) == plain.stage_text(stage)
+
+
+# Each case declares a leave_out that is not a non-empty list of lens names, and the one problem it must report.
+LEAVE_OUT_INVALID_CASES: list[tuple[str, str, str]] = [
+    ("string", '"made-up-a"', LEAVE_OUT_LIST_MESSAGE),
+    ("integer", "5", LEAVE_OUT_LIST_MESSAGE),
+    ("table", '{ name = "made-up-a" }', LEAVE_OUT_LIST_MESSAGE),
+    ("empty list", "[]", LEAVE_OUT_LIST_MESSAGE),
+    ("entry integer", "[5]", f"leave_out[0] {LEAVE_OUT_ENTRY_MESSAGE}"),
+    ("entry uppercase", '["Made_Up"]', f"leave_out[0] {LEAVE_OUT_ENTRY_MESSAGE}"),
+    ("entry empty", '[""]', f"leave_out[0] {LEAVE_OUT_ENTRY_MESSAGE}"),
+    ("entry double hyphen", '["made--a"]', f"leave_out[0] {LEAVE_OUT_ENTRY_MESSAGE}"),
+    ("duplicate entry", '["made-up-a", "made-up-a"]', "leave_out[1] duplicates leave_out[0]"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "problem"),
+    LEAVE_OUT_INVALID_CASES,
+    ids=[case[0] for case in LEAVE_OUT_INVALID_CASES],
+)
+def test_malformed_leave_out_raises_fail_naming_file_and_field(tmp_path: Path, label: str, value: str, problem: str) -> None:
+    path = write_lens(tmp_path, f"leave_out = {value}\n" + VALID)
+    with pytest.raises(Fail, match=re.escape(f"{path}: {problem}")):
+        load_lens(path)
+
+
+def test_leave_out_naming_the_lens_itself_raises_fail(tmp_path: Path) -> None:
+    path = write_lens(tmp_path, LEAVE_OUT_LINE + VALID, name="made-up-b")
+    with pytest.raises(Fail, match=re.escape(f"{path}: leave_out[1] names the lens itself")):
+        load_lens(path)
+
+
+def test_leave_out_problem_reported_with_other_problems_in_one_fail(tmp_path: Path) -> None:
+    text = 'leave_out = ["Made_Up"]\n' + VALID.replace('rule = "Made-up intent rule, café."', "")
+    path = write_lens(tmp_path, text)
+    with pytest.raises(Fail) as raised:
+        load_lens(path)
+    message = str(raised.value)
+    assert f"{path}: leave_out[0] {LEAVE_OUT_ENTRY_MESSAGE}" in message
+    assert f"{path}: intent.rule is missing" in message
+
+
 README = Path(__file__).resolve().parents[2] / "lenses" / "README.md"
 FENCED_TOML = re.compile(r"^```toml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 

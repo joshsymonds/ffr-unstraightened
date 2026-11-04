@@ -14,7 +14,7 @@ Stage = Literal["triage", "screen", "intent", "judge", "scene"]
 
 ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 SECTIONS = frozenset({"triage", "screen", "intent", "judge", "scene"})
-TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection", "romance_share", "world_share", "nonbinary_share", "trans_share"})
+TOP_LEVEL_KEYS = SECTIONS | frozenset({"base", "selection", "leave_out", "romance_share", "world_share", "nonbinary_share", "trans_share"})
 SCENE_KEYS = frozenset({"patterns", "criteria", "plan", "rubric"})
 SCREEN_KEYS = frozenset({"criteria", "model"})
 DEFAULT_ROMANCE_SHARE = 15
@@ -58,6 +58,7 @@ class Lens:
     world_share: int = DEFAULT_WORLD_SHARE
     nonbinary_share: int = DEFAULT_NONBINARY_SHARE
     trans_share: int = DEFAULT_TRANS_SHARE
+    leave_out: tuple[str, ...] = ()
 
     def stage_text(self, stage: Stage) -> str:
         section: object
@@ -248,6 +249,29 @@ def _screen_model(screen: dict[str, object] | None, report: _Report) -> str:
     return OPUS
 
 
+def _leave_out(data: dict[str, object], name: str, report: _Report) -> tuple[str, ...]:
+    if "leave_out" not in data:
+        return ()
+    raw = data["leave_out"]
+    if not isinstance(raw, list) or not raw:
+        report.add("leave_out", "must be a list of one or more lens names")
+        return ()
+    names: list[str] = []
+    first_index: dict[str, int] = {}
+    for index, item in enumerate(raw):
+        where = f"leave_out[{index}]"
+        if not isinstance(item, str) or not ID_PATTERN.fullmatch(item):
+            report.add(where, "must be a lens name of lowercase letters, digits and single hyphens, like made-up-id")
+        elif item == name:
+            report.add(where, "names the lens itself")
+        elif item in first_index:
+            report.add(where, f"duplicates leave_out[{first_index[item]}]")
+        else:
+            first_index[item] = index
+            names.append(item)
+    return tuple(names)
+
+
 def _share(data: dict[str, object], key: str, default: int, report: _Report) -> int:
     if key not in data:
         return default
@@ -269,6 +293,7 @@ def load_lens(path: Path) -> Lens:
     _unknown_keys(data, TOP_LEVEL_KEYS, "", report)
     base = _base(data, name, report)
     selection = _selection(data, report)
+    leave_out = _leave_out(data, name, report)
     triage, triage_index = _triage(data, report)
     screen = _section(data, "screen", SCREEN_KEYS, report)
     criteria = _criteria(screen, "screen", report) if screen is not None else ()
@@ -299,4 +324,5 @@ def load_lens(path: Path) -> Lens:
         world_share=world_share,
         nonbinary_share=nonbinary_share,
         trans_share=trans_share,
+        leave_out=leave_out,
     )

@@ -124,6 +124,17 @@ not call Jev.
 
 The example below does not declare a selection.
 
+## Leave out
+
+A lens may name other lenses whose ledger keys a run leaves out, with one top-level
+line, placed before the first table header: `leave_out = ["<lens>", ...]`. Each entry
+is the name of another lens, the file name without `.toml`. `leave_out` is optional.
+A lens without it loads with an empty list. `leave_out` is not a section. It does not
+change any stage text.
+
+With `leave_out`, `ffrd run` leaves out every key in each named lens's ledger,
+`ledger/<name>.jsonl`. The loader does not check that a named lens or its ledger exists.
+
 ## Validation
 
 `load_lens` checks the whole file and reports every problem it finds in one
@@ -156,6 +167,10 @@ example `lenses/made-up-lens.toml: triage[1].id duplicates triage[0].id`.
   default to 15, 10, 5 and 5: each is the percentage of its side's denominator that the side
   picks. The queering lens sets all four. Like `selection`, they are top-level keys, placed
   before the first table header.
+- `leave_out`, when present, must be a non-empty list of lens names. Each entry must match
+  the lens name pattern above, must not name the lens itself, and must not repeat an earlier
+  entry. Any other value is an error, reported as `leave_out must be a list of one or more lens names`,
+  or as `leave_out[<index>]` with the problem.
 - Unknown keys are errors at every level, including unknown sections.
 
 ## Example
