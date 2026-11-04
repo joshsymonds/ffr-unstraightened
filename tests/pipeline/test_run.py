@@ -1020,6 +1020,93 @@ def test_a_line_kept_for_plot_is_kept_for_plot_with_its_reason_and_never_drafted
     assert (NS_A, "1") not in judged
 
 
+# A made-up lens whose ledger a run leaves out, and the lines that ledger holds. Not game text.
+LEFT_OUT = "made-up-leave-out-lens"
+
+
+def _left_out_ledger(root: Path, name: str, lines: Sequence[tuple[str, str, str]]) -> None:
+    # The named lens's ledger entries for the lines it changed, each (namespace, key, english), as its run appends them. Not game text.
+    entries = [
+        ledger.Entry(
+            run=RUN,
+            lens=name,
+            base=None,
+            namespace=namespace,
+            key=key,
+            vanilla_hash=vanilla_hash(english),
+            base_hash=None,
+            text_hash=vanilla_hash(TEXT_ONE),
+            reasons=(ALPHA,),
+            writer="opus",
+            plan=None,
+        )
+        for namespace, key, english in lines
+    ]
+    ledger.append(root, name, entries)
+
+
+def _screen_results(work: Path) -> dict[str, dict[str, Any]]:
+    """Each stored screen and recheck result of the run, by result key."""
+    results: dict[str, dict[str, Any]] = {}
+    for path in (work / "results").glob("*.json"):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record["stage"] in {"screen", "rescreen"}:
+            results[path.stem] = record
+    return results
+
+
+def test_a_line_in_a_left_out_ledger_is_untouched_with_no_reasons_and_no_prompt_targets_it(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "1", EN_A1)])
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, leave_out=(LEFT_OUT,)))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
+    assert (NS_A, "1") not in [_target(parts) for _, parts, schema in claude.calls if schema is INTENT_SCHEMA]
+    judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
+    assert (NS_A, "1") not in judged
+
+
+def test_leave_out_makes_the_same_screen_and_recheck_calls_and_stores_the_same_results(tmp_path: Path) -> None:
+    def run_with(root: Path, lens: Lens) -> tuple[FakeClaude, FakeJev, list[Outcome]]:
+        claude = _claude()
+        # The left-out line's screen reason is BETA, so BETA is never rechecked, and ALPHA is rechecked in every scene. Not game text.
+        claude.flags = {(NS_A, "1"): [BETA]}
+        claude.rescreen_flags = {(NS_B, "2"): [ALPHA]}
+        claude.drafts[(NS_B, "2")] = [OPUS_B2]
+        jev = FakeJev(JEV_HIGH)
+        return claude, jev, _run(root, claude, [], jev=jev, lens=lens)
+
+    _left_out_ledger(tmp_path / "with" / "repo", LEFT_OUT, [(NS_A, "1", EN_A1)])
+    with_claude, with_jev, with_outcomes = run_with(tmp_path / "with", replace(LENS_OBJ, leave_out=(LEFT_OUT,)))
+    without_claude, without_jev, without_outcomes = run_with(tmp_path / "without", LENS_OBJ)
+
+    # Scenes are screened concurrently, so the calls are compared as multisets, not in the order they were made.
+    def screens(claude: FakeClaude) -> Counter[tuple[str, tuple[str, ...]]]:
+        return Counter(
+            (model, tuple(parts)) for model, parts, schema in claude.calls if schema is SCREEN_SCHEMA or schema is RESCREEN_SCHEMA
+        )
+
+    assert screens(with_claude) == screens(without_claude)
+    assert any(schema is RESCREEN_SCHEMA for _, _, schema in with_claude.calls)
+    assert Counter((scene, tuple(ids)) for scene, ids in with_jev.calls) == Counter((scene, tuple(ids)) for scene, ids in without_jev.calls)
+    assert _screen_results(tmp_path / "with" / "work" / LENS) == _screen_results(tmp_path / "without" / "work" / LENS)
+    assert _screen_results(tmp_path / "with" / "work" / LENS)
+    assert with_outcomes[1:] == without_outcomes[1:]
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["missing", "empty"])
+def test_a_left_out_ledger_that_is_missing_or_empty_fails_before_any_claude_call(tmp_path: Path, empty: bool) -> None:
+    if empty:
+        path = ledger.path(tmp_path / "repo", LEFT_OUT)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(f"ledger/{LEFT_OUT}.jsonl: no entries to leave out")):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, leave_out=(LEFT_OUT,)))
+    assert claude.calls == []
+
+
 @pytest.mark.parametrize(
     "failure",
     [Unfinished("Made-up bible failure. Not game text."), Rejected("Made-up bible rejection. Not game text.")],
@@ -3822,6 +3909,26 @@ def test_plan_gets_the_line_pass_flagged_lines_as_final_and_no_excluded_lines(tm
     [parts] = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
     assert json.loads(_part(parts, "Final lines:\n")) == [{"namespace": NS_A, "key": "1"}]
     assert json.loads(_part(parts, "Excluded lines:\n")) == []
+
+
+def test_plan_gets_the_left_out_lines_of_its_scene_as_final_lines_beside_the_flagged_ones(tmp_path: Path) -> None:
+    # Line 4 is in the scene and the left-out ledger, and the screen does not flag it. The other ledger line is in no scene of this run. Not game text.
+    claude = _scene_claude()
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "4", EN_A4), (NS_B, "2", EN_B2)])
+    _scene_run(tmp_path, claude, lens=replace(SCENE_LENS, leave_out=(LEFT_OUT,)))
+    [parts] = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(parts, "Final lines:\n")) == [{"namespace": NS_A, "key": "1"}, {"namespace": NS_A, "key": "4"}]
+
+
+def test_a_left_out_line_the_scene_plan_names_is_rejected_and_never_changed(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "4")] = [OPUS_S4]
+    claude.scene_plan = _plan_answer((NS_A, "2", True), (NS_A, "4", False))
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "4", EN_A4)])
+    outcomes = _scene_run(tmp_path, claude, lens=replace(SCENE_LENS, leave_out=(LEFT_OUT,)))
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "4")) == Outcome(NS_A, "4", 1, None, (), "unfinished", None, None)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
 
 
 def test_planned_lines_never_reach_the_reason_judge(tmp_path: Path) -> None:

@@ -246,6 +246,7 @@ class _Context:
     base_hashes: Mapping[tuple[str, str], str]
     base_rewrites: Mapping[tuple[str, str], Mapping[str, Any]]
     marking: _Marking | None = None
+    left_out: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass
@@ -740,7 +741,9 @@ def _settled(
     ask: Ask,
 ) -> _Round | Unfinished | Rejected | RateLimited:
     """Plans once, gates the planned lines, and runs the scene judge over the passing lines with the surviving line-pass rewrites as context, unless a required line failed its gates. The judge reverts only passing lines it names."""
-    plan = scene_pass.plan(ctx.store, ctx.lens, scene, cast, hits, frozenset(flagged), excluded, ask)
+    # The scene's left-out lines are final even when the screen did not flag them, so the plan never names one.
+    left_out = {(line.namespace, line.key) for line in scene.lines if (line.namespace, line.key) in ctx.left_out}
+    plan = scene_pass.plan(ctx.store, ctx.lens, scene, cast, hits, frozenset(flagged) | left_out, excluded, ask)
     if not isinstance(plan, scene_pass.Plan):
         return plan
     if plan.keep_reason is not None:
@@ -1006,15 +1009,17 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
             if rechecked:
                 recall.confirmed[question.id] += 1
             flagged = _join(ctx.lens, flagged, rechecked)
-    flagged_lines = [line for line in scene.lines if (line.namespace, line.key) in flagged]
-    intended = claude.fan_out(lambda line: _intend(ctx, scene, line, flagged[(line.namespace, line.key)], ask), flagged_lines)
+    # A line a left-out ledger holds keeps its screen flags for the scene pass, which never plans it, but the line pass never intends, drafts or gates it.
+    drafted = {ref: reasons for ref, reasons in flagged.items() if ref not in ctx.left_out}
+    flagged_lines = [line for line in scene.lines if (line.namespace, line.key) in drafted]
+    intended = claude.fan_out(lambda line: _intend(ctx, scene, line, drafted[(line.namespace, line.key)], ask), flagged_lines)
     planned = {(line.namespace, line.key): plan for line, plan in zip(flagged_lines, intended, strict=True)}
     targets = [plan for plan in planned.values() if isinstance(plan, stages.Target)]
     first = _first_drafts(ctx, scene, targets, ask)
 
     def gate(line: SceneLine) -> tuple[Outcome, Change | None]:
         ref = (line.namespace, line.key)
-        reasons = flagged.get(ref)
+        reasons = drafted.get(ref)
         if reasons is None:
             return _outcome(line, (), "untouched"), None
         plan = planned[ref]
@@ -1608,6 +1613,17 @@ class _Metered(Store):
                 raise Fail(f"cannot write usage {path}: {e.strerror}") from e
 
 
+def _left_out(root: Path, lens: Lens) -> frozenset[tuple[str, str]]:
+    """The (namespace, key) of every line a named lens's ledger holds. A named ledger with no entries fails before any Claude call."""
+    keys: set[tuple[str, str]] = set()
+    for name in lens.leave_out:
+        entries = ledger.read(root, name)
+        if not entries:
+            raise Fail(f"ledger/{name}.jsonl: no entries to leave out")
+        keys.update((entry.namespace, entry.key) for entry in entries)
+    return frozenset(keys)
+
+
 def run(
     root: Path,
     lens: Lens,
@@ -1634,6 +1650,7 @@ def run(
     scenes = _chained(game_scenes, base_texts)
     redo = _redo(root / "lenses" / f"{lens.name}.redo.toml", scenes)
     ledger.read(root, lens.name)
+    left_out = _left_out(root, lens)
     in_scope = sorted(scenes, key=_chapter_order)
     scenes = in_scope if through is None else _limited(in_scope, through)
     selecting = lens.selection == "queering"
@@ -1666,6 +1683,7 @@ def run(
         base_hashes={ref: vanilla_hash(text) for ref, text in base_texts.items()},
         base_rewrites=base_rewrites,
         marking=_marking(built, in_scope) if selecting else None,
+        left_out=left_out,
     )
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
