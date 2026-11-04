@@ -3,10 +3,11 @@
 
 [ST_C05_543_01]
 "543_01_048" = "This line belongs to the flirt's protected sincere thread with one party member; keep the base text unchanged as no-hit."
-"543_01_050" = "The rewrite loses the line's point; keep what the line is doing in the scene and change only the flirt's target."
+"543_01_050" = "Keep the saying and the laugh and change only the flirt's target; never add a remark about the speaker's own kind, which reads as a joke about queerness."
 
 [ST_FEV_Com_00Com_03]
-"FEV_Com_00Com_03_031" = "The rewrite invents a character who is not in the scene; redirect only to a man present in the scene, or generalize the address."
+"FEV_Com_00Com_03_032" = "Redirect both lines of this exchange to the same man present in the scene; never invent another version of a character."
+"FEV_Com_00Com_03_031" = "Redirect both lines of this exchange to the same man present in the scene; never invent another version of a character."
 
 [ST_Summon640_Shiva_02_NF]
 "Summon640_Shiva_02_NF_004" = "The rewrite is weak and drifts from the line's point; keep the original joke's shape and change only the flirt's target."
@@ -31,3 +32,9 @@
 
 [ST_SubEv_ShortcutBridge]
 "SubEv_ShortcutBridge_003" = "The rewrite changes who repaired the bridge, which invents a fact; keep the repair passive as written and work the husband in without claiming the work."
+
+[ST_ATC24]
+"ATC24_006" = "The rewrite invents a new meaning; keep the handover and its point, and change only what the bucket requires."
+
+[ST_ChrEv_2280_001_01]
+"ChrEv_2280_001_01_006" = "Keep the playful reproach about being forgotten; a trans detail must answer it naturally and must not announce a chosen name."
