@@ -35,30 +35,63 @@ RAW: dict[str, Any] = {
         {
             "id": "SynScene10",
             "lines": [
-                {"namespace": "ST_Syn_001_01", "key": "10", "speaker": "SynSpeakerA"},
-                {"namespace": "ST_Syn_001_02", "key": "1", "speaker": "SynSpeakerB"},
-                {"namespace": "ST_Syn_001_01", "key": "2", "speaker": None},
-                {"namespace": "ST_Syn_999_01", "key": "1", "speaker": "SynSpeakerA"},
-                {"namespace": "ST_Syn_001_01", "key": "Mid_Run", "speaker": "SynSpeakerA"},
+                {"namespace": "ST_Syn_001_01", "key": "10", "speaker": "SynSpeakerA", "group": 0},
+                {"namespace": "ST_Syn_001_02", "key": "1", "speaker": "SynSpeakerB", "group": 0},
+                {"namespace": "ST_Syn_001_01", "key": "2", "speaker": None, "group": 0},
+                {"namespace": "ST_Syn_999_01", "key": "1", "speaker": "SynSpeakerA", "group": 1},
+                {"namespace": "ST_Syn_001_01", "key": "Mid_Run", "speaker": "SynSpeakerA", "group": 1},
             ],
         },
         {
             "id": "SynScene2",
             "lines": [
-                {"namespace": "ST_Syn_002_01", "key": "1", "speaker": "SynSpeakerB"},
-                {"namespace": "ST_Syn_002_01", "key": "2", "speaker": "SynSpeakerA"},
+                {"namespace": "ST_Syn_002_01", "key": "1", "speaker": "SynSpeakerB", "group": -1},
+                {"namespace": "ST_Syn_002_01", "key": "2", "speaker": "SynSpeakerA", "group": -1},
             ],
         },
         {
             "id": "SynUnreferenced",
-            "lines": [{"namespace": "ST_Syn_002_01", "key": "1", "speaker": "SynSpeakerA"}],
+            "lines": [{"namespace": "ST_Syn_002_01", "key": "1", "speaker": "SynSpeakerA", "group": -1}],
         },
     ],
     "references": [
-        {"table": "SynScene10", "sheet": "SynSheetA", "event": "SynEvent10_A"},
-        {"table": "SynScene10", "sheet": None, "event": "SynEvent10_B"},
-        {"table": "SynScene2", "sheet": "SynSheetB", "event": "SynEvent2"},
-        {"table": "SynScene10", "sheet": None, "event": "SynEvent10_A"},
+        {"table": "SynScene10", "sheet": "SynSheetA", "event": "SynEvent10_A", "args": {"id": "0"}},
+        {"table": "SynScene10", "sheet": None, "event": "SynEvent10_B", "args": {"id": "1"}},
+        {"table": "SynScene2", "sheet": "SynSheetB", "event": "SynEvent2", "args": {}},
+        {"table": "SynScene10", "sheet": None, "event": "SynEvent10_A", "args": {"id": "0"}},
+    ],
+    "maps": [
+        {"map": 900, "level": "/Game/Map/Town/Syn/Syn_01/Town_Syn_01_PL.Town_Syn_01_PL"},
+        {"map": 901, "level": "/Game/Map/Town/Syn/Town_Syn_PL.Town_Syn_PL"},
+    ],
+    "placements": [
+        {
+            "level": "FFRS/Content/Map/Town/Syn/Syn_01/EV/Town_Syn_01_EV",
+            "class": "BP_MapUnit_NPC_C",
+            "unit": 70,
+            "x": 10.0,
+            "y": -20.0,
+            "z": 30.0,
+            "events": [{"event": "SynEvent10_B", "condition": "{progress:28}==30"}],
+        },
+        {
+            "level": "FFRS/Content/Map/Town/Syn/EV/Town_Syn_EV",
+            "class": "CPP_MapGimmick_EventTrigger",
+            "unit": None,
+            "x": 1.0,
+            "y": 2.0,
+            "z": 3.0,
+            "events": [{"event": "SynEvent2", "condition": ""}],
+        },
+        {
+            "level": "FFRS/Content/Map/Dng/Elsewhere/EV/Dng_Elsewhere_EV",
+            "class": "BP_MapUnit_NPC_C",
+            "unit": 71,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "events": [{"event": "SynEvent2", "condition": ""}],
+        },
     ],
     "startup": [
         {"event": "SynEvent10_B", "map": 900, "condition": "{progress:0}==1500"},
@@ -115,12 +148,27 @@ EXPECTED_TABLE: dict[str, Any] = {
             "voice": {"sheet": "SynSheetA", "index": 2},
         },
     ],
-    "events": {"SynScene2": ["SynEvent2"], "SynScene10": ["SynEvent10_A", "SynEvent10_B"]},
+    "events": {
+        "SynScene2": [{"event": "SynEvent2", "args": {}}],
+        "SynScene10": [{"event": "SynEvent10_A", "args": {"id": "0"}}, {"event": "SynEvent10_B", "args": {"id": "1"}}],
+    },
+    "groups": {
+        "SynScene10": {
+            "ST_Syn_001_01 10": 0,
+            "ST_Syn_001_02 1": 0,
+            "ST_Syn_001_01 2": 0,
+            "ST_Syn_999_01 1": 1,
+            "ST_Syn_001_01 Mid_Run": 1,
+        },
+        "SynScene2": {"ST_Syn_002_01 1": -1, "ST_Syn_002_01 2": -1},
+    },
     "startup": [
         {"event": "SynEvent10_B", "map": 900, "condition": "{progress:0}==1500"},
         {"event": "SynEvent10_B", "map": 901, "condition": "{progress:0}>=1500"},
         {"event": "SynEvent2", "map": 902, "condition": "{progress:0}==2500"},
     ],
+    "maps": RAW["maps"],
+    "placements": RAW["placements"],
 }
 
 COUNTS = "story lines 5\nscenes 2\nattributed 4\nunattributed 1\nwith cue 3\nattributed 80.0%\n"
@@ -475,11 +523,12 @@ def test_scenes_is_registered_with_its_help(capsys: pytest.CaptureFixture[str], 
     assert "write the scene table to vanilla/scenes.json, or check it" in capsys.readouterr().out
 
 
-def test_line_events_lists_each_event_of_the_lines_scenes_once_in_table_order(
+def test_line_events_keep_the_events_naming_the_lines_talk_group_else_all_in_table_order(
     scene_vanilla: Path, extractor: FakeExtractor, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cli.main(["scenes"])
-    assert scenes.line_events("ST_Syn_001_01", "Mid_Run") == ["SynEvent10_A", "SynEvent10_B"]
+    assert scenes.line_events("ST_Syn_001_01", "Mid_Run") == ["SynEvent10_B"]
+    assert scenes.line_events("ST_Syn_001_01", "10") == ["SynEvent10_A"]
     assert scenes.line_events("ST_Syn_002_01", "2") == ["SynEvent2"]
     assert scenes.line_events("ST_Syn_999_01", "1") == []
 
@@ -497,3 +546,26 @@ def test_line_events_with_a_table_missing_events_raises(scene_vanilla: Path) -> 
     write_table([row(0, "SynSpeakerA")])
     with pytest.raises(Fail, match="unreadable"):
         scenes.line_events("ST_Syn_002_01", "1")
+
+
+def test_placements_resolve_the_deepest_map_folder_and_skip_unknown_maps(
+    scene_vanilla: Path, extractor: FakeExtractor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["scenes"])
+    assert scenes.placements("SynEvent10_B") == [scenes.Placement(900, "npc", 10.0, -20.0, 30.0, "{progress:28}==30")]
+    assert scenes.placements("SynEvent2") == [scenes.Placement(901, "trigger", 1.0, 2.0, 3.0, "")]
+    assert scenes.placements("SynEvent10_A") == []
+
+
+@pytest.mark.parametrize(
+    ("condition", "settings"),
+    [
+        ("{progress:28}==30", [(28, 30)]),
+        ("{progress:16}==0&{progress:0}==2120", [(16, 0), (0, 2120)]),
+        ("{progress:0}>=2000 & {progress:0}<4000", [(0, 2000)]),
+        ("!{flag:1406}", []),
+        ("", []),
+    ],
+)
+def test_progress_settings_meet_equal_and_at_least_terms_only(condition: str, settings: list[tuple[int, int]]) -> None:
+    assert scenes.progress_settings(condition) == settings

@@ -254,16 +254,30 @@ def test_every_mismatch_is_named_in_the_failure(remote: FakeRemote, saves: dict[
     assert "GameSaveData1.sav" not in message
 
 
-def test_target_files_name_the_line_hash_events_and_startups() -> None:
-    files = shot.target_files("aaaa000011112222", ["SynEventA", "SynEventB"], [(900, 1500), (901, 1500)], title=False)
-    assert files == {
-        "slot.txt": b"10\n",
-        "target.txt": b"aaaa000011112222\tSynEventA,SynEventB\t900:1500;901:1500\n",
-    }
+def test_target_files_hold_the_line_hash_then_one_route_per_line() -> None:
+    files = shot.target_files("aaaa000011112222", ["startup 900 1500", "event SynEventA"], title=False)
+    assert files == {"slot.txt": b"10\n", "target.txt": b"aaaa000011112222\nstartup 900 1500\nevent SynEventA\n"}
 
 
 def test_target_files_for_the_title_carry_only_its_hash() -> None:
-    assert shot.target_files("bbbb000011112222", [], [], title=True) == {"slot.txt": b"10\n", "title.txt": b"bbbb000011112222\n"}
+    assert shot.target_files("bbbb000011112222", [], title=True) == {"slot.txt": b"10\n", "title.txt": b"bbbb000011112222\n"}
+
+
+def test_routes_go_startup_then_placed_npc_and_trigger_then_bare_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shot.scenes, "line_events", lambda ns, key: ["SynEventA", "SynEventB"])
+    monkeypatch.setattr(shot.scenes, "startups", lambda event: [(900, 1500)] if event == "SynEventB" else [])
+    placed = {
+        "SynEventA": [shot.scenes.Placement(901, "npc", 10.0, -20.5, 30.0, "{progress:28}==30&!{flag:1}")],
+        "SynEventB": [shot.scenes.Placement(902, "trigger", 1.0, 2.0, 3.0, "")],
+    }
+    monkeypatch.setattr(shot.scenes, "placements", lambda event: placed[event])
+    assert shot.routes("ST_Syn_001_01", "10") == [
+        "startup 900 1500",
+        "npc 901 10 -20.5 30 28=30",
+        "trigger 902 1 2 3 -",
+        "event SynEventA",
+        "event SynEventB",
+    ]
 
 
 class FakeDesktop:
