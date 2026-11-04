@@ -10,3 +10,24 @@
 
 [ST_Summon640_Shiva_02_NF]
 "Summon640_Shiva_02_NF_004" = "The rewrite is weak and drifts from the line's point; keep the original joke's shape and change only the flirt's target."
+
+[ST_C01_Town_01Gra_20]
+"Town_01Gra_20_090" = "The trans detail is an announcement to someone the speaker barely knows and it drops the line's reunion point; keep the reunion and use a shape that answers it, such as family acceptance, not a chosen-name announcement."
+
+[ST_C04_405_01]
+"405_01_036" = "Change only the address word for the flirt's generalization; keep the closing boast exactly as written."
+
+[ST_C04_413_01]
+"413_01_015" = "The generalized address is ungrammatical; generalize to everyone present in natural grammar and keep the teasing point."
+
+[ST_FEV_Dng_06Zol_44]
+"FEV_Dng_06Zol_44_025" = "The partner mention is tacked on and could be deleted without loss; work the husband into the line's point about trade, or into how the speaker benefits."
+
+[ST_FEV_Town_03Kol_20]
+"FEV_Town_03Kol_20_078" = "The line is overloaded and the trans detail crowds out the promise to the child; keep the promise as the point and make the sister detail short and natural, or put it in a lighter clause."
+
+[ST_FEV_Town_08Gro_01]
+"FEV_Town_08Gro_01_010" = "The possessive is clumsy; keep the joint ownership in natural grammar, such as our prized possession, mine and my wife's."
+
+[ST_SubEv_ShortcutBridge]
+"SubEv_ShortcutBridge_003" = "The rewrite changes who repaired the bridge, which invents a fact; keep the repair passive as written and work the husband in without claiming the work."
