@@ -19,7 +19,9 @@ the line stages.
   `question`. Jev answers each question for every scene, and the screen names the
   question ids that flag a line. Each `id` is the reason id that a run records and
   the report counts, so pick ids that name the reason. The judge's `fixed` verdict
-  checks that a rewrite answers no to each reason question of its line.
+  checks that a rewrite answers no to each reason question of its line. On a queering line,
+  `fixed` means the bucket's edit is present and legible as the rubric's `[fixed]` label
+  defines it.
 - `[screen]` holds `criteria`, a list of one or more strings. Screen checks each
   candidate line against every criterion. It may also hold `model`, one string, which
   picks the model the screen runs on: `"opus"` or `"sonnet"`. Without `model` the screen
@@ -28,7 +30,9 @@ the line stages.
   and drafts.
 - `[judge]` holds `rubric`, one string. The scene judge, the cross-scene judge, the
   coherence check and the arc judge all read it. The rubric defines what `meaning`
-  protects, and it overrides the Japanese line where the two conflict.
+  protects, and it overrides the Japanese line where the two conflict. On a queering line the
+  judge also gives `no_invention` and `point` verdicts, which the `[no-invention]` and
+  `[keep-point]` labels define, and the line must pass both.
 - `[scene]` is optional. It configures the scene pass, which reads each scene as a
   whole. When `[scene]` is present, it holds four keys:
   - `[[scene.patterns]]` holds one or more questions. Each question has an `id` and a
