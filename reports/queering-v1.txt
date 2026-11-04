@@ -1,0 +1,265 @@
+chapter 1: 6 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 1769 untouched
+  character 7: 1
+  character 36: 1
+  character 43: 1
+  character 81: 1
+  character 85: 1
+  character 135: 1
+  gate classifier: 1
+  gate fixed: 1
+  gate minimal_change: 1
+  gate redo: 1
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 2: 1 changed, 0 kept for plot, 2 gate failed, 0 unfinished, 724 untouched
+  character 102: 1
+  gate classifier: 1
+  gate variety: 1
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 3: 2 changed, 19 kept for plot, 2 gate failed, 0 unfinished, 1191 untouched
+  kept no-hit: 7
+  kept plot: 19
+  character 10: 1
+  character 23: 1
+  gate fixed: 2
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 4: 3 changed, 0 kept for plot, 3 gate failed, 0 unfinished, 1091 untouched
+  reason flirt-at-woman: 3
+  kept no-hit: 1
+  character 50: 3
+  gate classifier: 1
+  gate redo: 2
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 5: 2 changed, 3 kept for plot, 3 gate failed, 0 unfinished, 1156 untouched
+  kept plot: 3
+  character 28: 1
+  character 185: 1
+  gate meaning: 1
+  gate redo: 2
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 6: 0 changed, 11 kept for plot, 0 gate failed, 0 unfinished, 849 untouched
+  kept plot: 11
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 7: 1 changed, 12 kept for plot, 1 gate failed, 0 unfinished, 517 untouched
+  reason romance: 1
+  kept no-hit: 1
+  kept plot: 12
+  character 130: 1
+  gate classifier: 1
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 8: 0 changed, 25 kept for plot, 0 gate failed, 0 unfinished, 910 untouched
+  kept protection: 5
+  kept plot: 25
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+chapter 9: 0 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 268 untouched
+  gate classifier: 1
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+unattributed: 25 changed, 19 kept for plot, 24 gate failed, 0 unfinished, 7326 untouched
+  reason romance: 2
+  reason flirt-at-woman: 3
+  kept no-hit: 6
+  kept protection: 1
+  kept plot: 19
+  character 3: 1
+  character 8: 1
+  character 50: 3
+  character 60: 2
+  character 69: 1
+  character 71: 1
+  character 75: 1
+  character 122: 1
+  character 138: 1
+  character 142: 1
+  character 145: 1
+  character 148: 1
+  character 149: 1
+  character 155: 1
+  character 156: 1
+  character 173: 1
+  character 174: 1
+  character 175: 1
+  character 176: 1
+  character 186: 1
+  character 189: 1
+  character 201: 1
+  gate arc: 1
+  gate classifier: 13
+  gate fixed: 2
+  gate meaning: 2
+  gate redo: 6
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+total: 40 changed, 89 kept for plot, 40 gate failed, 0 unfinished, 15801 untouched
+  reason romance: 3
+  reason flirt-at-woman: 6
+  kept no-hit: 15
+  kept protection: 6
+  kept plot: 89
+  character 3: 1
+  character 7: 1
+  character 8: 1
+  character 10: 1
+  character 23: 1
+  character 28: 1
+  character 36: 1
+  character 43: 1
+  character 50: 6
+  character 60: 2
+  character 69: 1
+  character 71: 1
+  character 75: 1
+  character 81: 1
+  character 85: 1
+  character 102: 1
+  character 122: 1
+  character 130: 1
+  character 135: 1
+  character 138: 1
+  character 142: 1
+  character 145: 1
+  character 148: 1
+  character 149: 1
+  character 155: 1
+  character 156: 1
+  character 173: 1
+  character 174: 1
+  character 175: 1
+  character 176: 1
+  character 185: 1
+  character 186: 1
+  character 189: 1
+  character 201: 1
+  gate arc: 1
+  gate classifier: 18
+  gate fixed: 5
+  gate meaning: 3
+  gate minimal_change: 1
+  gate redo: 11
+  gate variety: 1
+  scene eligible: 0
+  scene plans: 0
+  scene planned lines: 0 (required 0)
+  scene changed lines: 0
+  scene replanned: 0
+  scene reverted lines: 0
+  scene changed per scene: max 0, median 0
+scenes: 819 of 819 from the scene table, 3 outside it
+arcs: 169, 62 with changes
+redo: 15 listed, 3 changed, 11 gate failed
+queering romance: 137 lines, 23 characters, 0 speakerless
+queering gender roles: 3 lines, 3 characters
+queering eligible characters: 216
+queering candidates: insertable 1573 lines, 141 characters; trans-candidate 967 lines, 120 characters; 1 scenes unfinished
+queering romance target: 3 (15% of 23, pool 23)
+queering romance round 1: tried 3, passed 0
+queering romance round 2: tried 3, passed 1
+queering romance round 3: tried 2, passed 0
+queering romance round 4: tried 2, passed 0
+queering romance round 5: tried 2, passed 1
+queering romance round 6: tried 1, passed 1
+queering romance achieved: 3 of 3
+queering world target: 19 (10% of 193, pool 123)
+queering world round 1: tried 19, passed 4
+queering world round 2: tried 15, passed 6
+queering world round 3: tried 9, passed 5
+queering world round 4: tried 4, passed 3
+queering world round 5: tried 1, passed 1
+queering world achieved: 19 of 19
+queering nonbinary target: 10 (5% of 193, pool 123)
+queering nonbinary round 1: tried 10, passed 1
+queering nonbinary round 2: tried 9, passed 2
+queering nonbinary round 3: tried 7, passed 0
+queering nonbinary round 4: tried 7, passed 0
+queering nonbinary round 5: tried 7, passed 0
+queering nonbinary round 6: tried 7, passed 0
+queering nonbinary round 7: tried 7, passed 1
+queering nonbinary achieved: 4 of 10, pool exhausted
+queering trans target: 11 (5% of 216, pool 120)
+queering trans round 1: tried 11, passed 1
+queering trans round 2: tried 10, passed 3
+queering trans round 3: tried 7, passed 1
+queering trans round 4: tried 6, passed 1
+queering trans round 5: tried 5, passed 0
+queering trans round 6: tried 5, passed 0
+queering trans round 7: tried 5, passed 0
+queering trans round 8: tried 4, passed 1
+queering trans achieved: 7 of 11, pool exhausted
+queering flirt marked: 40, redirect half: 23
+queering changed queer: 3
+queering changed world: 20
+queering changed nonbinary: 4
+queering changed trans: 7
+queering changed redirect: 6
+queering gate failed queer: 1
+queering gate failed world: 9
+queering gate failed nonbinary: 11
+queering gate failed trans: 9
+queering gate failed redirect: 10
+recall romance: 0 disagreements, 0 confirmed
+recall gender-roles: 0 disagreements, 0 confirmed
+recall flirt-at-woman: 0 disagreements, 0 confirmed
+usage run 20261104T020910Z
+usage arc_judge opus: 58 calls, 116 input, 63435 output, 32886 cache read, 402367 cache write, 7506 prompt tokens per call, $4.49
+usage candidates haiku: 1 calls, 2 input, 2474 output, 3614 cache read, 0 cache write, 3616 prompt tokens per call, $0.00
+usage draft opus: 9 calls, 18 input, 5900 output, 5301 cache read, 95604 cache write, 11214 prompt tokens per call, $0.88
+usage judge opus: 13 calls, 26 input, 13349 output, 8268 cache read, 170953 cache write, 13788 prompt tokens per call, $1.64
+usage scene_coherence opus: 2 calls, 4 input, 2462 output, 1138 cache read, 31772 cache write, 16457 prompt tokens per call, $0.30
+usage total: 83 calls, 166 input, 87620 output, 51207 cache read, 700696 cache write, 9061 prompt tokens per call, $7.32
