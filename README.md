@@ -538,6 +538,14 @@ probe host's `global` container. It runs the probe mod and exits 0 when the mark
 honoured, or 1 when it is not. Then it quits the game and removes every file it put, in
 every outcome.
 
+When the built mod edits `ST_UI_TitleMenu,UI_Title_Copyright` itself, the build carries
+its own text for that key, and the verdict changes: the build passes only when the probe
+host shows the hash of the build's text and neither the marker's hash nor vanilla's. The
+marker is still put beside the build, and the verdict line adds `build <digest>`. Before
+it puts anything, `ffrd probe` fails when the `dialog/**/*.toml` edits do not load, with
+the errors `ffrd build` gives, or when a `dialog/**/*.toml` file is newer than
+`build/FFRS-Unstraightened_P.pak`. It names that file and says to run `ffrd build`.
+
 `--shape` probes one of `target`, `full`, `partial` or `ue4ss` alone. For each pak
 shape, it packs one edited line of the same key, installs the pak in `Paks/~mods` with
 `.utoc` and `.ucas` copied from the `global` container, and launches the game. The

@@ -4,10 +4,12 @@ Made-up namespaces, keys and text. Not game text.
 """
 
 import contextlib
+import os
 import re
 import shlex
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1071,6 +1073,140 @@ def test_refuses_when_vanilla_has_no_build_stamp(
     assert run_ffrd_probe() == 1
     assert capsys.readouterr().err == "ffrd: no vanilla text yet; run `ffrd extract`\n"
     assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []
+
+
+# ffrd probe with dialog edits: a build that overrides PROBE_KEY, a stale build, and dialog edits that do not load. Made-up text only.
+
+BUILD_TEXT = "Synthetic build line ten, edited."
+BUILD_DIGEST = vanilla_hash(BUILD_TEXT)
+DIALOG_REL = "dialog/synth/build.toml"
+OTHER_VANILLA = "Synthetic line two."
+
+
+def dialog_toml(text: str = BUILD_TEXT, vanilla: str = vanilla_hash(SYNTH_VANILLA)) -> str:
+    ns, key = PROBE_KEY_SYNTH
+    return f'[{ns}]\n{key} = {{ vanilla = "{vanilla}", text = "{text}" }}\n'
+
+
+def other_key_toml() -> str:
+    ns, key = OTHER_KEY
+    return f'[{ns}]\n{key} = {{ vanilla = "{vanilla_hash(OTHER_VANILLA)}", text = "Synthetic line two, edited." }}\n'
+
+
+def write_dialog(tmp_path: Path, body: str, mtime: float = 1_000_000_000.0) -> None:
+    """Write one dialog edit under the fake repo, dated before the build pak unless mtime says otherwise."""
+    path = tmp_path / "repo" / DIALOG_REL
+    path.parent.mkdir(parents=True)
+    path.write_text(body, encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+
+
+def build_seen(_text: str) -> list[str]:
+    return [line(PROBE_KEY_SYNTH, BUILD_DIGEST), "done"]
+
+
+def test_build_overriding_probe_key_is_honoured_when_only_its_hash_is_seen(
+    make_probe: Callable[..., ProbeRemote], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_dialog(tmp_path, dialog_toml())
+    fake = make_probe([build_seen])
+    assert run_ffrd_probe() == 0
+    assert len(fake.runs) == 1
+    marker = vanilla_hash(fake.texts[0])
+    vanilla_digest = vanilla_hash(SYNTH_VANILLA)
+    assert capsys.readouterr().out == (
+        f"build: ST_C01_001_01,10 marker {marker} vanilla {vanilla_digest} build {BUILD_DIGEST} seen {BUILD_DIGEST}: honoured\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("lines", "exit_code"),
+    [
+        pytest.param(build_seen, 0, id="build-only"),
+        pytest.param(
+            lambda t: [line(PROBE_KEY_SYNTH, BUILD_DIGEST), line(PROBE_KEY_SYNTH, vanilla_hash(t)), "done"],
+            1,
+            id="build-and-marker",
+        ),
+        pytest.param(
+            lambda _t: [line(PROBE_KEY_SYNTH, BUILD_DIGEST), line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"],
+            1,
+            id="build-and-vanilla",
+        ),
+        pytest.param(lambda t: [line(PROBE_KEY_SYNTH, vanilla_hash(t)), "done"], 1, id="marker-only"),
+        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, vanilla_hash(SYNTH_VANILLA)), "done"], 1, id="vanilla-only"),
+        pytest.param(lambda _t: [line(PROBE_KEY_SYNTH, "missing"), "done"], 1, id="missing"),
+    ],
+)
+def test_build_overriding_probe_key_needs_the_build_hash_and_no_other(
+    make_probe: Callable[..., ProbeRemote], tmp_path: Path, lines: Callable[[str], list[str]], exit_code: int
+) -> None:
+    write_dialog(tmp_path, dialog_toml())
+    fake = make_probe([lines])
+    assert run_ffrd_probe() == exit_code
+    assert len(fake.runs) == 1
+
+
+def test_build_overriding_probe_key_puts_the_build_and_the_marker_once(make_probe: Callable[..., ProbeRemote], tmp_path: Path) -> None:
+    write_dialog(tmp_path, dialog_toml())
+    fake = make_probe([build_seen])
+    assert run_ffrd_probe() == 0
+    assert len(fake.puts) == 1
+    dest, files = fake.puts[0]
+    assert dest == MODS
+    assert sorted(files) == sorted(ALL_FILES)
+    assert {name: files[name] for name in BUILD_FILES} == {f"{MOD_NAME}.{ext}": data for ext, data in BUILD_BYTES.items()}
+    assert translations(packed_locres(files[PROBE_PAK], tmp_path, "Game.locres")) == {**SYNTH_TABLE, PROBE_KEY_SYNTH: fake.texts[0]}
+    assert fake.deletes == [(MODS, ALL_FILES)]
+
+
+def test_build_editing_another_key_keeps_the_marker_verdict(
+    make_probe: Callable[..., ProbeRemote], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_dialog(tmp_path, other_key_toml())
+    fake = make_probe([edited_line])
+    assert run_ffrd_probe() == 0
+    marker = vanilla_hash(fake.texts[0])
+    vanilla_digest = vanilla_hash(SYNTH_VANILLA)
+    assert capsys.readouterr().out == f"build: ST_C01_001_01,10 marker {marker} vanilla {vanilla_digest} seen {marker}: honoured\n"
+
+
+def test_stale_dialog_edit_fails_before_any_put(
+    make_probe: Callable[..., ProbeRemote], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_dialog(tmp_path, dialog_toml(), mtime=time.time() + 3600)
+    fake = make_probe([build_seen])
+    assert run_ffrd_probe() == 1
+    assert capsys.readouterr().err == f"ffrd: {DIALOG_REL} is newer than build/{MOD_NAME}.pak; run `ffrd build`\n"
+    assert fake.status_calls == []
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []
+
+
+def test_dialog_edit_that_does_not_load_fails_before_any_put(
+    make_probe: Callable[..., ProbeRemote], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_dialog(tmp_path, dialog_toml(vanilla="0000000000000000"))
+    fake = make_probe([build_seen])
+    assert run_ffrd_probe() == 1
+    assert capsys.readouterr().err == f"ffrd: {DIALOG_REL}: ST_C01_001_01,10 changed in the game\n"
+    assert fake.status_calls == []
+    assert fake.fetched == []
+    assert fake.puts == []
+    assert fake.runs == []
+
+
+def test_unreadable_dialog_edit_fails_before_any_put(
+    make_probe: Callable[..., ProbeRemote], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_dialog(tmp_path, "[ST_C01_001_01\n")
+    fake = make_probe([build_seen])
+    assert run_ffrd_probe() == 1
+    assert capsys.readouterr().err.startswith(f"ffrd: {DIALOG_REL}: cannot read as TOML: ")
+    assert fake.status_calls == []
     assert fake.puts == []
     assert fake.runs == []
 

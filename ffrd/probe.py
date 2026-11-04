@@ -4,7 +4,10 @@
 when the gnomon build is not the vanilla build, and when a file of build/FFRS-Unstraightened_P is missing. It puts the
 three build files on the host in Paks/~mods unchanged, beside a marker pak FFRS-UnstraightenedProbe_P: the full shape with
 one edited line of PROBE_KEY, its .utoc and .ucas copied from the host's global container. It runs the probe mod and
-passes only when the marker is honoured. Every file it put is removed in every outcome.
+passes only when the marker is honoured. When dialog/**/*.toml overrides the probe key, the build carries its own text for
+that key, and the build passes only when that text's hash is seen and neither the marker's nor vanilla's is. Before it puts
+anything, it fails when those dialog edits do not load or when one is newer than the build pak. Every file it put is removed
+in every outcome.
 `--shape` probes one shape instead: target, full, partial or ue4ss. The ue4ss shape installs no pak: it runs the probe mod
 with the repo's UE4SS text mod beside it, whose edits.txt holds the one probe edit. A launch whose log holds no
 observation line for the probe key is inconclusive: the probe stops there and fails, without trying another shape.
@@ -23,7 +26,7 @@ from pathlib import Path
 from pylocres import LocresFile
 
 from ffrd import deck, gnomon
-from ffrd.build import PAK_SHAPES, UE4SS_NAME, edits_text, pack, pak_files
+from ffrd.build import PAK_SHAPES, UE4SS_NAME, edits_text, load_overrides, pack, pak_files
 from ffrd.game import MOD_NAME, Fail, repo_root, vanilla, vanilla_dir, vanilla_hash
 from ffrd.install import EXTS
 
@@ -70,6 +73,22 @@ def _build_files() -> list[Path]:
     return files
 
 
+def _build_overrides() -> dict[tuple[str, str], str]:
+    root = repo_root()
+    overrides, errors, _warnings = load_overrides(root, vanilla())
+    if errors:
+        raise Fail("\n".join(errors))
+    pak = root / "build" / f"{MOD_NAME}.pak"
+    newer = [
+        path.relative_to(root).as_posix()
+        for path in sorted((root / "dialog").rglob("*.toml"))
+        if path.stat().st_mtime > pak.stat().st_mtime
+    ]
+    if newer:
+        raise Fail(f"{', '.join(newer)} is newer than build/{pak.name}; run `ffrd build`")
+    return overrides
+
+
 def _fetch_globals() -> dict[str, bytes]:
     return {ext: gnomon.fetch(f"{gnomon.paks()}/global.{ext}") for ext in ("utoc", "ucas")}
 
@@ -103,7 +122,7 @@ def _launch_ue4ss(text: str) -> list[str]:
     return _run_probe((repo_root() / TEXT_MOD_DIR, {"edits.txt": edits}))
 
 
-def _verdict(shape: str, lines: list[str], marker: str, vanilla_digest: str) -> bool:
+def _verdict(shape: str, lines: list[str], marker: str, vanilla_digest: str, build_digest: str | None = None) -> bool:
     ns, key = PROBE_KEY
     pattern = re.compile(rf"{re.escape(ns)},{re.escape(key)} ([0-9a-f]{{16}}|missing)")
     observed = [match.group(1) for line in lines if (match := pattern.fullmatch(line))]
@@ -113,9 +132,14 @@ def _verdict(shape: str, lines: list[str], marker: str, vanilla_digest: str) -> 
     for digest in observed:
         if digest != "missing" and digest not in seen:
             seen.append(digest)
-    honoured = marker in seen and vanilla_digest not in seen
+    if build_digest is None:
+        honoured = marker in seen and vanilla_digest not in seen
+        build_part = ""
+    else:
+        honoured = build_digest in seen and marker not in seen and vanilla_digest not in seen
+        build_part = f" build {build_digest}"
     verdict = "honoured" if honoured else "not honoured"
-    print(f"{shape}: {ns},{key} marker {marker} vanilla {vanilla_digest} seen {' '.join(seen) or 'none'}: {verdict}")
+    print(f"{shape}: {ns},{key} marker {marker} vanilla {vanilla_digest}{build_part} seen {' '.join(seen) or 'none'}: {verdict}")
     return honoured
 
 
@@ -140,24 +164,26 @@ def _run_shape(shape: str, fetched: dict[str, bytes]) -> bool:
     return _verdict(shape, lines, vanilla_hash(text), vanilla_digest)
 
 
-def _run_build(build: list[Path], fetched: dict[str, bytes]) -> bool:
+def _run_build(build: list[Path], fetched: dict[str, bytes], overrides: dict[tuple[str, str], str]) -> bool:
     text = _probe_text()
     en = vanilla()
     vanilla_digest = _vanilla_digest(en)
+    build_digest = vanilla_hash(overrides[PROBE_KEY]) if PROBE_KEY in overrides else None
     with tempfile.TemporaryDirectory() as tmp:
         marker = _pack("full", en, text, Path(tmp), fetched)
         lines = _launch([*build, *marker])
-    return _verdict("build", lines, vanilla_hash(text), vanilla_digest)
+    return _verdict("build", lines, vanilla_hash(text), vanilla_digest, build_digest)
 
 
 def cmd_probe(args: argparse.Namespace) -> None:
     build = _build_files() if args.shape is None else []
+    overrides = _build_overrides() if args.shape is None else {}
     _check_deck()
     if gnomon.running():
         raise Fail(f"FINAL FANTASY RESONANCE is running on {gnomon.host()}; refusing to probe")
     _check_build()
     if args.shape is None:
-        if not _run_build(build, _fetch_globals()):
+        if not _run_build(build, _fetch_globals(), overrides):
             raise Fail("build is not honoured by the game")
         return
     fetched = {} if args.shape == UE4SS_SHAPE else _fetch_globals()
