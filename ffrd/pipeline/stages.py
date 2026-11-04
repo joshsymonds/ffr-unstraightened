@@ -589,6 +589,7 @@ class Target:
     intent: str
     callbacks: tuple[Mapping[str, Any], ...]
     context: Mapping[str, Any]
+    bucket: str | None = None
 
 
 DRAFT_INSTRUCTIONS = (
@@ -879,6 +880,27 @@ JUDGE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+BUCKET_JUDGE_INSTRUCTIONS = (
+    "Judge a candidate rewrite of the target line, drafted under the bucket named below. Return JSON with eight booleans. "
+    "meaning: the candidate keeps everything the judge rubric protects: the plot facts, who loves whom, the character "
+    "traits and the beat. plot: the plot is unchanged. minimal_change: the candidate changes no more than it must; moving "
+    "toward the Japanese line counts as minimal change. callback: every callback still holds. fixed: the candidate makes "
+    "the bucket's edit, present and legible, as the judge rubric's [fixed] label defines it for the bucket. no_invention: "
+    "the candidate passes the judge rubric's [no-invention] label. point: the candidate passes the judge rubric's "
+    "[keep-point] label. restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese line is "
+    "the meaning reference. The judge rubric overrides the Japanese line wherever they conflict. Refer to lines only by "
+    "namespace and key."
+)
+
+BUCKET_JUDGE_VERDICTS = (*JUDGE_VERDICTS, "no_invention", "point")
+
+BUCKET_JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {verdict: {"type": "boolean"} for verdict in BUCKET_JUDGE_VERDICTS},
+    "required": list(BUCKET_JUDGE_VERDICTS),
+    "additionalProperties": False,
+}
+
 
 def _judge_lens_text(lens: Lens) -> str:
     return lens.stage_text("judge") + "\n" + lens.stage_text("triage")
@@ -899,10 +921,13 @@ def judge(
     intent: str,
     context: Mapping[str, Any],
     ask: Ask,
+    bucket: str | None = None,
 ) -> Judgment | Unfinished | Rejected:
+    schema = BUCKET_JUDGE_SCHEMA if bucket is not None else JUDGE_SCHEMA
     parts = [
-        JUDGE_INSTRUCTIONS,
+        BUCKET_JUDGE_INSTRUCTIONS if bucket is not None else JUDGE_INSTRUCTIONS,
         f"Judge rubric:\n{lens.stage_text('judge')}",
+        *([f"Bucket:\n{bucket}"] if bucket is not None else []),
         f"Line reasons:\n{_json(_reason_questions(lens, reasons))}",
         f"Intent:\n{intent}",
         f"Target line:\n{_json({**_line_ref(line), 'english': line.english, 'japanese': line.japanese})}",
@@ -913,7 +938,7 @@ def judge(
     ]
 
     def call() -> dict[str, bool]:
-        answer = ask(claude.OPUS, parts, JUDGE_SCHEMA)
+        answer = ask(claude.OPUS, parts, schema)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
         return asdict(Judgment(**answer))
@@ -927,6 +952,8 @@ def judge(
         "intent": intent,
         "context": context,
     }
+    if bucket is not None:
+        inputs["bucket"] = bucket
     try:
         return Judgment(**store.run("judge", inputs, _judge_lens_text(lens), call).value)
     except _Unanswered as unanswered:

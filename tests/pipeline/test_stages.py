@@ -17,6 +17,9 @@ from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
+    BUCKET_JUDGE_INSTRUCTIONS,
+    BUCKET_JUDGE_SCHEMA,
+    BUCKET_JUDGE_VERDICTS,
     CANDIDATE_INSTRUCTIONS,
     CANDIDATE_SCHEMA,
     CHOSEN_NAME,
@@ -26,6 +29,7 @@ from ffrd.pipeline.stages import (
     INSERTABLE,
     INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
+    JUDGE_INSTRUCTIONS,
     JUDGE_SCHEMA,
     PICK_DRAFT_INSTRUCTIONS,
     PICK_DRAFT_SCHEMA,
@@ -829,6 +833,24 @@ def test_editing_intent_rule_reruns_intent(tmp_path: Path) -> None:
     assert len(ask.calls) == 2
 
 
+def test_draft_target_with_a_bucket_stores_under_the_same_key_as_without(tmp_path: Path) -> None:
+    draft(Store(tmp_path / "plain"), LENS, SCENE, [TARGET_ONE], None, Fake(DRAFT_ANSWER))
+    draft(Store(tmp_path / "bucketed"), LENS, SCENE, [replace(TARGET_ONE, bucket=BUCKET)], None, Fake(DRAFT_ANSWER))
+    [plain] = (tmp_path / "plain" / "results").glob("*.json")
+    [bucketed] = (tmp_path / "bucketed" / "results").glob("*.json")
+
+    assert bucketed.stem == plain.stem
+
+
+def test_speaker_draft_target_with_a_bucket_stores_under_the_same_key_as_without(tmp_path: Path) -> None:
+    draft_speaker(Store(tmp_path / "plain"), LENS, [(SCENE, [TARGET_ONE])], Fake(DRAFT_ANSWER))
+    draft_speaker(Store(tmp_path / "bucketed"), LENS, [(SCENE, [replace(TARGET_ONE, bucket=BUCKET)])], Fake(DRAFT_ANSWER))
+    [plain] = (tmp_path / "plain" / "results").glob("*.json")
+    [bucketed] = (tmp_path / "bucketed" / "results").glob("*.json")
+
+    assert bucketed.stem == plain.stem
+
+
 def test_draft_schema_requires_drafts_per_target_and_forbids_extra_properties() -> None:
     entry = DRAFT_SCHEMA["properties"]["drafts"]["items"]
     assert DRAFT_SCHEMA["type"] == "object"
@@ -1307,6 +1329,195 @@ def test_editing_judge_rubric_reruns_judge(tmp_path: Path) -> None:
     judge(store, edited, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, CONTEXT, ask)
 
     assert len(ask.calls) == 2
+
+
+JUDGE_INSTRUCTIONS_PINNED = (
+    "Judge a candidate rewrite of the target line. Return JSON with six booleans. meaning: the candidate keeps "
+    "everything the judge rubric protects: the plot facts, who loves whom, the character traits and the beat. plot: "
+    "the plot is unchanged. minimal_change: the candidate changes no more than it must; moving toward the Japanese "
+    "line counts as minimal change. callback: every callback still holds. fixed: the candidate answers no to every "
+    "line reason question. restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese "
+    "line is the meaning reference. The judge rubric overrides the Japanese line wherever they conflict. Refer to "
+    "lines only by namespace and key."
+)
+BUCKET_JUDGE_INSTRUCTIONS_PINNED = (
+    "Judge a candidate rewrite of the target line, drafted under the bucket named below. Return JSON with eight booleans. "
+    "meaning: the candidate keeps everything the judge rubric protects: the plot facts, who loves whom, the character "
+    "traits and the beat. plot: the plot is unchanged. minimal_change: the candidate changes no more than it must; moving "
+    "toward the Japanese line counts as minimal change. callback: every callback still holds. fixed: the candidate makes "
+    "the bucket's edit, present and legible, as the judge rubric's [fixed] label defines it for the bucket. no_invention: "
+    "the candidate passes the judge rubric's [no-invention] label. point: the candidate passes the judge rubric's "
+    "[keep-point] label. restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese line is "
+    "the meaning reference. The judge rubric overrides the Japanese line wherever they conflict. Refer to lines only by "
+    "namespace and key."
+)
+JUDGE_WITHOUT_BUCKET_KEY = "0d858f5920a69b814a9f72e6ded443b16da0070a8f0708a5bd9e4ba183e287a4"
+BUCKET = "made-up-bucket"
+BUCKET_JUDGE_ANSWER = {**JUDGE_ANSWER, "no_invention": True, "point": True}
+BUCKET_JUDGMENT = Judgment(
+    meaning=True,
+    plot=True,
+    minimal_change=True,
+    callback=True,
+    fixed=True,
+    restores_japanese=False,
+    no_invention=True,
+    point=True,
+)
+
+
+def test_bucket_judge_verdicts_are_the_six_plus_no_invention_and_point() -> None:
+    assert BUCKET_JUDGE_VERDICTS == (
+        "meaning",
+        "plot",
+        "minimal_change",
+        "callback",
+        "fixed",
+        "restores_japanese",
+        "no_invention",
+        "point",
+    )
+
+
+def test_bucket_judge_schema_requires_the_eight_verdicts_and_forbids_extra_properties() -> None:
+    verdicts = list(BUCKET_JUDGE_VERDICTS)
+
+    assert BUCKET_JUDGE_SCHEMA["type"] == "object"
+    assert BUCKET_JUDGE_SCHEMA["required"] == verdicts
+    assert set(BUCKET_JUDGE_SCHEMA["properties"]) == set(verdicts)
+    assert all(BUCKET_JUDGE_SCHEMA["properties"][verdict] == {"type": "boolean"} for verdict in verdicts)
+    assert BUCKET_JUDGE_SCHEMA["additionalProperties"] is False
+
+
+def test_bucket_judge_instructions_are_the_judge_instructions_with_the_bucket_edits() -> None:
+    assert BUCKET_JUDGE_INSTRUCTIONS == BUCKET_JUDGE_INSTRUCTIONS_PINNED
+
+
+def test_judge_without_bucket_keeps_the_base_instructions_schema_and_store_key(tmp_path: Path) -> None:
+    ask = Fake(JUDGE_ANSWER)
+
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, CONTEXT, ask)
+
+    assert JUDGE_INSTRUCTIONS == JUDGE_INSTRUCTIONS_PINNED
+    _model, parts, schema = ask.calls[0]
+    assert parts[0] == JUDGE_INSTRUCTIONS_PINNED
+    assert schema == JUDGE_SCHEMA
+    assert not any(part.startswith("Bucket:\n") for part in parts)
+    [record] = (tmp_path / "results").glob("*.json")
+    assert record.stem == JUDGE_WITHOUT_BUCKET_KEY
+
+
+def test_judge_with_bucket_asks_bucket_instructions_and_schema_with_a_bucket_part_after_the_rubric(tmp_path: Path) -> None:
+    ask = Fake(BUCKET_JUDGE_ANSWER)
+
+    result = judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        ask,
+        bucket=BUCKET,
+    )
+
+    assert result == BUCKET_JUDGMENT
+    _model, parts, schema = ask.calls[0]
+    assert parts[0] == BUCKET_JUDGE_INSTRUCTIONS
+    assert schema == BUCKET_JUDGE_SCHEMA
+    assert parts[1] == f"Judge rubric:\n{LENS.stage_text('judge')}"
+    assert parts[2] == f"Bucket:\n{BUCKET}"
+
+
+@pytest.mark.parametrize("verdict", ["no_invention", "point"])
+def test_bucket_judge_returns_a_false_no_invention_or_point_answer_as_false(tmp_path: Path, verdict: str) -> None:
+    answer = {**BUCKET_JUDGE_ANSWER, verdict: False}
+
+    result = judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(answer),
+        bucket=BUCKET,
+    )
+
+    assert getattr(result, verdict) is False
+    assert result == replace(BUCKET_JUDGMENT, **{verdict: False})
+
+
+def test_bucket_judge_store_key_carries_the_bucket(tmp_path: Path) -> None:
+    judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(BUCKET_JUDGE_ANSWER),
+        bucket=BUCKET,
+    )
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "line": {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key},
+        "text": "Made-up candidate. Not game text.",
+        "callbacks": [CALLBACK],
+        "reasons": list(REASONS),
+        "intent": INTENT_TEXT,
+        "context": CONTEXT,
+    }
+    lens_text = LENS.stage_text("judge") + "\n" + LENS.stage_text("triage")
+
+    assert record.stem == store_key("judge", {**inputs, "bucket": BUCKET}, lens_text)
+    assert record.stem != store_key("judge", inputs, lens_text)
+
+
+def test_fresh_store_on_same_root_returns_stored_bucket_judgment_without_asking(tmp_path: Path) -> None:
+    judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(BUCKET_JUDGE_ANSWER),
+        bucket=BUCKET,
+    )
+    ask = Fake()
+
+    assert (
+        judge(
+            Store(tmp_path),
+            LENS,
+            SCENE,
+            LINE_ONE,
+            "Made-up candidate. Not game text.",
+            [CALLBACK],
+            REASONS,
+            INTENT_TEXT,
+            CONTEXT,
+            ask,
+            bucket=BUCKET,
+        )
+        == BUCKET_JUDGMENT
+    )
+    assert ask.calls == []
 
 
 def test_cross_judge_schema_requires_consistent_and_forbids_extra_properties() -> None:
