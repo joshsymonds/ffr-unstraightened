@@ -189,7 +189,8 @@ DEST = f"{GAME}/FFRS/Binaries/Win64/ue4ss/Mods/UnstraightenedProbe"
 LOG = "probe.log"
 FILES = {"keys.txt": b"ST_SYNTH_001,1\n"}
 SYNTH_LINE = "ST_SYNTH_001,1 0123456789abcdef"
-LAUNCH_CMD = f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen"
+LAUNCH_CMD = f"timeout 30 steam -applaunch {APP_ID} -nosound -RenderOffscreen"
+VISIBLE_LAUNCH_CMD = f"timeout 30 steam -applaunch {APP_ID} -nosound"
 GAME_PGREP = "pgrep -f 'FINAL FANTASY RESONANC[E]'"
 EXE_PGREP = "pgrep -f 'FFRS-Win64-Shippin[g]'"
 EXE_PKILL = "pkill -KILL -f 'FFRS-Win64-Shippin[g]'"
@@ -285,7 +286,7 @@ class FakeRemote:
 
     def ssh(self, host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
         self.commands.append(command)
-        if command == LAUNCH_CMD:
+        if command in (LAUNCH_CMD, VISIBLE_LAUNCH_CMD):
             self._launch()
             return b""
         if command.startswith("mkdir -p "):
@@ -439,7 +440,7 @@ def test_run_mod_returns_log_lines_on_healthy_launch(make_remote: Callable[..., 
 def test_launch_sends_offscreen_render_command(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
     fake = make_remote([HEALTHY])
     gnomon.run_mod(mod, FILES, LOG)
-    assert f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen" in fake.commands
+    assert f"timeout 30 steam -applaunch {APP_ID} -nosound -RenderOffscreen" in fake.commands
 
 
 def test_run_mod_installs_tree_enabled_txt_and_files(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
@@ -579,6 +580,64 @@ def test_companion_removed_even_when_the_main_mod_removal_fails(
     with pytest.raises(Fail, match="synthetic ssh failure"):
         gnomon.run_mod(mod, FILES, LOG, companion=companion)
     assert not [key for key in fake.fs if key.startswith(COMP_DEST)]
+
+
+class WatchStop(Exception):
+    pass
+
+
+def test_offscreen_false_launches_without_render_flag(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    fake = make_remote([HEALTHY])
+    assert gnomon.run_mod(mod, FILES, LOG, offscreen=False) == [SYNTH_LINE, "done"]
+    assert VISIBLE_LAUNCH_CMD in fake.commands
+    assert LAUNCH_CMD not in fake.commands
+
+
+def test_offscreen_false_applies_to_every_relaunch(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    fake = make_remote([STALL, HEALTHY])
+    assert gnomon.run_mod(mod, FILES, LOG, offscreen=False) == [SYNTH_LINE, "done"]
+    assert fake.launch_count == 2
+    assert fake.commands.count(VISIBLE_LAUNCH_CMD) == 2
+    assert LAUNCH_CMD not in fake.commands
+
+
+def test_watch_sees_growing_log_on_every_poll_before_done(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    make_remote([HEALTHY])
+    seen: list[list[str]] = []
+    assert gnomon.run_mod(mod, FILES, LOG, watch=seen.append) == [SYNTH_LINE, "done"]
+    assert seen == [[], [], [], [SYNTH_LINE], [SYNTH_LINE, "done"]]
+
+
+def test_watch_exception_ends_run_and_removes_mod(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    fake = make_remote([HEALTHY])
+
+    def stop_on_line(lines: list[str]) -> None:
+        if SYNTH_LINE in lines:
+            raise WatchStop
+
+    with pytest.raises(WatchStop):
+        gnomon.run_mod(mod, FILES, LOG, watch=stop_on_line)
+    assert EXE_PKILL in fake.commands
+    assert not fake.game_running()
+    assert not [key for key in fake.fs if key.startswith(DEST)]
+
+
+def test_done_timeout_ends_run_at_the_given_wait(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    fake = make_remote([Launch(lines=((10, SYNTH_LINE),))])
+    with pytest.raises(Fail, match="within 20s"):
+        gnomon.run_mod(mod, FILES, LOG, done_timeout=20)
+    assert fake.launch_count == 1
+
+
+def test_done_timeout_default_gives_up_before_a_slow_done_line(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    make_remote([Launch(lines=((15, SYNTH_LINE), (400, "done\r")))])
+    with pytest.raises(Fail, match="within 300s"):
+        gnomon.run_mod(mod, FILES, LOG)
+
+
+def test_done_timeout_lets_a_slow_done_line_through(make_remote: Callable[..., FakeRemote], mod: Path) -> None:
+    make_remote([Launch(lines=((15, SYNTH_LINE), (400, "done\r")))])
+    assert gnomon.run_mod(mod, FILES, LOG, done_timeout=500) == [SYNTH_LINE, "done"]
 
 
 # ffrd probe: deck and gnomon refusals, verdicts, paks removed, and the packed shapes. Made-up keys and text only.

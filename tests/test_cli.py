@@ -391,6 +391,7 @@ def test_build_is_registered_between_find_and_install_with_its_help(
         "ffrd.pipeline.run",
         "ffrd.scenes",
         "ffrd.voice.cli",
+        "ffrd.shot",
         "ffrd.pipeline.smoke",
         "ffrd.probe",
     ]

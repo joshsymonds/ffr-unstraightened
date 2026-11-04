@@ -27,6 +27,11 @@ before they show any game text.
 
 Probe-host logs are read only through `ffrd probe` and `ffrd usmap`, never directly.
 
+One exception, from the repository owner: the Director, and agents the Director briefs,
+may view the PNGs that `ffrd shot` writes, and may read identifier names (classes,
+functions, properties, event ids, row names) from the mappings file and the game's
+assets. Never print, log or commit the dialogue those show, and keep `shots/` out of git.
+
 ## Voice data
 
 Never read, grep, list or print anything under the gitignored `work/` directory,

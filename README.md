@@ -95,6 +95,7 @@ Set the game's Text Language to English before you play.
 | `ffrd smoke [--scene <key>]` | Runs one in-scope scene through every stage of `ffrd run` with live models, writing only under `work/smoke/`. Prints a count per stage and exits 1 when a stage produced no result. See [Smoke run](#smoke-run). |
 | `ffrd probe [--shape {target,full,partial,ue4ss}]` | Installs the built mod with a probe-only marker pak beside it on the probe host, and passes when the game honours the marker. Removes both afterwards. `--shape` probes one shape alone. Prints only keys and hashes. See [Probe host](#probe-host). |
 | `ffrd usmap` | Dumps the game's mappings on the probe host to `vanilla/Mappings.usmap`. Re-run it after each game update. See [Probe host](#probe-host). |
+| `ffrd shot <namespace> <key> [--vanilla]`, `ffrd shot --title [--vanilla]` | Brings a changed line on screen in the game on the probe host and saves a PNG of the game window to `shots/`, after the mod or, with `--vanilla`, before it. Keeps the PNG only when the line's hash matches before and after the capture. Runs inside the save guard. Prints only keys and hashes. See [Screenshots](#screenshots). |
 | `ffrd scenes [--check]` | Runs the C# extractor in `tools/scenes/` through `dotnet run` and writes `vanilla/scenes.json`. Needs `ffrd extract` and `ffrd usmap` for the same game build. Prints counts only. `--check` prints the counts and the attributed percentage, and exits 1 when the table is missing, built for another game build, or under 95% attributed. See [Scene data](#scene-data). |
 | `ffrd voice pairs [--check] [--limit N]` | Writes four paraphrases per story line to `work/voice/train.jsonl`, `heldout.jsonl` and `calls.jsonl`: two from Opus, one from Sonnet and one from Haiku. Makes eight calls at a time, spread across the configured Claude accounts. A tenth of the scenes are held out. A rerun resumes from saved results. `--limit N` paraphrases only the first N scenes. `--check` prints the split and the call counts without calling Claude. Prints counts only. See [Voice models](#voice-models). |
 | `ffrd voice pilot [--scenes N]` | Runs the first N scenes (default 50) through `pairs` and both trainings. Prints calls, tokens, account usage, steps and seconds per step, and projected totals that include waits for account resets. |
@@ -572,6 +573,39 @@ The latest probe runs found the target, full and ue4ss shapes honoured, and the 
 shape not honoured. A plugin localization target, which is not a build shape, was not
 honoured. The ue4ss shape honours edits in English culture only. Run `ffrd probe` again
 after a game update to re-check.
+
+### Screenshots
+
+`ffrd shot <namespace> <key>` takes an in-game screenshot of a changed line on the probe
+host, for the Nexus page. `--vanilla` captures the game's own line instead, for a
+before-and-after pair. `--title` captures the title screen with its version tag. The PNG
+goes to `shots/<namespace>.<key>.<after|before>.png`, which git ignores.
+
+It runs `ue4ss/UnstraightenedShot` beside the built paks, or without them for
+`--vanilla`. The mod loads the dedicated save slot, then brings the line's scene on screen
+the way the game does. When the scene table names a map that starts the scene on load at a
+story progress, the mod sets that progress and map in the dedicated slot and loads it. It
+tries each such map in turn. Otherwise it plays the scene's events in table order. It
+steps through the dialogue and logs each line's hash. When the target line is on screen it
+holds it. The command focuses the game window with niri, captures it, and lets the mod go
+on. It keeps the PNG only when the mod reports the expected hash both before and after the
+capture. Scenes that start from talking to an NPC in a town are not reached this way, and
+end with `miss`.
+
+The game launches visibly and silent (`-nosound`), and the command focuses its window
+while it runs, then gives focus back. niri copies a window screenshot to the clipboard, so
+the command puts a text clipboard back afterwards. Run it when the probe host is not in
+use.
+
+Every launch runs inside the save guard. The guard refuses unless FFR cloud saves are off
+on the probe host (`cloudenabled "0"` for app 3259780 in `sharedconfig.vdf`). It copies the
+save folder to `~/.local/share/ffr-unstraightened/save-backups/<UTC stamp>/` on this
+machine, and never deletes a backup. It reseeds the dedicated slot, `GameSaveData10.sav`,
+from the newest other save. After the run it restores every other save file from the
+backup and verifies each byte for byte, and fails naming any file that does not match.
+
+`ffrd scenes` records what the command needs: the event ids that play each scene, and the
+maps that start an event on load, with their story progress condition.
 
 ### Release
 
