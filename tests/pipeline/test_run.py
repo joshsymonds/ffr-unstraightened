@@ -40,6 +40,7 @@ from ffrd.pipeline.run import (
 )
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.stages import (
+    BUCKET_JUDGE_SCHEMA,
     CANDIDATE_SCHEMA,
     CHOSEN_NAME,
     CROSS_SCHEMA,
@@ -404,6 +405,7 @@ LENS_OBJ = Lens(
     judge_rubric="Made-up judge rubric. Not game text.",
 )
 ALL_PASS = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "fixed": True, "restores_japanese": True}
+BUCKET_ALL_PASS = {**ALL_PASS, "no_invention": True, "point": True}
 CHAPTER_ONE_BIBLE: dict[str, Any] = {
     "characters": [],
     "facts": [],
@@ -613,11 +615,12 @@ class FakeClaude:
             return self._pick(parts, shaped=False)
         if schema is TRANS_PICK_DRAFT_SCHEMA:
             return self._pick(parts, shaped=True)
-        if schema is JUDGE_SCHEMA:
+        if schema is JUDGE_SCHEMA or schema is BUCKET_JUDGE_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.judge_failures:
                 return self.judge_failures[candidate]
-            return dict(self.judgments.get(candidate, ALL_PASS))
+            passing = BUCKET_ALL_PASS if schema is BUCKET_JUDGE_SCHEMA else ALL_PASS
+            return {**passing, **self.judgments.get(candidate, {})}
         if schema is CROSS_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.cross_failures:
@@ -4948,7 +4951,7 @@ def test_queering_scene_with_two_selected_changes_leaves_both_unfinished_when_co
 def test_queering_selected_line_candidates_are_judged_before_they_ship(tmp_path: Path) -> None:
     claude = _phase_claude()
     _phase(tmp_path, claude)
-    judged = _judged(claude, JUDGE_SCHEMA)
+    judged = _judged(claude, BUCKET_JUDGE_SCHEMA)
     assert {(ref, candidate) for ref, candidate in judged} >= {
         ((NS_A, "1"), OPUS_A1),
         ((NS_A, "2"), OPUS_A2),
@@ -4979,6 +4982,132 @@ def test_queering_selected_line_whose_first_candidate_fails_the_judge_is_retried
     assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), kind, gate, None, bucket="queer")
     assert (NS_A, "1") not in _dialog_records(tmp_path)
     assert set(_dialog_records(tmp_path)) == {(NS_A, "2"), (NS_B, "1"), (NS_B, "2")}
+
+
+def _bucketed_judges(claude: FakeClaude) -> list[tuple[tuple[str, str], str, str]]:
+    """Each bucket judge call as (line, bucket, candidate). Not game text."""
+    return [
+        (_target(parts), _part(parts, "Bucket:\n"), _part(parts, "Candidate:\n"))
+        for _, parts, schema in claude.calls
+        if schema is BUCKET_JUDGE_SCHEMA
+    ]
+
+
+# A callback on the phase's second line, so its cross-scene judge is asked whenever its bucket judge passes. Not game text.
+PHASE_CALLBACK = {"line": {"namespace": NS_A, "key": "2"}, "depends": [], "meaning": "Made-up callback meaning. Not game text."}
+
+
+def _callback_phase_claude() -> FakeClaude:
+    claude = _phase_claude()
+    claude.bible = {1: {**PHASE_BIBLE_ONE, "callbacks": [PHASE_CALLBACK]}, 2: PHASE_BIBLE_TWO}
+    return claude
+
+
+def test_queering_lines_are_judged_with_the_bucket_schema_and_their_bucket_and_a_passing_edit_ships(tmp_path: Path) -> None:
+    claude = _phase_claude()
+    outcomes = _phase(tmp_path, claude)
+    assert {(ref, bucket) for ref, bucket, _ in _bucketed_judges(claude)} == {
+        ((NS_A, "1"), "queer"),
+        ((NS_A, "2"), "queer"),
+        ((NS_B, "1"), "queer"),
+        ((NS_B, "2"), "queer"),
+    }
+    assert not any(schema is JUDGE_SCHEMA for _, _, schema in claude.calls)
+    assert _outcome_of(outcomes, (NS_A, "2")).outcome == "changed"
+
+
+def test_redirect_line_is_judged_with_the_redirect_bucket(tmp_path: Path) -> None:
+    key = next(str(k) for k in range(200) if queering.redirected(NS_A, str(k)))
+    claude = FakeClaude()
+    claude.bible = {1: {"characters": [NOTES_FLIRT], "facts": [], "callbacks": [], "arcs": []}}
+    claude.flags = {(NS_A, key): [ROMANCE_ID]}
+    claude.drafts = {(NS_A, key): [OPUS_A1]}
+    scene = Scene("made-up-scene-flirt", (_line(NS_A, key, NOTES_FLIRT["speaker"], EN_A1, 1),))
+    _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=(scene,), lens=QUEER_LENS)
+    assert {bucket for _, bucket, _ in _bucketed_judges(claude)} == {"redirect"}
+    assert [(candidate, bucket) for _, bucket, candidate in _bucketed_judges(claude)] == [(OPUS_A1, "redirect")]
+
+
+def test_trans_pick_line_is_judged_with_the_trans_bucket(tmp_path: Path) -> None:
+    claude = _trans_refill_claude()
+    _refill_run(tmp_path, claude, replace(QUEER_LENS, romance_share=0, trans_share=34))
+    judged = _bucketed_judges(claude)
+    assert judged
+    assert {bucket for _, bucket, _ in judged} == {"trans"}
+
+
+def test_world_pick_line_is_judged_with_the_world_bucket(tmp_path: Path) -> None:
+    claude = _insertable_claude()
+    _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=INSERTABLE_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, world_share=100, nonbinary_share=0, trans_share=0),
+    )
+    judged = _bucketed_judges(claude)
+    assert judged
+    assert {bucket for _, bucket, _ in judged} == {"world"}
+
+
+def test_nonbinary_pick_line_is_judged_with_the_nonbinary_bucket(tmp_path: Path) -> None:
+    claude = _insertable_claude()
+    _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=INSERTABLE_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, world_share=0, nonbinary_share=100, trans_share=0),
+    )
+    judged = _bucketed_judges(claude)
+    assert judged
+    assert {bucket for _, bucket, _ in judged} == {"nonbinary"}
+
+
+def test_queering_redo_redraft_is_judged_with_its_bucket(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{PHASE_NOTE}"\n')
+    claude = _phase_claude()
+    claude.redrafts = {(NS_A, "1"): [REDRAFT_A1]}
+    _phase(tmp_path, claude)
+    assert ((NS_A, "1"), "queer", REDRAFT_A1) in _bucketed_judges(claude)
+
+
+def test_unstraightening_judge_calls_use_the_plain_schema_with_no_bucket_part(tmp_path: Path) -> None:
+    claude = _claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    judges = [parts for _, parts, schema in claude.calls if schema is JUDGE_SCHEMA]
+    assert judges
+    assert not any(schema is BUCKET_JUDGE_SCHEMA for _, _, schema in claude.calls)
+    assert not any(part.startswith("Bucket:\n") for parts in judges for part in parts)
+
+
+def test_a_queering_line_with_a_callback_is_cross_judged_when_its_bucket_judge_passes(tmp_path: Path) -> None:
+    claude = _callback_phase_claude()
+    _phase(tmp_path, claude)
+    assert OPUS_A2 in [candidate for _, candidate in _judged(claude, CROSS_SCHEMA)]
+
+
+@pytest.mark.parametrize("failed", ["fixed", "no_invention", "point"])
+def test_queering_bucket_judge_failure_fails_its_gate_and_never_asks_the_cross_judge(tmp_path: Path, failed: str) -> None:
+    claude = _callback_phase_claude()
+    claude.judgments = {**claude.judgments, OPUS_A2: _judgment(**{failed: False})}
+    outcomes = _phase(tmp_path, claude)
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, (ROMANCE_ID,), "gate_failed", failed, None, bucket="queer")
+    assert OPUS_A2 not in [candidate for _, candidate in _judged(claude, CROSS_SCHEMA)]
+
+
+def test_a_queering_phase_rerun_on_the_same_store_makes_no_calls(tmp_path: Path) -> None:
+    claude = _phase_claude()
+    _phase(tmp_path, claude)
+    before = _snapshot(tmp_path)
+    calls = len(claude.calls)
+    _phase(tmp_path, claude)
+    assert len(claude.calls) == calls
+    assert _snapshot(tmp_path) == before
 
 
 def test_queering_selected_line_started_from_a_base_rewrite_records_the_game_hash_and_the_base_hash(tmp_path: Path) -> None:
@@ -5187,7 +5316,7 @@ def test_trans_pick_follows_the_trans_seeded_order_and_gates_with_the_answers_in
     # A trans line gets no per-line intent and no first draft call. Its judge reads the answer's intent.
     assert _intended_refs(claude) == []
     assert _first_drafted_refs(claude) == []
-    assert {_part(parts, "Intent:\n") for _, parts, schema in claude.calls if schema is JUDGE_SCHEMA} == {TRANS_INTENT}
+    assert {_part(parts, "Intent:\n") for _, parts, schema in claude.calls if schema is BUCKET_JUDGE_SCHEMA} == {TRANS_INTENT}
     assert _side(tmp_path, "trans") == {
         "share": 34,
         "pool": 3,
@@ -5733,7 +5862,7 @@ def _retried_refs(claude: FakeClaude) -> list[tuple[str, str]]:
 
 
 def _judged_refs(claude: FakeClaude) -> list[tuple[str, str]]:
-    return [ref for ref, _ in _judged(claude, JUDGE_SCHEMA)]
+    return [ref for ref, _ in _judged(claude, BUCKET_JUDGE_SCHEMA)]
 
 
 def _coherence_rewrites(claude: FakeClaude) -> list[list[tuple[str, str]]]:

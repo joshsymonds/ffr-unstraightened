@@ -366,11 +366,20 @@ def _judge(
     intent: str,
     context: Mapping[str, Any],
     ask: Ask,
+    bucket: str | None,
 ) -> Judgment | Unfinished | Rejected:
-    verdict = stages.judge(ctx.store, ctx.lens, scene, line, candidate.text, callbacks, reasons, intent, context, ask)
+    verdict = stages.judge(ctx.store, ctx.lens, scene, line, candidate.text, callbacks, reasons, intent, context, ask, bucket)
     if not isinstance(verdict, Judgment) or not callbacks:
         return verdict
-    if not (verdict.meaning and verdict.plot and verdict.minimal_change and verdict.callback and verdict.fixed):
+    if not (
+        verdict.meaning
+        and verdict.plot
+        and verdict.minimal_change
+        and verdict.callback
+        and verdict.fixed
+        and verdict.no_invention
+        and verdict.point
+    ):
         return verdict
     consistent = stages.cross_judge(
         ctx.store, ctx.lens, line, candidate.text, callbacks, _related(ctx, line, callbacks), reasons, intent, context, ask
@@ -428,7 +437,7 @@ def _intend(
     if intended.keep:
         kind: OutcomeKind = "kept_for_plot" if intended.keep_reason == "plot" else "untouched"
         return _outcome(line, reasons, kind, keep_reason=intended.keep_reason)
-    return stages.Target(line, intended.text, callbacks, context)
+    return stages.Target(line, intended.text, callbacks, context, bucket)
 
 
 def _line(
@@ -452,7 +461,9 @@ def _line(
 
     def judge_candidate(candidate: Candidate) -> Judgment | Unfinished | Rejected:
         if candidate.text not in judged:
-            judged[candidate.text] = _judge(ctx, scene, line, target.callbacks, candidate, reasons, target.intent, target.context, ask)
+            judged[candidate.text] = _judge(
+                ctx, scene, line, target.callbacks, candidate, reasons, target.intent, target.context, ask, target.bucket
+            )
         return judged[candidate.text]
 
     def check_round(candidates: Sequence[Candidate]) -> None:
@@ -1038,7 +1049,7 @@ def _pick_line(
     if answer is None or (answer.namespace, answer.key) != (line.namespace, line.key):
         return _outcome(line, marked.reasons, "untouched"), None
     callbacks, context = _neighbourhood(ctx, scene, line)
-    return _gated(ctx, scene, stages.Target(line, answer.intent, callbacks, context), marked.reasons, answer.drafts, ask)
+    return _gated(ctx, scene, stages.Target(line, answer.intent, callbacks, context, marked.bucket), marked.reasons, answer.drafts, ask)
 
 
 def _pick_unit(
