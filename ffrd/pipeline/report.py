@@ -561,6 +561,43 @@ def render(
     return lines
 
 
+@dataclass(frozen=True)
+class ScreenedScene:
+    chapter: int | None
+    finished: bool
+    lines: int
+    left_out: int
+    flagged: tuple[tuple[str, ...], ...]  # each flagged line's reason ids
+    eligible: bool
+    patterns: tuple[str, ...]
+
+
+def _screen_block(label: str, scenes: list[ScreenedScene], triage_ids: Sequence[str], scene_ids: Sequence[str]) -> list[str]:
+    flagged = [line for scene in scenes for line in scene.flagged]
+    summary = (
+        f"{label}: {len(scenes)} scenes, {sum(not s.finished for s in scenes)} unfinished, "
+        f"{sum(s.lines for s in scenes)} lines, {sum(s.left_out for s in scenes)} left out, {len(flagged)} flagged"
+    )
+    lines = [summary]
+    lines += [f"  reason {rid}: {sum(rid in line for line in flagged)}" for rid in triage_ids]
+    if scene_ids:
+        lines.append(f"  scene eligible: {sum(s.eligible for s in scenes)}")
+        lines += [f"  scene flagged {pattern}: {sum(pattern in s.patterns for s in scenes)}" for pattern in scene_ids]
+    return lines
+
+
+def render_screen(scenes: Sequence[ScreenedScene], triage_ids: Sequence[str], scene_ids: Sequence[str]) -> list[str]:
+    chapters = sorted({s.chapter for s in scenes if s.chapter is not None})
+    lines: list[str] = []
+    for chapter in chapters:
+        lines += _screen_block(f"chapter {chapter}", [s for s in scenes if s.chapter == chapter], triage_ids, scene_ids)
+    unattributed = [s for s in scenes if s.chapter is None]
+    if unattributed:
+        lines += _screen_block("unattributed", unattributed, triage_ids, scene_ids)
+    lines += _screen_block("total", list(scenes), triage_ids, scene_ids)
+    return lines
+
+
 def _scene_line(table: list[scene_file.SceneLine], keys: set[Key]) -> str:
     scenes = {line.scene for line in table}
     table_keys = {(line.namespace, line.key) for line in table}
