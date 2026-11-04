@@ -1,6 +1,7 @@
 """Save guard tests against a fake gnomon filesystem. Made-up save bytes and names. Not game data."""
 
 import fnmatch
+import json
 import shlex
 import subprocess
 from pathlib import Path
@@ -8,8 +9,8 @@ from typing import IO
 
 import pytest
 
-from ffrd import deck, shot
-from ffrd.game import Fail
+from ffrd import cli, deck, shot
+from ffrd.game import Fail, vanilla_hash
 
 REMOTE_HOME = "/remote"
 STEAM_ID = "76561197969529126"
@@ -195,10 +196,12 @@ def test_refuses_to_seed_when_no_game_save_exists(remote: FakeRemote, tmp_path: 
     assert remote.writes == []
 
 
-def test_existing_dedicated_slot_is_left_alone_and_not_restored(remote: FakeRemote, saves: dict[str, bytes]) -> None:
+def test_existing_dedicated_slot_is_reseeded_from_the_newest_other_save_and_not_restored(
+    remote: FakeRemote, saves: dict[str, bytes]
+) -> None:
     remote.add_save(DEDICATED, b"earlier run's slot", mtime=99.0)
     with shot.guard():
-        assert remote.files[f"{SAVE_FOLDER}/{DEDICATED}"] == b"earlier run's slot"
+        assert remote.files[f"{SAVE_FOLDER}/{DEDICATED}"] == saves["GameSaveData2.sav"]
         remote.files[f"{SAVE_FOLDER}/{DEDICATED}"] = b"game wrote this"
     assert remote.files[f"{SAVE_FOLDER}/{DEDICATED}"] == b"game wrote this"
 
@@ -249,3 +252,132 @@ def test_every_mismatch_is_named_in_the_failure(remote: FakeRemote, saves: dict[
     assert "GameSaveData0.sav" in message
     assert "OptionSaveData.sav" in message
     assert "GameSaveData1.sav" not in message
+
+
+def test_target_files_name_the_line_hash_events_and_startups() -> None:
+    files = shot.target_files("aaaa000011112222", ["SynEventA", "SynEventB"], [(900, 1500), (901, 1500)], title=False)
+    assert files == {
+        "slot.txt": b"10\n",
+        "target.txt": b"aaaa000011112222\tSynEventA,SynEventB\t900:1500;901:1500\n",
+    }
+
+
+def test_target_files_for_the_title_carry_only_its_hash() -> None:
+    assert shot.target_files("bbbb000011112222", [], [], title=True) == {"slot.txt": b"10\n", "title.txt": b"bbbb000011112222\n"}
+
+
+class FakeDesktop:
+    """Records gnomon commands for the watcher: one game window, one focused window, a fixed PNG."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+        self.windows: list[dict[str, object]] = []
+
+    def ssh(self, host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
+        self.commands.append(command)
+        if command.endswith("niri msg --json windows"):
+            return json.dumps(self.windows).encode()
+        if command.endswith("niri msg --json focused-window"):
+            return json.dumps({"id": 7, "app_id": "synthetic-editor"}).encode()
+        if command.startswith("cat /tmp/ffrd-shot-"):
+            return b"synthetic png"
+        return b""
+
+
+@pytest.fixture
+def desktop(monkeypatch: pytest.MonkeyPatch) -> FakeDesktop:
+    fake = FakeDesktop()
+    monkeypatch.setattr(deck, "ssh", fake.ssh)
+    monkeypatch.setattr(deck, "ssh_status", lambda host, command: 0)
+    monkeypatch.setattr(shot.time, "sleep", lambda seconds: None)
+    return fake
+
+
+def test_watcher_focuses_the_game_window_once_it_appears_and_gives_focus_back(desktop: FakeDesktop) -> None:
+    watcher = shot.Watcher("gnomon", "/synthetic/Mods/UnstraightenedShot")
+    watcher([])
+    assert not any("focus-window" in c for c in desktop.commands)
+    desktop.windows = [{"id": 42, "app_id": "steam_app_3259780"}]
+    watcher([])
+    watcher.release()
+    focus = [c.rsplit(" ", 1)[1] for c in desktop.commands if "focus-window --id" in c]
+    assert focus == ["42", "7"]
+
+
+def test_watcher_captures_on_snap_then_releases_the_hold_and_records_held(desktop: FakeDesktop) -> None:
+    desktop.windows = [{"id": 42, "app_id": "steam_app_3259780"}]
+    watcher = shot.Watcher("gnomon", "/synthetic/Mods/UnstraightenedShot")
+    watcher(["slotload true", "line 1111222233334444", "snap 1111222233334444"])
+    assert watcher.snap == "1111222233334444"
+    assert watcher.png == b"synthetic png"
+    shots = [i for i, c in enumerate(desktop.commands) if "screenshot-window --id 42" in c]
+    go = [i for i, c in enumerate(desktop.commands) if c == "touch /synthetic/Mods/UnstraightenedShot/go"]
+    assert len(shots) == 1 and len(go) == 1 and shots[0] < go[0]
+    watcher(["slotload true", "line 1111222233334444", "snap 1111222233334444", "held 1111222233334444", "done"])
+    assert watcher.held == "1111222233334444"
+    assert len([c for c in desktop.commands if "screenshot-window" in c]) == 1
+
+
+def test_watcher_puts_a_text_clipboard_back_after_the_capture(desktop: FakeDesktop, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = desktop.ssh
+
+    def ssh(host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
+        if command.endswith("wl-paste --list-types 2>/dev/null || true"):
+            desktop.commands.append(command)
+            return b"text/plain;charset=utf-8\ntext/plain\n"
+        if command.endswith("wl-paste --no-newline --type text/plain"):
+            desktop.commands.append(command)
+            return b"synthetic clipboard"
+        if command == "cat > /tmp/ffrd-clip":
+            assert not isinstance(stdin, int)
+            desktop.commands.append(command + " " + stdin.read().decode())
+            return b""
+        return original(host, command, stdin)
+
+    monkeypatch.setattr(deck, "ssh", ssh)
+    desktop.windows = [{"id": 42, "app_id": "steam_app_3259780"}]
+    shot.Watcher("gnomon", "/synthetic/Mods/UnstraightenedShot")(["snap 1111222233334444"])
+    assert "cat > /tmp/ffrd-clip synthetic clipboard" in desktop.commands
+    assert any("setsid -f sh -c 'wl-copy < /tmp/ffrd-clip" in c for c in desktop.commands)
+
+
+@pytest.mark.parametrize(
+    ("snap", "held", "png", "kept"),
+    [
+        ("1111222233334444", "1111222233334444", b"png", True),
+        ("1111222233334444", "9999222233334444", b"png", False),
+        ("9999222233334444", "1111222233334444", b"png", False),
+        ("1111222233334444", None, b"png", False),
+        ("1111222233334444", "1111222233334444", None, False),
+    ],
+)
+def test_a_shot_is_kept_only_when_the_line_matches_before_and_after_the_capture(
+    snap: str, held: str | None, png: bytes | None, kept: bool
+) -> None:
+    watcher = shot.Watcher("gnomon", "/synthetic")
+    watcher.snap, watcher.held, watcher.png = snap, held, png
+    assert shot.verdict("1111222233334444", watcher) is kept
+
+
+@pytest.mark.parametrize("argv", [["shot"], ["shot", "ST_C01_001_01", "10", "--title"], ["shot", "ST_C01_001_01"]])
+def test_shot_needs_a_line_or_the_title_but_not_both(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 1
+    assert capsys.readouterr().err.startswith("ffrd: ")
+
+
+def test_before_expects_the_vanilla_hash(fake_vanilla: Path) -> None:
+    assert shot._expected("ST_C01_001_01", "10", before=True) == vanilla_hash("Synthetic line ten.")
+
+
+def test_after_refuses_a_line_the_build_does_not_change(fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shot, "load_overrides", lambda root, en: ({}, [], []))
+    with pytest.raises(Fail, match="not changed by the build"):
+        shot._expected("ST_C01_001_01", "10", before=False)
+
+
+def test_after_expects_the_built_text(fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    built = {("ST_C01_001_01", "10"): "Synthetic rewritten line ten."}
+    monkeypatch.setattr(shot, "load_overrides", lambda root, en: (built, [], []))
+    assert shot._expected("ST_C01_001_01", "10", before=False) == vanilla_hash("Synthetic rewritten line ten.")

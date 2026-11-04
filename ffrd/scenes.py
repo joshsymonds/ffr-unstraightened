@@ -3,12 +3,14 @@
 `ffrd scenes` runs the scene extractor on the installed game and writes vanilla/scenes.json. A story line is a keyed
 line of a line table that event data references, with non-empty English text. `ffrd scenes --check` reads the table
 without the game and fails when it is missing, stale or below 95 percent attributed. The table holds keys, speaker ids
-and voice cue positions, never the text.
+and voice cue positions, never the text. It also records, for the shot command, the event ids that play each scene
+and the maps that start an event on load at a story progress.
 """
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
@@ -21,6 +23,7 @@ from ffrd.probe import USMAP_NAME
 TABLE_NAME = "scenes.json"
 THRESHOLD = 95
 UNREADABLE = "the scene table is unreadable; run `ffrd scenes`"
+PROGRESS_CONDITION = re.compile(r"\{progress:0\}==(\d+)")
 DESCRIPTION = (
     "A story line is a keyed line of a line table that event data references, with non-empty English text. "
     "attributed counts story lines with a speaker; with cue counts story lines matched to exactly one voice cue."
@@ -57,7 +60,7 @@ def _vanilla_build() -> str:
     return stamp.read_text().strip()
 
 
-def load() -> list[SceneLine]:
+def _table() -> dict[str, Any]:
     path = table_path()
     if not path.exists():
         raise Fail("no scene table; run `ffrd scenes`")
@@ -69,10 +72,35 @@ def load() -> list[SceneLine]:
     local = _vanilla_build()
     if build != local:
         raise Fail(f"the scene table is for build {build}, not vanilla build {local}; run `ffrd scenes`")
+    return table
+
+
+def load() -> list[SceneLine]:
+    table = _table()
     try:
         return [_line(row) for row in table["lines"]]
     except (KeyError, TypeError) as e:
         raise Fail(UNREADABLE) from e
+
+
+def line_events(namespace: str, key: str) -> list[str]:
+    """The event ids that play a scene holding the line, in table order."""
+    table = _table()
+    try:
+        scenes = [row["scene"] for row in table["lines"] if row["namespace"] == namespace and row["key"] == key]
+        return list(dict.fromkeys(event for scene in scenes for event in table["events"][scene]))
+    except (KeyError, TypeError) as e:
+        raise Fail(UNREADABLE) from e
+
+
+def startups(event: str) -> list[tuple[int, int]]:
+    """The (map id, story progress) pairs whose map plays the event on load; other conditions are left out."""
+    table = _table()
+    try:
+        found = [(row["map"], PROGRESS_CONDITION.fullmatch(row["condition"])) for row in table["startup"] if row["event"] == event]
+    except (KeyError, TypeError) as e:
+        raise Fail(UNREADABLE) from e
+    return [(int(map_id), int(match.group(1))) for map_id, match in found if match]
 
 
 def _line(row: dict[str, Any]) -> SceneLine:
@@ -171,8 +199,13 @@ def _write() -> list[SceneLine]:
     if not oodle:
         raise Fail("FFR_OODLE is not set; point it at the Oodle library")
     english = {(ns, key) for ns, key, text in entries(vanilla("en")) if text}
-    lines = _scene_lines(_extract(usmap, oodle), english)
-    table = {"build": build, "lines": [asdict(line) for line in lines]}
+    raw = _extract(usmap, oodle)
+    lines = _scene_lines(raw, english)
+    events = {
+        scene: list(dict.fromkeys(ref["event"] for ref in raw["references"] if ref["table"] == scene))
+        for scene in dict.fromkeys(line.scene for line in lines)
+    }
+    table = {"build": build, "lines": [asdict(line) for line in lines], "events": events, "startup": raw["startup"]}
     table_path().write_text(json.dumps(table, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return lines
 

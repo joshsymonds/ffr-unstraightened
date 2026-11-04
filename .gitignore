@@ -16,3 +16,5 @@ __pycache__/
 .ruff_cache/
 # Lens run output carries rewritten game lines; it stays local and ships only inside the built paks.
 /dialog/*/
+# In-game screenshots show game text; they stay local.
+/shots/

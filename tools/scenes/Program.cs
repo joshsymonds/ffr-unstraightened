@@ -17,9 +17,10 @@ static class Program
 
     sealed record LineTable(string Id, List<SceneLine> Lines);
     sealed record SceneLine(string Namespace, string Key, string? Speaker);
-    sealed record SceneRef(string Table, string? Sheet);
+    sealed record SceneRef(string Table, string? Sheet, string Event);
+    sealed record Startup(string Event, int Map, string Condition);
     sealed record CueSheet(string Name, List<string> Cues);
-    sealed record Output(List<LineTable> Tables, List<SceneRef> References, List<CueSheet> Sheets);
+    sealed record Output(List<LineTable> Tables, List<SceneRef> References, List<CueSheet> Sheets, List<Startup> Startup);
 
     static int Main(string[] args)
     {
@@ -54,6 +55,8 @@ static class Program
         var namespaces = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         var tables = new List<LineTable>();
         var references = new List<SceneRef>();
+        var startup = new List<Startup>();
+        var startupSeen = new HashSet<Startup>();
 
         var datatables = provider.Files.Keys
             .Where(p => p.StartsWith("FFRS/Content/Datatable/", StringComparison.OrdinalIgnoreCase) && p.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
@@ -92,7 +95,7 @@ static class Program
                     else if (table.RowStructName is "TalkEventData" or "ChatEventData")
                     {
                         var field = table.RowStructName == "TalkEventData" ? "TalkEventDataTable" : "TalkDataTable";
-                        foreach (var row in table.RowMap.Values)
+                        foreach (var (name, row) in table.RowMap)
                         {
                             var target = PropertyTag<SoftObjectProperty>(row.Properties, field)?.Value.AssetPathName.Text;
                             if (string.IsNullOrEmpty(target) || target == "None") continue;
@@ -100,7 +103,25 @@ static class Program
                             // Soft paths can differ in case from the package path; use the package's own spelling.
                             var file = AssetFile(target);
                             if (provider.Files.TryGetValue(file, out var package)) file = package.Path;
-                            references.Add(new SceneRef(file[..^".uasset".Length], string.IsNullOrEmpty(sheet) ? null : sheet));
+                            references.Add(new SceneRef(file[..^".uasset".Length], string.IsNullOrEmpty(sheet) ? null : sheet, name.Text));
+                        }
+                    }
+                    else if (table.RowStructName == "MAP_DATA")
+                    {
+                        // A map plays each startup event on load when the save meets its condition.
+                        foreach (var row in table.RowMap.Values)
+                        {
+                            var map = PropertyTag<IntProperty>(row.Properties, "ID")?.Value;
+                            if (map is null || PropertyTag<ArrayProperty>(row.Properties, "startupEventList") is not { Value: not null } list) continue;
+                            foreach (var element in list.Value.Properties)
+                            {
+                                if (element is not StructProperty { Value.StructType: FStructFallback entry }) continue;
+                                var eventId = PropertyTag<NameProperty>(entry.Properties, "EventId")?.Value.Text ?? PropertyTag<StrProperty>(entry.Properties, "EventId")?.Value;
+                                var condition = PropertyTag<StrProperty>(entry.Properties, "Condition")?.Value ?? "";
+                                if (string.IsNullOrEmpty(eventId) || eventId == "None") continue;
+                                var item = new Startup(eventId, map.Value, condition);
+                                if (startupSeen.Add(item)) startup.Add(item);
+                            }
                         }
                     }
                 }
@@ -154,11 +175,11 @@ static class Program
         }
 
         var json = JsonSerializer.Serialize(
-            new Output(tables, references, sheets),
+            new Output(tables, references, sheets, startup),
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true });
         File.WriteAllText(outPath, json);
 
-        Console.WriteLine($"tables {tables.Count} references {references.Count} sheets {sheets.Count}");
+        Console.WriteLine($"tables {tables.Count} references {references.Count} sheets {sheets.Count} startup {startup.Count}");
         return 0;
     }
 

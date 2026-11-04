@@ -55,9 +55,15 @@ RAW: dict[str, Any] = {
         },
     ],
     "references": [
-        {"table": "SynScene10", "sheet": "SynSheetA"},
-        {"table": "SynScene10", "sheet": None},
-        {"table": "SynScene2", "sheet": "SynSheetB"},
+        {"table": "SynScene10", "sheet": "SynSheetA", "event": "SynEvent10_A"},
+        {"table": "SynScene10", "sheet": None, "event": "SynEvent10_B"},
+        {"table": "SynScene2", "sheet": "SynSheetB", "event": "SynEvent2"},
+        {"table": "SynScene10", "sheet": None, "event": "SynEvent10_A"},
+    ],
+    "startup": [
+        {"event": "SynEvent10_B", "map": 900, "condition": "{progress:0}==1500"},
+        {"event": "SynEvent10_B", "map": 901, "condition": "{progress:0}>=1500"},
+        {"event": "SynEvent2", "map": 902, "condition": "{progress:0}==2500"},
     ],
     "sheets": [
         {
@@ -108,6 +114,12 @@ EXPECTED_TABLE: dict[str, Any] = {
             "speaker": "SynSpeakerA",
             "voice": {"sheet": "SynSheetA", "index": 2},
         },
+    ],
+    "events": {"SynScene2": ["SynEvent2"], "SynScene10": ["SynEvent10_A", "SynEvent10_B"]},
+    "startup": [
+        {"event": "SynEvent10_B", "map": 900, "condition": "{progress:0}==1500"},
+        {"event": "SynEvent10_B", "map": 901, "condition": "{progress:0}>=1500"},
+        {"event": "SynEvent2", "map": 902, "condition": "{progress:0}==2500"},
     ],
 }
 
@@ -461,3 +473,27 @@ def test_scenes_is_registered_with_its_help(capsys: pytest.CaptureFixture[str], 
         cli.main(["--help"])
     assert exit_info.value.code == 0
     assert "write the scene table to vanilla/scenes.json, or check it" in capsys.readouterr().out
+
+
+def test_line_events_lists_each_event_of_the_lines_scenes_once_in_table_order(
+    scene_vanilla: Path, extractor: FakeExtractor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["scenes"])
+    assert scenes.line_events("ST_Syn_001_01", "Mid_Run") == ["SynEvent10_A", "SynEvent10_B"]
+    assert scenes.line_events("ST_Syn_002_01", "2") == ["SynEvent2"]
+    assert scenes.line_events("ST_Syn_999_01", "1") == []
+
+
+def test_startups_keep_only_exact_progress_conditions(
+    scene_vanilla: Path, extractor: FakeExtractor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["scenes"])
+    assert scenes.startups("SynEvent10_B") == [(900, 1500)]
+    assert scenes.startups("SynEvent2") == [(902, 2500)]
+    assert scenes.startups("SynEvent10_A") == []
+
+
+def test_line_events_with_a_table_missing_events_raises(scene_vanilla: Path) -> None:
+    write_table([row(0, "SynSpeakerA")])
+    with pytest.raises(Fail, match="unreadable"):
+        scenes.line_events("ST_Syn_002_01", "1")
