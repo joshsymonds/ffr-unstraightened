@@ -506,6 +506,7 @@ KEEP_REASONS = (
     "oaths-outside-romance",
     "protection",
     "plot",
+    "condemned-in-scene",
     "none",
 )
 
