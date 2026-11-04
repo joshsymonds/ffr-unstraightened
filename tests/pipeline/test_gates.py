@@ -25,7 +25,16 @@ THRESHOLD = 0.5
 
 
 def _judgment(**overrides: bool) -> Judgment:
-    fields = {"meaning": True, "plot": True, "minimal_change": True, "callback": True, "fixed": True, "restores_japanese": True}
+    fields = {
+        "meaning": True,
+        "plot": True,
+        "minimal_change": True,
+        "callback": True,
+        "fixed": True,
+        "restores_japanese": True,
+        "no_invention": True,
+        "point": True,
+    }
     fields.update(overrides)
     return Judgment(**fields)
 
@@ -82,11 +91,26 @@ FAILING: dict[str, tuple[Candidate, float, Judgment | Rejected]] = {
     "minimal_change": (_candidate(TEXT_OK), 1.0, _judgment(minimal_change=False)),
     "callback": (_candidate(TEXT_OK), 1.0, _judgment(callback=False)),
     "fixed": (_candidate(TEXT_OK), 1.0, _judgment(fixed=False)),
+    "no_invention": (_candidate(TEXT_OK), 1.0, _judgment(no_invention=False)),
+    "point": (_candidate(TEXT_OK), 1.0, _judgment(point=False)),
 }
 
 
 def test_gate_names_are_the_chain_order() -> None:
-    assert GATES == ("placeholder", "tags", "length", "classifier", "judge", "meaning", "plot", "minimal_change", "callback", "fixed")
+    assert GATES == (
+        "placeholder",
+        "tags",
+        "length",
+        "classifier",
+        "judge",
+        "meaning",
+        "plot",
+        "minimal_change",
+        "callback",
+        "fixed",
+        "no_invention",
+        "point",
+    )
 
 
 def test_clean_candidate_passes_with_its_judgment() -> None:
@@ -207,8 +231,16 @@ def test_text_failing_two_validators_names_the_earlier(text: str, gate: str) -> 
         (_judgment(plot=False, minimal_change=False), "plot"),
         (_judgment(minimal_change=False, callback=False), "minimal_change"),
         (_judgment(callback=False, fixed=False), "callback"),
+        (_judgment(fixed=False, no_invention=False), "fixed"),
+        (_judgment(no_invention=False, point=False), "no_invention"),
     ],
-    ids=["plot-before-minimal-change", "minimal-change-before-callback", "callback-before-fixed"],
+    ids=[
+        "plot-before-minimal-change",
+        "minimal-change-before-callback",
+        "callback-before-fixed",
+        "fixed-before-no-invention",
+        "no-invention-before-point",
+    ],
 )
 def test_judgment_failing_two_checks_names_the_earlier(judgment: Judgment, gate: str) -> None:
     candidate = _candidate(TEXT_OK)
@@ -216,6 +248,37 @@ def test_judgment_failing_two_checks_names_the_earlier(judgment: Judgment, gate:
     verdict, _, _ = _run(candidate, result=judgment)
 
     assert verdict == Failed(candidate, gate)
+
+
+def test_judgment_from_the_six_original_keys_has_both_new_verdicts_true() -> None:
+    six: dict[str, bool] = {
+        "meaning": True,
+        "plot": True,
+        "minimal_change": True,
+        "callback": True,
+        "fixed": True,
+        "restores_japanese": True,
+    }
+    judgment = Judgment(**six)
+
+    assert judgment.no_invention is True
+    assert judgment.point is True
+
+
+def test_judgment_from_the_six_original_keys_passes_the_gate() -> None:
+    six: dict[str, bool] = {
+        "meaning": True,
+        "plot": True,
+        "minimal_change": True,
+        "callback": True,
+        "fixed": True,
+        "restores_japanese": True,
+    }
+    candidate = _candidate(TEXT_OK)
+
+    verdict, _, _ = _run(candidate, result=Judgment(**six))
+
+    assert verdict == Passed(candidate, Judgment(**six))
 
 
 def test_judge_receives_the_whole_candidate_including_the_japanese_line() -> None:
@@ -431,7 +494,7 @@ def test_stop_ends_the_round_so_an_earlier_pass_is_not_returned() -> None:
 
 
 MECHANICAL_GATES = ("placeholder", "tags", "length", "classifier")
-JUDGE_GATES = ("judge", "meaning", "plot", "minimal_change", "callback", "fixed")
+JUDGE_GATES = ("judge", "meaning", "plot", "minimal_change", "callback", "fixed", "no_invention", "point")
 
 
 def _mechanical_run(candidate: Candidate, score: float = 1.0) -> tuple[Failed | None, FakeClassify]:

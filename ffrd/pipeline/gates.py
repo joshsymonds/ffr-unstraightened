@@ -17,6 +17,8 @@ GATES: tuple[str, ...] = (
     "minimal_change",
     "callback",
     "fixed",
+    "no_invention",
+    "point",
 )
 
 
@@ -35,6 +37,8 @@ class Judgment:
     callback: bool
     fixed: bool
     restores_japanese: bool
+    no_invention: bool = True
+    point: bool = True
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,8 @@ def check(candidate: Candidate, *, classify: Classifier, threshold: float, judge
         ("minimal_change", verdict.minimal_change),
         ("callback", verdict.callback),
         ("fixed", verdict.fixed),
+        ("no_invention", verdict.no_invention),
+        ("point", verdict.point),
     ):
         if not ok:
             return Failed(candidate, gate)
