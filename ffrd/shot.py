@@ -1,8 +1,9 @@
 """shot: screenshot a changed line in game on the gnomon host, before (--vanilla) or after the mod.
 
-`ffrd shot <namespace> <key>` brings the scene that holds the line on screen with the UnstraightenedShot mod: through
-the map that starts the scene on load at a story progress when the scene table names one, else by playing the scene's
-events in order. The mod logs the on-screen line's hash; the game window is focused and captured with niri, and the
+`ffrd shot <namespace> <key>` brings the scene that holds the line on screen with the UnstraightenedShot mod, the way
+the game starts it, trying each route in turn: a map that starts the scene on load at a story progress; the placed NPC
+whose conversation it is (travel beside it, face it, press interact); the placed trigger that starts it (travel into
+it); and last the scene's events played where the party stands. The mod logs the on-screen line's hash; the game window is focused and captured with niri, and the
 PNG is kept in shots/ only when the hash matches the expected text both before and after the capture. `--title`
 captures the title screen with the title tag. Every launch runs inside the save guard: it refuses unless FFR cloud
 saves are off, backs up the save folder, reseeds the dedicated slot from the newest save, and restores every other
@@ -262,13 +263,24 @@ def _expected(namespace: str, key: str, before: bool) -> str:
     return vanilla_hash(overrides[(namespace, key)])
 
 
-def target_files(expected: str, events: list[str], starts: list[tuple[int, int]], title: bool) -> dict[str, bytes]:
+def routes(namespace: str, key: str) -> list[str]:
+    """The ways to bring the line's scene on screen, best first, in the mod's route syntax."""
+    events = scenes.line_events(namespace, key)
+    found = [f"startup {map_id} {progress}" for event in events for map_id, progress in scenes.startups(event)]
+    for event in events:
+        for place in scenes.placements(event):
+            settings = ";".join(f"{n}={v}" for n, v in scenes.progress_settings(place.condition)) or "-"
+            found.append(f"{place.kind} {place.map} {place.x:g} {place.y:g} {place.z:g} {settings}")
+    found.extend(f"event {event}" for event in events)
+    return list(dict.fromkeys(found))
+
+
+def target_files(expected: str, ways: list[str], title: bool) -> dict[str, bytes]:
     files = {"slot.txt": f"{DEDICATED_SLOT}\n".encode()}
     if title:
         files["title.txt"] = f"{expected}\n".encode()
     else:
-        ups = ";".join(f"{map_id}:{progress}" for map_id, progress in starts)
-        files["target.txt"] = f"{expected}\t{','.join(events)}\t{ups}\n".encode()
+        files["target.txt"] = "".join(f"{line}\n" for line in [expected, *ways]).encode()
     return files
 
 
@@ -291,11 +303,10 @@ def cmd_shot(args: argparse.Namespace) -> None:
     if key is None:
         raise Fail("name the key after the namespace")
     expected = _expected(namespace, key, args.vanilla)
-    events = [] if args.title else scenes.line_events(namespace, key)
-    if not args.title and not events:
+    ways = [] if args.title else routes(namespace, key)
+    if not args.title and not ways:
         raise Fail(f"no scene in the scene table plays {namespace},{key}")
-    starts = list(dict.fromkeys(start for event in events for start in scenes.startups(event)))
-    files = target_files(expected, events, starts, args.title)
+    files = target_files(expected, ways, args.title)
     build = [] if args.vanilla else _build_files()
     host = gnomon.host()
     mod = repo_root() / MOD_DIR

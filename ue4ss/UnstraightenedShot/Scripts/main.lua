@@ -1,7 +1,13 @@
 -- Brings one dialogue line on screen for ffrd shot and holds it there while the host captures the window.
--- Inputs in this folder: target.txt holds "<hash>\t<event,event,...>\t<map:progress;map:progress>", or title.txt holds
--- the title tag's hash. Writes only hashes, ids and states to shot.log, never the text: "snap <hash>" when the line is
--- on screen, "held <hash>" after the host writes go, and "done" last.
+-- Inputs in this folder: slot.txt holds the dedicated save slot. title.txt holds the title tag's hash, or target.txt
+-- holds the line's hash on its first line and then one route per line, tried in order until the line is on screen:
+--   startup <map> <progress>            the map plays the scene on load at that story progress
+--   npc <map> <x> <y> <z> <settings>     talk to the NPC placed there
+--   trigger <map> <x> <y> <z> <settings> stand in the trigger placed there
+--   event <id>                           play the event where the party stands
+-- settings are counter=value pairs joined by ";" (or "-") written to the save's story progress before travel.
+-- Writes only hashes, ids and states to shot.log, never the text: "snap <hash>" when the line is on screen, "held
+-- <hash>" after the host writes go, and "done" last.
 
 local K = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -53,16 +59,28 @@ end
 local function valid(o) local ok, v = pcall(function() return o ~= nil and o:IsValid() end); return ok and v end
 
 local SLOT = tonumber(read("slot.txt") or "")
-local TITLE = read("title.txt")
-local TARGET, EVENTS, STARTUPS = nil, {}, {}
-local spec = read("target.txt")
-if spec then
-    local h, evs, ups = spec:match("^(%x+)\t([^\t]*)\t([^\t\n]*)")
-    TARGET = h
-    for e in (evs or ""):gmatch("[^,]+") do EVENTS[#EVENTS + 1] = e end
-    for m, p in (ups or ""):gmatch("(%d+):(%d+)") do STARTUPS[#STARTUPS + 1] = { map = tonumber(m), progress = tonumber(p) } end
+local TITLE = (read("title.txt") or ""):match("%x+")
+local TARGET, ROUTES = nil, {}
+for line in (read("target.txt") or ""):gmatch("[^\n]+") do
+    if not TARGET then
+        TARGET = line:match("^%x+")
+    else
+        local words = {}
+        for w in line:gmatch("%S+") do words[#words + 1] = w end
+        local route = { kind = words[1] }
+        if route.kind == "startup" then
+            route.map, route.x, route.y, route.z = tonumber(words[2]), 0.0, 0.0, 0.0
+            route.settings = { { 0, tonumber(words[3]) } }
+        elseif route.kind == "npc" or route.kind == "trigger" then
+            route.map, route.x, route.y, route.z = tonumber(words[2]), tonumber(words[3]), tonumber(words[4]), tonumber(words[5])
+            route.settings = {}
+            for n, v in (words[6] or ""):gmatch("(%d+)=(%d+)") do route.settings[#route.settings + 1] = { tonumber(n), tonumber(v) } end
+        elseif route.kind == "event" then
+            route.id = words[2]
+        end
+        ROUTES[#ROUTES + 1] = route
+    end
 end
-if TITLE then TITLE = TITLE:match("%x+") end
 
 local TALK = nil
 local function playing() local ok, v = pcall(function() return TALK:IsPlayingEvent() end); return ok and v end
@@ -91,25 +109,34 @@ local function title_hash()
     return "missing"
 end
 
--- Puts the save on a map at a story progress in the dedicated slot and loads it, the way the map's own startup
--- events expect: the map plays the event on load when the progress matches.
-local function travel(up)
+-- Writes the route's story progress and destination into the dedicated slot and loads it, the way the game's own
+-- map start reads a slot. An NPC route arrives beside the NPC; the others arrive at the point itself.
+local function travel(route)
     local sd = FindFirstOf("CPP_MuchaSaveDataManager").m_pGameSaveData
-    sd.Progress.Progress[1] = up.progress
-    sd.Map.mapId = up.map
-    sd.Map.unitLocation.X = 0.0
-    sd.Map.unitLocation.Y = 0.0
-    sd.Map.unitLocation.Z = 0.0
+    for _, nv in ipairs(route.settings) do sd.Progress.Progress[nv[1] + 1] = nv[2] end
+    sd.Map.mapId = route.map
+    sd.Map.unitLocation.X = route.x + (route.kind == "npc" and 120.0 or 0.0)
+    sd.Map.unitLocation.Y = route.y
+    sd.Map.unitLocation.Z = route.z
     StaticFindObject("/Script/mucha.Default__CPP_BFL_SaveData"):SaveGameData(SLOT)
     FindFirstOf("CPP_MapManager"):MapTestStartByChoiceSlotLoadSaveData(SLOT)
 end
 
-local state, since, tick = "boot", 0, 0
-local ui, ei = 0, 0
+-- Faces the NPC and presses interact, as the player would.
+local function interact(route)
+    local player = FindFirstOf("CPP_MapUnit_Player")
+    player:SetDirectionToLocation({ X = route.x, Y = route.y, Z = route.z })
+    player:InputInteract({})
+end
+
+local state, since, tick, ri = "boot", 0, 0, 0
 local last_h, last_change, last_proceed, started
 local function go(s, now) state, since = s, now end
 local function finish() state = "finished" end
+local function route() return ROUTES[ri] end
+local function begin_watch(now) last_h, last_change, last_proceed, started = nil, now, now, false end
 
+-- Advances the dialogue a line a second, logs each new line's hash and stops on the target.
 local function watch_line(now)
     local h, w = talk()
     if h and h ~= last_h then
@@ -125,17 +152,12 @@ LoopAsync(500, function()
     tick = tick + 1
     local now = tick * 0.5
     ExecuteInGameThread(function()
-        local ok, err = pcall(function()
+        local ok = pcall(function()
             if state == "boot" then
                 if now >= 20 and valid(FindFirstOf("WBP_TitleLayout_C")) then go("title", now) end
             elseif state == "title" then
                 if now - since < 8 then return end
-                if TITLE then
-                    local h = title_hash()
-                    log("snap " .. h)
-                    go("hold_title", now)
-                    return
-                end
+                if TITLE then log("snap " .. title_hash()); go("hold_title", now); return end
                 TALK = StaticFindObject("/Script/mucha.Default__CPP_BFL_TalkEvent")
                 for _, vm in ipairs(FindAllOf("VM_Title_C") or {}) do
                     if not vm:GetFullName():find("Default__") and pcall(function() vm:ExecuteEntry(0) end) then break end
@@ -151,45 +173,56 @@ LoopAsync(500, function()
                     go("settle", now)
                 elseif now - since > 120 then log("field timeout"); finish() end
             elseif state == "settle" then
-                if now - since > 30 and valid(FindFirstOf("CPP_MapManager")) and not playing() then
-                    go(#STARTUPS > 0 and "next_startup" or "next_event", now)
-                end
+                if now - since > 30 and valid(FindFirstOf("CPP_MapManager")) and not playing() then go("next_route", now) end
                 if now - since > 150 then log("settle timeout"); finish() end
-            elseif state == "next_startup" then
-                ui = ui + 1
-                if ui > #STARTUPS then log("miss"); finish(); return end
-                local up = STARTUPS[ui]
-                log("travel " .. up.map .. " " .. up.progress .. " " .. tostring(pcall(travel, up)))
-                last_h, started = nil, false
-                go("startup", now)
-            elseif state == "startup" then
-                if not started and (playing() or talk()) then started = true; last_change = now; log("startup " .. STARTUPS[ui].map) end
-                if started then
-                    if watch_line(now) then return end
-                    if (not playing() and last_h ~= nil) or now - last_change > 25 then go("next_startup", now) end
-                elseif now - since > 120 then log("startup never played " .. STARTUPS[ui].map); go("next_startup", now) end
-            elseif state == "next_event" then
-                ei = ei + 1
-                if ei > #EVENTS then log("miss"); finish(); return end
-                local ev = EVENTS[ei]
-                pcall(function() TALK:PlayEvent(FName(ev, EFindName.FNAME_Add), 0) end)
-                last_h, last_change, last_proceed, started = nil, now, now, false
-                go("event", now)
+            elseif state == "next_route" then
+                ri = ri + 1
+                local r = route()
+                if not r then log("miss"); finish(); return end
+                begin_watch(now)
+                if r.kind == "event" then
+                    pcall(function() TALK:PlayEvent(FName(r.id, EFindName.FNAME_Add), 0) end)
+                    log("route event " .. r.id)
+                    go("event", now)
+                else
+                    log("route " .. r.kind .. " " .. r.map .. " " .. tostring(pcall(travel, r)))
+                    go("arrive", now)
+                end
+            elseif state == "arrive" then
+                -- A startup or trigger route starts its scene on its own; an NPC route waits for the map, then talks.
+                local r = route()
+                if r.kind == "npc" then
+                    if now - since > 35 and valid(FindFirstOf("CPP_MapManager")) and not playing() then
+                        log("interact " .. tostring(pcall(interact, r)))
+                        begin_watch(now)
+                        go("scene", now)
+                    elseif now - since > 150 then log("arrive timeout"); go("next_route", now) end
+                elseif playing() or talk() then
+                    log("started")
+                    begin_watch(now)
+                    started = true
+                    go("scene", now)
+                elseif now - since > 120 then log("never started"); go("next_route", now) end
+            elseif state == "scene" then
+                if playing() then started = true end
+                if watch_line(now) then return end
+                if last_h == nil and now - since > 40 then log("no line"); go("next_route", now); return end
+                if last_h ~= nil and now - last_change > 25 then go("next_route", now) end
             elseif state == "event" then
                 if playing() then started = true end
                 if watch_line(now) then return end
-                if not started and now - since > 4 and not talk() then log("noplay " .. EVENTS[ei]); go("gap", now); return end
+                if not started and now - since > 4 and not talk() then go("gap", now); return end
                 if started and not playing() then go("gap", now); return end
                 if now - last_change > 8 then pcall(function() TALK:StopEvent() end); go("gap", now) end
             elseif state == "gap" then
-                if (now - since > 2 and not playing()) or now - since > 15 then go("next_event", now) end
+                if (now - since > 2 and not playing()) or now - since > 15 then go("next_route", now) end
             elseif state == "hold" then
                 if read("go") then log("held " .. tostring(talk() or "none")); finish() end
                 if now - since > 240 then log("hold timeout"); finish() end
             end
         end)
-        if not ok then log("error " .. state); if state == "event" then go("gap", now) end end
+        if not ok then log("error " .. state); if state == "event" or state == "scene" then go("next_route", now) end end
     end)
-    if state == "finished" or tick > 4800 then log("done"); out:close(); return true end
+    if state == "finished" or tick > 7200 then log("done"); out:close(); return true end
     return false
 end)

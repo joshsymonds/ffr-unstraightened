@@ -583,14 +583,21 @@ goes to `shots/<namespace>.<key>.<after|before>.png`, which git ignores.
 
 It runs `ue4ss/UnstraightenedShot` beside the built paks, or without them for
 `--vanilla`. The mod loads the dedicated save slot, then brings the line's scene on screen
-the way the game does. When the scene table names a map that starts the scene on load at a
-story progress, the mod sets that progress and map in the dedicated slot and loads it. It
-tries each such map in turn. Otherwise it plays the scene's events in table order. It
-steps through the dialogue and logs each line's hash. When the target line is on screen it
-holds it. The command focuses the game window with niri, captures it, and lets the mod go
-on. It keeps the PNG only when the mod reports the expected hash both before and after the
-capture. Scenes that start from talking to an NPC in a town are not reached this way, and
-end with `miss`.
+the way the game starts it. It tries each route in turn until the line shows:
+
+- a map that starts the scene on load at a story progress: it writes that progress and map
+  into the dedicated slot and loads it;
+- the placed NPC whose conversation holds the line: it travels beside the NPC, faces it and
+  presses interact;
+- the placed trigger that starts the scene: it travels into the trigger;
+- last, the scene's events played where the party stands.
+
+Before an NPC or trigger route it writes the `==` and `>=` story-progress terms of the
+route's condition into the slot; flag terms are not set, so a route that needs a flag may
+not start. The mod steps through the dialogue and logs each line's hash. When the target
+line is on screen it holds it. The command focuses the game window with niri, captures it,
+and lets the mod go on. It keeps the PNG only when the mod reports the expected hash both
+before and after the capture. A line no route reaches ends with `miss`.
 
 The game launches visibly and silent (`-nosound`), and the command focuses its window
 while it runs, then gives focus back. niri copies a window screenshot to the clipboard, so
@@ -604,8 +611,10 @@ machine, and never deletes a backup. It reseeds the dedicated slot, `GameSaveDat
 from the newest other save. After the run it restores every other save file from the
 backup and verifies each byte for byte, and fails naming any file that does not match.
 
-`ffrd scenes` records what the command needs: the event ids that play each scene, and the
-maps that start an event on load, with their story progress condition.
+`ffrd scenes` records what the command needs: the event ids that play each scene with
+their arguments, each line's talk group (a town event names the group it plays), the maps
+that start an event on load with their story progress condition, each map's level, and
+every placed NPC and trigger that starts an event, with its position and condition.
 
 ### Release
 

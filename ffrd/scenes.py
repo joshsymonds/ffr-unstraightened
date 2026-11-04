@@ -4,7 +4,8 @@
 line of a line table that event data references, with non-empty English text. `ffrd scenes --check` reads the table
 without the game and fails when it is missing, stale or below 95 percent attributed. The table holds keys, speaker ids
 and voice cue positions, never the text. It also records, for the shot command, the event ids that play each scene
-and the maps that start an event on load at a story progress.
+with their arguments, each line's talk group, the maps that start an event on load at a story progress, each map's
+level, and the placed NPCs and triggers that start events, with their positions and conditions.
 """
 
 import argparse
@@ -24,6 +25,7 @@ TABLE_NAME = "scenes.json"
 THRESHOLD = 95
 UNREADABLE = "the scene table is unreadable; run `ffrd scenes`"
 PROGRESS_CONDITION = re.compile(r"\{progress:0\}==(\d+)")
+PROGRESS_TERM = re.compile(r"\{progress:(\d+)\}\s*(==|>=|=>)\s*(\d+)")
 DESCRIPTION = (
     "A story line is a keyed line of a line table that event data references, with non-empty English text. "
     "attributed counts story lines with a speaker; with cue counts story lines matched to exactly one voice cue."
@@ -44,6 +46,16 @@ class SceneLine:
     key: str
     speaker: str | None
     voice: Voice | None
+
+
+@dataclass(frozen=True)
+class Placement:
+    map: int
+    kind: str  # "npc": talk to it; "trigger": stand in it
+    x: float
+    y: float
+    z: float
+    condition: str
 
 
 Cue = tuple[str, int, list[str]]  # (sheet, index, lowercased `_`-separated segments)
@@ -84,13 +96,23 @@ def load() -> list[SceneLine]:
 
 
 def line_events(namespace: str, key: str) -> list[str]:
-    """The event ids that play a scene holding the line, in table order."""
+    """The event ids that play a scene holding the line, in table order.
+
+    A free-talk event names the talk group it plays with an id argument; when an event names the line's group, only
+    those events are returned.
+    """
     table = _table()
+    found: list[str] = []
     try:
         scenes = [row["scene"] for row in table["lines"] if row["namespace"] == namespace and row["key"] == key]
-        return list(dict.fromkeys(event for scene in scenes for event in table["events"][scene]))
-    except (KeyError, TypeError) as e:
+        for scene in scenes:
+            group = table["groups"][scene].get(f"{namespace} {key}", -1)
+            events = table["events"][scene]
+            named = [e["event"] for e in events if group >= 0 and str(group) in (v for k, v in e["args"].items() if k.startswith("id"))]
+            found.extend(named or [e["event"] for e in events])
+    except (KeyError, TypeError, AttributeError) as e:
         raise Fail(UNREADABLE) from e
+    return list(dict.fromkeys(found))
 
 
 def startups(event: str) -> list[tuple[int, int]]:
@@ -101,6 +123,41 @@ def startups(event: str) -> list[tuple[int, int]]:
     except (KeyError, TypeError) as e:
         raise Fail(UNREADABLE) from e
     return [(int(map_id), int(match.group(1))) for map_id, match in found if match]
+
+
+def _map_of(level: str, maps: list[dict[str, Any]]) -> int | None:
+    """The map whose level folder holds the placed actor's level; the deepest folder wins."""
+    best: tuple[int, int] | None = None
+    for row in maps:
+        folder = row["level"].replace("/Game/", "FFRS/Content/", 1).rsplit("/", 1)[0] + "/"
+        if level.startswith(folder) and (best is None or len(folder) > best[0]):
+            best = (len(folder), int(row["map"]))
+    return None if best is None else best[1]
+
+
+def placements(event: str) -> list[Placement]:
+    """The placed NPCs and triggers that start the event, on maps the table knows."""
+    table = _table()
+    found: list[Placement] = []
+    try:
+        for row in table["placements"]:
+            kind = "npc" if "NPC" in row["class"] else "trigger" if "Trigger" in row["class"] else None
+            map_id = _map_of(row["level"], table["maps"])
+            if kind is None or map_id is None:
+                continue
+            found.extend(
+                Placement(map_id, kind, float(row["x"]), float(row["y"]), float(row["z"]), e["condition"])
+                for e in row["events"]
+                if e["event"] == event
+            )
+    except (KeyError, TypeError, ValueError) as e:
+        raise Fail(UNREADABLE) from e
+    return found
+
+
+def progress_settings(condition: str) -> list[tuple[int, int]]:
+    """(counter, value) pairs that meet the condition's `==` and `>=` story-progress terms; other terms are left out."""
+    return [(int(n), int(v)) for n, _op, v in PROGRESS_TERM.findall(condition)]
 
 
 def _line(row: dict[str, Any]) -> SceneLine:
@@ -201,11 +258,26 @@ def _write() -> list[SceneLine]:
     english = {(ns, key) for ns, key, text in entries(vanilla("en")) if text}
     raw = _extract(usmap, oodle)
     lines = _scene_lines(raw, english)
-    events = {
-        scene: list(dict.fromkeys(ref["event"] for ref in raw["references"] if ref["table"] == scene))
-        for scene in dict.fromkeys(line.scene for line in lines)
+    scenes = list(dict.fromkeys(line.scene for line in lines))
+    events: dict[str, list[dict[str, Any]]] = {}
+    for scene in scenes:
+        seen: dict[str, dict[str, Any]] = {}
+        for ref in raw["references"]:
+            if ref["table"] == scene:
+                seen.setdefault(ref["event"], {"event": ref["event"], "args": ref["args"]})
+        events[scene] = list(seen.values())
+    groups = {
+        t["id"]: {f"{line['namespace']} {line['key']}": line["group"] for line in t["lines"]} for t in raw["tables"] if t["id"] in events
     }
-    table = {"build": build, "lines": [asdict(line) for line in lines], "events": events, "startup": raw["startup"]}
+    table = {
+        "build": build,
+        "lines": [asdict(line) for line in lines],
+        "events": events,
+        "groups": groups,
+        "startup": raw["startup"],
+        "maps": raw["maps"],
+        "placements": raw["placements"],
+    }
     table_path().write_text(json.dumps(table, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return lines
 
