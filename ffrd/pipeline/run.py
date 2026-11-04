@@ -1047,8 +1047,8 @@ def _pick_unit(
     bucket: str,
     picked: Mapping[int, Sequence[tuple[SceneLine, Outcome]]],
     ask: Ask,
-) -> dict[tuple[int, str, str], tuple[Outcome, Change | None]]:
-    """One pick of the world, nonbinary or trans side. Its lines across the run's scenes go to one pick draft call, which changes at most one of them. The chosen line gates once, in its earliest scene, and its later occurrences take that outcome with no change of their own. Every other line stays untouched with the pick's bucket, and a failed call leaves each line unfinished with it."""
+) -> tuple[dict[tuple[int, str, str], tuple[Outcome, Change | None]], str | None]:
+    """One pick of the world, nonbinary or trans side. Its lines across the run's scenes go to one pick draft call, which changes at most one of them. The chosen line gates once, in its earliest scene, and its later occurrences take that outcome with no change of their own. Every other line stays untouched with the pick's bucket, and a failed call leaves each line unfinished with it. Also returns the shape the answer gives, which the variety cap reads."""
     # Every scene keeps its place as context, but each ref is named once across the call, since its one answer covers every occurrence.
     named: set[tuple[str, str]] = set()
     groups: list[tuple[Scene, list[SceneLine]]] = []
@@ -1073,13 +1073,36 @@ def _pick_unit(
             outcome, change = _pick_line(ctx, scene, line, marked, answer, ask)
             gated[ref] = (replace(outcome, bucket=marked.bucket), change)
             results[(index, *ref)] = gated[ref]
-    return results
+    return results, answer.shape if isinstance(answer, stages.PickChange) else None
+
+
+# The trans picks with the chosen-name shape that a round keeps a change for. Each further one is refused under gate variety.
+CHOSEN_NAME_PICKS = 2
+
+
+def _variety(
+    results: Mapping[tuple[int, str, str], tuple[Outcome, Change | None]], chosen: Collection[str | None]
+) -> dict[tuple[int, str, str], tuple[Outcome, Change | None]]:
+    """Caps the round's chosen-name trans picks. Among the picks whose changed line passed its gate with the chosen-name shape, the first CHOSEN_NAME_PICKS in the trans seeded order keep their change. Each further pick's changed occurrences become gate failed under gate variety with no change, so the refill draws another pick."""
+    owners = {
+        (outcome.namespace, outcome.key): _unit(outcome)
+        for outcome, _ in results.values()
+        if outcome.outcome == "changed" and outcome.speaker in chosen
+    }
+    capped = set(queering.order(owners.values(), queering.TRANS_SALT)[CHOSEN_NAME_PICKS:])
+    refused = {ref for ref, unit in owners.items() if unit in capped}
+    return {
+        key: (replace(outcome, outcome="gate_failed", gate="variety", writer=None), None)
+        if outcome.outcome == "changed" and (outcome.namespace, outcome.key) in refused
+        else (outcome, change)
+        for key, (outcome, change) in results.items()
+    }
 
 
 def _pick_gated(
     ctx: _Context, scenes: Sequence[tuple[Scene, Ask]], outcomes: Sequence[list[Outcome]], batch: Callable[[], Ask]
 ) -> dict[tuple[int, str, str], tuple[Outcome, Change | None]]:
-    """Gates every line of the round's world, nonbinary and trans picks, one pick draft call per pick across its scenes."""
+    """Gates every line of the round's world, nonbinary and trans picks, one pick draft call per pick across its scenes. The round's chosen-name trans picks then pass the variety cap."""
     picked: dict[tuple[queering.Selection, str | None], dict[int, list[tuple[SceneLine, Outcome]]]] = {}
     for side in PICK_MARKS:
         for index, scene_outcomes in enumerate(outcomes):
@@ -1088,7 +1111,13 @@ def _pick_gated(
                     picked.setdefault((side, line.speaker), {}).setdefault(index, []).append((line, marked))
     units = [(side, by_scene, batch()) for (side, _), by_scene in picked.items()]
     gated = claude.fan_out(lambda unit: _pick_unit(ctx, scenes, unit[0], unit[1], unit[2]), units)
-    return {ref: result for results in gated for ref, result in results.items()}
+    results: dict[tuple[int, str, str], tuple[Outcome, Change | None]] = {}
+    chosen: set[str | None] = set()
+    for (side, speaker), (unit_results, shape) in zip(picked, gated, strict=True):
+        results.update(unit_results)
+        if side == "trans" and shape == stages.CHOSEN_NAME:
+            chosen.add(speaker)
+    return _variety(results, chosen)
 
 
 def _queered(

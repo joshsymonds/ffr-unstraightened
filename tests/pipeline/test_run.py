@@ -505,7 +505,7 @@ def _related_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
 TRANS_KEEP: dict[str, Any] = {"keep": True, "intent": "", "drafts": [], "shape": "none"}
 
 
-def _trans_change(intent: str, drafts: list[str], shape: str = CHOSEN_NAME) -> dict[str, Any]:
+def _trans_change(intent: str, drafts: list[str], shape: str = "acceptance") -> dict[str, Any]:
     return {"keep": False, "intent": intent, "drafts": drafts, "shape": shape}
 
 
@@ -5544,6 +5544,73 @@ def test_trans_pool_that_runs_out_is_marked_exhausted(tmp_path: Path) -> None:
         "achieved": 0,
         "exhausted": True,
     }
+
+
+# Four made-up trans speakers, one line each in its own scene, for the variety cap. Not game text.
+CAP_W = "made-up-speaker-w"
+CAP_REF = {**REFILL_REF, CAP_W: (NS_D, "1")}
+CAP_DRAFTS = {**TRANS_DRAFTS, CAP_W: "Made-up trans rewrite of w. Not game text."}
+CAP_SCENES = (
+    *REFILL_SCENES,
+    Scene("made-up-scene-w", (_line(NS_D, "1", CAP_W, "Made-up line of speaker w. Not game text.", 4),)),
+)
+
+
+def _cap_claude(shapes: Mapping[str, str]) -> FakeClaude:
+    """Four trans speakers, each one's trans answer a change under its shape in shapes. Not game text."""
+    claude = FakeClaude()
+    claude.bible = {chapter: EMPTY_BIBLE for chapter in range(1, 5)}
+    claude.candidate_marks = {ref: [TRANS_CANDIDATE] for ref in CAP_REF.values()}
+    claude.drafts = {ref: [CAP_DRAFTS[speaker]] for speaker, ref in CAP_REF.items()}
+    claude.picks = {ref: _trans_change(TRANS_INTENT, [CAP_DRAFTS[speaker]], shapes[speaker]) for speaker, ref in CAP_REF.items()}
+    return claude
+
+
+def _cap_run(tmp_path: Path, claude: FakeClaude, lens: Lens) -> list[Outcome]:
+    return _run(tmp_path, claude, [], jev=None, renderer=FakeRenderer({}), scenes=CAP_SCENES, lens=lens)
+
+
+def test_variety_cap_fails_the_third_chosen_name_trans_pick_and_the_refill_draws_the_fourth(tmp_path: Path) -> None:
+    first, second, third, fourth = queering.order(list(CAP_REF), queering.TRANS_SALT)
+    claude = _cap_claude({first: CHOSEN_NAME, second: CHOSEN_NAME, third: CHOSEN_NAME, fourth: "acceptance"})
+    outcomes = _cap_run(tmp_path, claude, replace(QUEER_LENS, romance_share=0, trans_share=75))
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker[first].outcome, by_speaker[first].bucket) == ("changed", "trans")
+    assert (by_speaker[second].outcome, by_speaker[second].bucket) == ("changed", "trans")
+    assert (by_speaker[third].outcome, by_speaker[third].gate, by_speaker[third].bucket) == ("gate_failed", "variety", "trans")
+    assert (by_speaker[fourth].outcome, by_speaker[fourth].bucket) == ("changed", "trans")
+    assert CAP_REF[third] not in _dialog_entries(tmp_path)
+    assert _side(tmp_path, "trans") == {
+        "share": 75,
+        "pool": 4,
+        "denominator": 4,
+        "target": 3,
+        "rounds": [{"tried": 3, "passed": 2}, {"tried": 1, "passed": 1}],
+        "achieved": 3,
+        "exhausted": False,
+    }
+
+
+def test_two_chosen_name_trans_picks_with_others_of_other_shapes_are_all_kept(tmp_path: Path) -> None:
+    first, second, third, fourth = queering.order(list(CAP_REF), queering.TRANS_SALT)
+    claude = _cap_claude({first: CHOSEN_NAME, second: "acceptance", third: "backing", fourth: CHOSEN_NAME})
+    outcomes = _cap_run(tmp_path, claude, replace(QUEER_LENS, romance_share=0, trans_share=100))
+    assert [(outcome.outcome, outcome.bucket) for outcome in outcomes] == [("changed", "trans")] * 4
+    assert _side(tmp_path, "trans")["rounds"] == [{"tried": 4, "passed": 4}]
+
+
+def test_variety_cap_rerun_makes_no_calls_and_writes_identical_files(tmp_path: Path) -> None:
+    first, second, third, fourth = queering.order(list(CAP_REF), queering.TRANS_SALT)
+    claude = _cap_claude({first: CHOSEN_NAME, second: CHOSEN_NAME, third: CHOSEN_NAME, fourth: "acceptance"})
+    lens = replace(QUEER_LENS, romance_share=0, trans_share=75)
+    _cap_run(tmp_path, claude, lens)
+    before = _snapshot(tmp_path)
+    calls = len(claude.calls)
+
+    _cap_run(tmp_path, claude, lens)
+
+    assert len(claude.calls) == calls
+    assert _snapshot(tmp_path) == before
 
 
 def test_trans_share_100_at_romance_share_0_picks_every_eligible_character(tmp_path: Path) -> None:
