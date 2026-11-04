@@ -41,6 +41,7 @@ from ffrd.pipeline.run import (
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.stages import (
     CANDIDATE_SCHEMA,
+    CHOSEN_NAME,
     CROSS_SCHEMA,
     DRAFT_SCHEMA,
     INSERTABLE,
@@ -50,6 +51,7 @@ from ffrd.pipeline.stages import (
     RESCREEN_SCHEMA,
     SCREEN_SCHEMA,
     TRANS_CANDIDATE,
+    TRANS_PICK_DRAFT_SCHEMA,
     Ask,
     Bindings,
     Scene,
@@ -500,11 +502,16 @@ def _related_refs(parts: Sequence[str]) -> list[tuple[str, str]]:
 
 
 # A trans answer that keeps its line unchanged, and the change entry a trans answer gives. Not game text.
-TRANS_KEEP: dict[str, Any] = {"keep": True, "intent": "", "drafts": []}
+TRANS_KEEP: dict[str, Any] = {"keep": True, "intent": "", "drafts": [], "shape": "none"}
 
 
-def _trans_change(intent: str, drafts: list[str]) -> dict[str, Any]:
-    return {"keep": False, "intent": intent, "drafts": drafts}
+def _trans_change(intent: str, drafts: list[str], shape: str = CHOSEN_NAME) -> dict[str, Any]:
+    return {"keep": False, "intent": intent, "drafts": drafts, "shape": shape}
+
+
+def _schema_answer(answer: dict[str, Any], shaped: bool) -> dict[str, Any]:
+    """A pick answer in the schema its call asked with: only a trans pick answers a shape. Not game text."""
+    return answer if shaped else {name: value for name, value in answer.items() if name != "shape"}
 
 
 class FakeClaude:
@@ -603,7 +610,9 @@ class FakeClaude:
         if schema is CANDIDATE_SCHEMA:
             return self._candidate(parts)
         if schema is PICK_DRAFT_SCHEMA:
-            return self._pick(parts)
+            return self._pick(parts, shaped=False)
+        if schema is TRANS_PICK_DRAFT_SCHEMA:
+            return self._pick(parts, shaped=True)
         if schema is JUDGE_SCHEMA:
             candidate = _part(parts, "Candidate:\n")
             if candidate in self.judge_failures:
@@ -657,15 +666,15 @@ class FakeClaude:
         marked = [{"namespace": ref[0], "key": ref[1], "marks": self.candidate_marks[ref]} for ref in listed if ref in self.candidate_marks]
         return {"marked": marked}
 
-    def _pick(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
+    def _pick(self, parts: Sequence[str], shaped: bool) -> dict[str, Any] | Unfinished | Rejected:
         # The pick changes the first of its lines with a change answer, and a failed answer for any of its lines fails the pick. Not game text.
         for namespace, key in _trans_refs(parts):
             answer = self.picks.get((namespace, key), TRANS_KEEP)
             if isinstance(answer, Unfinished | Rejected):
                 return answer
             if not answer["keep"]:
-                return {"namespace": namespace, "key": key, **answer}
-        return {"namespace": "", "key": "", **TRANS_KEEP}
+                return {"namespace": namespace, "key": key, **_schema_answer(answer, shaped)}
+        return {"namespace": "", "key": "", **_schema_answer(TRANS_KEEP, shaped)}
 
     def _rescreen(self, parts: Sequence[str]) -> dict[str, Any] | Unfinished | Rejected:
         question = json.loads(_part(parts, "Triage question:\n"))["id"]
@@ -5164,7 +5173,7 @@ def _trans_refill_claude() -> FakeClaude:
 
 
 def _trans_calls(claude: FakeClaude) -> list[list[str]]:
-    return [parts for _, parts, schema in claude.calls if schema is PICK_DRAFT_SCHEMA]
+    return [parts for _, parts, schema in claude.calls if schema is TRANS_PICK_DRAFT_SCHEMA]
 
 
 def test_trans_pick_follows_the_trans_seeded_order_and_gates_with_the_answers_intent_and_drafts(tmp_path: Path) -> None:
@@ -5864,7 +5873,11 @@ def _insertable_claude() -> FakeClaude:
 
 
 def _pick_calls(claude: FakeClaude, bucket: str) -> list[list[str]]:
-    return [parts for _, parts, schema in claude.calls if schema is PICK_DRAFT_SCHEMA and _part(parts, "Bucket:\n") == bucket]
+    return [
+        parts
+        for _, parts, schema in claude.calls
+        if (schema is PICK_DRAFT_SCHEMA or schema is TRANS_PICK_DRAFT_SCHEMA) and _part(parts, "Bucket:\n") == bucket
+    ]
 
 
 def _pick_refs(claude: FakeClaude, bucket: str) -> list[tuple[str, str]]:

@@ -19,6 +19,7 @@ from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
     CANDIDATE_INSTRUCTIONS,
     CANDIDATE_SCHEMA,
+    CHOSEN_NAME,
     CROSS_SCHEMA,
     DRAFT_INSTRUCTIONS,
     DRAFT_SCHEMA,
@@ -33,6 +34,9 @@ from ffrd.pipeline.stages import (
     SCREEN_SCHEMA,
     SPEAKER_DRAFT_INSTRUCTIONS,
     TRANS_CANDIDATE,
+    TRANS_PICK_DRAFT_SCHEMA,
+    TRANS_SHAPE_INSTRUCTIONS,
+    TRANS_SHAPES,
     Batch,
     Intent,
     PickChange,
@@ -1683,19 +1687,23 @@ def test_changed_arc_context_or_cast_asks_again(
 
 
 PICK_GROUPS = [(SCENE, [LINE_ONE]), (SCENE_TWO, [LINE_THREE])]
-PICK_KEEP = {"keep": True, "namespace": "", "key": "", "intent": "", "drafts": []}
+PICK_KEEP = {"keep": True, "namespace": "", "key": "", "intent": "", "drafts": [], "shape": "none"}
 PICK_CHANGE = {
     "keep": False,
     "namespace": LINE_THREE.namespace,
     "key": LINE_THREE.key,
     "intent": "Made-up trans detail intent. Not game text.",
     "drafts": ["Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."],
+    "shape": CHOSEN_NAME,
 }
+# A world or nonbinary answer carries no shape. Not game text.
+PICK_WORLD_CHANGE = {name: value for name, value in PICK_CHANGE.items() if name != "shape"}
 PICK_RESULT = PickChange(
     namespace=LINE_THREE.namespace,
     key=LINE_THREE.key,
     intent="Made-up trans detail intent. Not game text.",
     drafts=("Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."),
+    shape=CHOSEN_NAME,
 )
 # A made-up scene of nine lines, for the window around each line of a pick. Not game text.
 WIDE_LINES = tuple(
@@ -1720,6 +1728,32 @@ def test_pick_draft_schema_asks_for_one_entry_with_keep_namespace_key_intent_and
     assert PICK_DRAFT_SCHEMA["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}}
 
 
+def test_trans_pick_draft_schema_adds_a_required_shape_of_the_four_shapes_or_none() -> None:
+    assert TRANS_SHAPES == ("acceptance", "backing", "chosen-name", "present-life")
+    assert CHOSEN_NAME == "chosen-name"
+    assert TRANS_PICK_DRAFT_SCHEMA["type"] == "object"
+    assert TRANS_PICK_DRAFT_SCHEMA["required"] == ["keep", "namespace", "key", "intent", "drafts", "shape"]
+    assert TRANS_PICK_DRAFT_SCHEMA["additionalProperties"] is False
+    assert TRANS_PICK_DRAFT_SCHEMA["properties"]["shape"] == {
+        "type": "string",
+        "enum": ["acceptance", "backing", "chosen-name", "present-life", "none"],
+    }
+    trans_properties = {name: value for name, value in TRANS_PICK_DRAFT_SCHEMA["properties"].items() if name != "shape"}
+    assert trans_properties == PICK_DRAFT_SCHEMA["properties"]
+
+
+def test_world_and_nonbinary_pick_draft_schema_has_no_shape() -> None:
+    assert "shape" not in PICK_DRAFT_SCHEMA["properties"]
+    assert "shape" not in PICK_DRAFT_SCHEMA["required"]
+
+
+def test_trans_shape_instructions_name_the_four_shape_ids_and_none() -> None:
+    assert TRANS_SHAPE_INSTRUCTIONS == (
+        "The bucket's label names four shapes by id: acceptance, backing, chosen-name and present-life. "
+        "Set shape to the id of the shape the change uses, and to none when no line changes."
+    )
+
+
 def test_pick_draft_instructions_keep_the_placeholder_tag_and_length_rules_without_partner_wording() -> None:
     assert "Keep every {...} placeholder" in PICK_DRAFT_INSTRUCTIONS
     assert "every <text ...>...</> tag" in PICK_DRAFT_INSTRUCTIONS
@@ -1736,7 +1770,7 @@ def test_pick_draft_instructions_name_no_single_bucket_and_point_at_the_bucket_l
     assert "she's trans" not in PICK_DRAFT_INSTRUCTIONS
 
 
-def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(tmp_path: Path) -> None:
+def test_pick_draft_sends_one_opus_call_with_the_trans_schema_and_returns_the_chosen_line_and_shape(tmp_path: Path) -> None:
     ask = Fake(PICK_CHANGE)
 
     result = pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
@@ -1745,9 +1779,24 @@ def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(
     assert len(ask.calls) == 1
     model, parts, schema = ask.calls[0]
     assert model == claude.OPUS
-    assert schema == PICK_DRAFT_SCHEMA
+    assert schema == TRANS_PICK_DRAFT_SCHEMA
     assert PICK_DRAFT_INSTRUCTIONS in parts
+    assert TRANS_SHAPE_INSTRUCTIONS in parts
     assert "Made-up intent rule. Not game text." in "\n".join(parts)
+
+
+@pytest.mark.parametrize("bucket", ["world", "nonbinary"])
+def test_world_and_nonbinary_pick_draft_sends_the_pick_schema_with_no_shape_part_and_returns_no_shape(tmp_path: Path, bucket: str) -> None:
+    ask = Fake(PICK_WORLD_CHANGE)
+
+    result = pick_draft(Store(tmp_path), LENS, bucket, PICK_GROUPS, ask)
+
+    assert result == replace(PICK_RESULT, shape=None)
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == PICK_DRAFT_SCHEMA
+    assert parts[0] == PICK_DRAFT_INSTRUCTIONS
+    assert TRANS_SHAPE_INSTRUCTIONS not in parts
 
 
 def test_pick_draft_no_change_returns_none_and_a_second_call_reuses_it(tmp_path: Path) -> None:
@@ -1782,6 +1831,8 @@ def test_pick_draft_shows_each_line_with_the_three_scene_lines_either_side_and_n
         pytest.param({**PICK_CHANGE, "intent": ""}, id="change-without-intent"),
         pytest.param({**PICK_CHANGE, "drafts": []}, id="change-without-drafts"),
         pytest.param({**PICK_KEEP, "drafts": ["Made-up draft kept with no change. Not game text."]}, id="no-change-with-drafts"),
+        pytest.param({**PICK_CHANGE, "shape": "none"}, id="change-with-no-shape"),
+        pytest.param({**PICK_KEEP, "shape": "backing"}, id="keep-with-a-shape"),
     ],
 )
 def test_pick_draft_answers_that_break_the_pick_rules_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
@@ -1829,12 +1880,28 @@ def test_pick_draft_is_stored_under_its_pick_draft_key_with_its_bucket_and_a_fre
                 "targets": [{"namespace": LINE_THREE.namespace, "key": LINE_THREE.key}],
             },
         ],
+        "shapes": list(TRANS_SHAPES),
     }
 
     assert record.stem == store_key("pick_draft", inputs, LENS.stage_text("intent"))
     assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "pick_draft"
     assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, Fake()) == PICK_RESULT
     assert len(ask.calls) == 1
+
+
+# Pinned to the store keys the unchanged world and nonbinary pick drafts had at the base revision d5bc8c1. Not game text.
+@pytest.mark.parametrize(
+    ("bucket", "digest"),
+    [
+        ("world", "47792a2aa000e6e110248fe1b57ec58d9dca836df1aea32e808fdc7af9692f6b"),
+        ("nonbinary", "551867dbb716553a288eeb4d95caf37ca3fff490c54bb8abc39ff3d1dab4233e"),
+    ],
+)
+def test_world_and_nonbinary_pick_drafts_keep_their_base_store_key(tmp_path: Path, bucket: str, digest: str) -> None:
+    pick_draft(Store(tmp_path), LENS, bucket, PICK_GROUPS, Fake(PICK_WORLD_CHANGE))
+
+    [record] = (tmp_path / "results").glob("*.json")
+    assert record.stem == digest
 
 
 CANDIDATE_REFS = [(LINE_ONE.namespace, LINE_ONE.key), (LINE_TWO.namespace, LINE_TWO.key), (LINE_THREE.namespace, LINE_THREE.key)]

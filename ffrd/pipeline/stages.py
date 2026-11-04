@@ -657,6 +657,18 @@ PICK_DRAFT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+TRANS_SHAPES = ("acceptance", "backing", "chosen-name", "present-life")
+CHOSEN_NAME = "chosen-name"
+TRANS_SHAPE_INSTRUCTIONS = (
+    "The bucket's label names four shapes by id: acceptance, backing, chosen-name and present-life. "
+    "Set shape to the id of the shape the change uses, and to none when no line changes."
+)
+TRANS_PICK_DRAFT_SCHEMA: dict[str, Any] = {
+    **PICK_DRAFT_SCHEMA,
+    "properties": {**PICK_DRAFT_SCHEMA["properties"], "shape": {"type": "string", "enum": [*TRANS_SHAPES, "none"]}},
+    "required": [*PICK_DRAFT_SCHEMA["required"], "shape"],
+}
+
 
 def _target_dict(target: Target) -> dict[str, Any]:
     return {
@@ -756,6 +768,7 @@ class PickChange:
     key: str
     intent: str
     drafts: tuple[str, ...]
+    shape: str | None = None
 
 
 def _pick_window(scene: Scene, line: SceneLine) -> list[SceneLine]:
@@ -772,9 +785,12 @@ def pick_draft(
     groups: Sequence[tuple[Scene, Sequence[SceneLine]]],
     ask: Ask,
 ) -> PickChange | Unfinished | Rejected | None:
+    trans = bucket == "trans"
+    schema = TRANS_PICK_DRAFT_SCHEMA if trans else PICK_DRAFT_SCHEMA
     expected = {(line.namespace, line.key) for _scene, lines in groups for line in lines}
     parts = [
         PICK_DRAFT_INSTRUCTIONS,
+        *([TRANS_SHAPE_INSTRUCTIONS] if trans else []),
         f"Intent rule:\n{lens.stage_text('intent')}",
         f"Bucket:\n{bucket}",
         "Lines:\n"
@@ -788,30 +804,50 @@ def pick_draft(
     ]
 
     def call() -> dict[str, Any] | None:
-        answer = ask(claude.OPUS, parts, PICK_DRAFT_SCHEMA)
+        answer = ask(claude.OPUS, parts, schema)
         if isinstance(answer, Unfinished | Rejected):
             raise _Unanswered(answer)
         if answer["keep"]:
             if answer["drafts"]:
                 raise _Unanswered(Rejected("pick entry keeps the pick but gives drafts for it"))
+            if trans and answer["shape"] != "none":
+                raise _Unanswered(Rejected("pick entry keeps the pick but gives a shape for it"))
             return None
         if (answer["namespace"], answer["key"]) not in expected:
             raise _Unanswered(Rejected("pick entry changes a line outside the pick"))
         if not (answer["intent"] and answer["drafts"]):
             raise _Unanswered(Rejected("pick entry changes a line without an intent or drafts"))
-        return {"namespace": answer["namespace"], "key": answer["key"], "intent": answer["intent"], "drafts": answer["drafts"]}
+        if trans and answer["shape"] == "none":
+            raise _Unanswered(Rejected("pick entry changes a line with no shape"))
+        change: dict[str, Any] = {
+            "namespace": answer["namespace"],
+            "key": answer["key"],
+            "intent": answer["intent"],
+            "drafts": answer["drafts"],
+        }
+        if trans:
+            change["shape"] = answer["shape"]
+        return change
 
     inputs = {
         "bucket": bucket,
         "scenes": [{**_inputs(scene), "targets": [_line_ref(line) for line in lines]} for scene, lines in groups],
     }
+    if trans:
+        inputs["shapes"] = list(TRANS_SHAPES)
     try:
         change = store.run("pick_draft", inputs, lens.stage_text("intent"), call).value
     except _Unanswered as unanswered:
         return unanswered.failure
     if change is None:
         return None
-    return PickChange(namespace=change["namespace"], key=change["key"], intent=change["intent"], drafts=tuple(change["drafts"]))
+    return PickChange(
+        namespace=change["namespace"],
+        key=change["key"],
+        intent=change["intent"],
+        drafts=tuple(change["drafts"]),
+        shape=change.get("shape"),
+    )
 
 
 def render(store: Store, renderer: Renderer, speaker: str | None, text: str) -> str:
