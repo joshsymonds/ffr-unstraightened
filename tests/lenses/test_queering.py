@@ -50,7 +50,7 @@ INTENT: frozenset[str] = frozenset(
         "protect-plot",
     }
 )
-JUDGE: frozenset[str] = INTENT | {"meaning"}
+JUDGE: frozenset[str] = INTENT | {"meaning", "fixed", "no-invention", "keep-point"}
 BOUND_STAGES: tuple[Stage, ...] = ("screen", "intent", "judge")
 # The label table: which bracketed labels each stage's text must carry.
 BINDING: dict[Stage, frozenset[str]] = {"screen": SCREEN, "intent": INTENT, "judge": JUDGE}
@@ -107,6 +107,10 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
     ("intent", "trans-bucket", "someone who backs the speaker"),
     ("intent", "trans-bucket", "a name the speaker chose and likes"),
     ("intent", "trans-bucket", "ordinary present life with the speaker's gender a given"),
+    ("intent", "trans-bucket", "acceptance (a family member's acceptance, possibly in progress)"),
+    ("intent", "trans-bucket", "backing (someone who backs the speaker)"),
+    ("intent", "trans-bucket", "chosen-name (a name the speaker chose and likes)"),
+    ("intent", "trans-bucket", "present-life (ordinary present life with the speaker's gender a given)"),
     ("intent", "trans-bucket", "The detail must be recognizable as trans and must answer the line's own topic."),
     ("intent", "trans-bucket", "Where the line does not allow it, keep it unchanged as no-hit."),
     ("intent", "trans-bucket", "The detail is never forced."),
@@ -180,6 +184,11 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
     ("judge", "trans-bucket", 'Reject a "she\'s trans" aside.'),
     ("judge", "trans-bucket", "Reject a rewrite that forces a trans detail the line does not naturally allow."),
     ("judge", "trans-bucket", "is the bucket's edit only when it is one of the four shapes"),
+    (
+        "judge",
+        "trans-bucket",
+        "The four shapes are acceptance (a family member's acceptance, possibly in progress), backing (someone who backs the speaker), chosen-name (a name the speaker chose and likes) and present-life (ordinary present life with the speaker's gender a given).",
+    ),
     ("judge", "trans-bucket", "Reject a rewrite whose trans detail is too vague to read as trans."),
     ("judge", "trans-bucket", "Reject a rewrite that states an old name."),
     ("judge", "trans-bucket", "Reject a rewrite that volunteers transition history to a stranger."),
@@ -199,6 +208,27 @@ PINNED_PHRASES: tuple[tuple[Stage, str, str], ...] = (
     ("judge", "protect-plot", "Reject a rewrite that changes a plot fact, or that changes the scene's meaning to fit a label."),
     ("judge", "protect-plot", "A pick's partner or crush gender is not a plot fact by itself"),
     ("judge", "protect-plot", "unless that partner appears or is named as a character elsewhere in the given context."),
+    ("judge", "fixed", "fixed means the bucket's edit is present and legible."),
+    ("judge", "fixed", "For a queer pick, the partner or crush is now same-sex."),
+    ("judge", "fixed", "For a redirect, the flirt now aims at a man present in the scene, or its address is generalized."),
+    ("judge", "fixed", "A redirect whose flirt still aims only at a woman is not fixed."),
+    ("judge", "fixed", "For a world pick, a same-sex partner mention is present."),
+    ("judge", "fixed", "For a nonbinary pick, a specific partner is referred to with they/them at least once."),
+    ("judge", "fixed", '"my partner" with no they/them leaves the gender unspecified and is not fixed.'),
+    ("judge", "fixed", "For a trans pick, the line carries one of the four shapes."),
+    ("judge", "fixed", "A rewording that adds or changes no gender content is not fixed."),
+    ("judge", "fixed", "Reject a rewrite that leaves its bucket's edit absent or not legible."),
+    ("judge", "no-invention", "Reject a rewrite that adds a name, person or fact that neither the line nor its context holds"),
+    ("judge", "no-invention", "beyond the bucket's own edit, or that swaps a name for another."),
+    ("judge", "no-invention", "A partner mention names no one new."),
+    ("judge", "no-invention", "The chosen-name shape may give only the speaker's own chosen name."),
+    (
+        "judge",
+        "keep-point",
+        "Reject a rewrite that loses the line's point (its joke, its purpose in the scene, or what it shows of the speaker).",
+    ),
+    ("judge", "keep-point", "The bucket's edit rides on the point and never replaces it."),
+    ("judge", "keep-point", "A gag rewritten into a line about something else has lost its point."),
 )
 
 # Judge rules that each carry a "Reject a rewrite that ..." sentence for their rule.
@@ -215,6 +245,9 @@ REJECT_RULES: tuple[str, ...] = (
     "protect-minor-target",
     "protect-core-cast",
     "protect-plot",
+    "fixed",
+    "no-invention",
+    "keep-point",
 )
 
 # Wording that the brief retires from the lens and the doc: the plot rule's screen clause.
@@ -229,6 +262,17 @@ NONBINARY_DOC_PHRASES: tuple[tuple[str, str], ...] = (
     ("## Judge rubric", "rejects a rewrite whose they/them reads as merely unspecified gender"),
     ("## Judge rubric", "the word nonbinary or any modern label"),
 )
+
+# The trans shapes by id and the selection's chosen-name cap, in the Buckets section of the doc.
+DOC_SHAPE_AND_CAP_PHRASES: tuple[str, ...] = (
+    "acceptance (a family member's acceptance, possibly in progress)",
+    "backing (someone who backs the speaker)",
+    "chosen-name (a name the speaker chose and likes)",
+    "present-life (ordinary present life with the speaker's gender a given)",
+    "At most two accepted trans picks use the chosen-name shape, and a further one is refilled from the order.",
+)
+# The judge labels that the doc lists as bullets in its Judge rubric section.
+DOC_NEW_JUDGE_LABELS: tuple[str, ...] = ("fixed", "no-invention", "keep-point")
 
 DOC_SECTIONS: tuple[str, ...] = (
     "## Aims",
@@ -432,6 +476,18 @@ def test_doc_carries_its_pinned_sentence(sentence: str) -> None:
 def test_doc_buckets_describe_the_shares_and_the_refill(phrase: str) -> None:
     section = doc_text().split("\n## Buckets\n", 1)[1].split("\n## ", 1)[0]
     assert phrase in " ".join(section.split())
+
+
+@pytest.mark.parametrize("phrase", DOC_SHAPE_AND_CAP_PHRASES)
+def test_doc_buckets_name_the_trans_shapes_and_the_chosen_name_cap(phrase: str) -> None:
+    section = doc_text().split("\n## Buckets\n", 1)[1].split("\n## ", 1)[0]
+    assert phrase in " ".join(section.split())
+
+
+@pytest.mark.parametrize("label", DOC_NEW_JUDGE_LABELS)
+def test_doc_judge_rubric_lists_the_new_labels(label: str) -> None:
+    section = doc_text().split("\n## Judge rubric\n", 1)[1].split("\n## ", 1)[0]
+    assert f"- `{label}`:" in section
 
 
 def test_doc_how_it_is_checked_says_what_the_checks_are() -> None:

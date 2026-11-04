@@ -184,11 +184,14 @@ version is its draft unchanged. Both versions go through the gates in this order
 placeholders, tags, length (within 120% of vanilla, with the same line breaks), the
 classifier, and the scene judge. The classifier fails a candidate that scores below 0.5,
 the bar the voice evaluation uses. The scene judge checks meaning, plot, minimal change,
-callback and fixed. A line with callbacks also goes to the cross-scene judge, which runs
-only after the scene judge passes. If no candidate passes, the line gets one more draft,
-told which gate failed. If that also fails, the line stays vanilla. It counts as kept
-for plot when the plot gate failed, and as gate failed otherwise. Among the passing
-candidates, the one that restores the Japanese meaning ranks first, then the one with
+callback and fixed. A line without a bucket is judged on these five alone. A queering line
+is judged with its bucket and must also pass `no_invention` and `point`, as
+`lenses/README.md` describes. A line with callbacks also goes to
+the cross-scene judge, which runs only after the scene judge passes. If no candidate
+passes, the line gets one more draft, told which gate failed. If that also fails, the
+line stays vanilla. It counts as kept for plot when the plot gate failed, and as gate
+failed otherwise. Among the passing candidates, the one that restores the Japanese meaning
+ranks first, then the one with
 the smallest edit distance from the English line. A scene with two or more changed lines
 then goes through the coherence check. It reads the scene with its rewrites applied,
 against the arcs and the judge rubric.
@@ -333,7 +336,8 @@ denominator, rounded half up:
 Each refill round draws romance, world, nonbinary and then trans, and each side skips any unit
 another side has drawn. A side refills until its target is met or its pool runs out. A share of
 0 draws nothing. A side that ends short of its target is exhausted, and a pick counts only when
-a changed line survives every judge.
+a changed line survives every judge. At most two accepted trans picks use chosen-name. A
+further one is gate failed with gate `variety` and refilled.
 
 Each queer pick's selected lines are drafted in one call per speaker across all scenes, and a
 speakerless pick's lines in one call per scene. Each world, nonbinary or trans pick is drafted
@@ -342,7 +346,9 @@ nonbinary, and its `trans-candidate`-marked lines for trans. Each candidate line
 the three scene lines before and after it. The call returns either no change or exactly one
 candidate line changed, with its intent and its drafts. A world pick gets a short same-sex
 partner mention, a nonbinary pick a short mention of a partner consistently called they/them,
-and a trans pick at most one light trans detail. The chosen line goes through the line gate,
+and a trans pick at most one light trans detail. A trans pick's draft declares one of four
+shapes: `acceptance`, `backing`, `chosen-name` or `present-life`. The chosen line goes
+through the line gate,
 and the pick's other lines are left as written. The drafts then go through the existing gates,
 the judges, the coherence check, the arc judge, the voice classifier and the redo list, as
 described above.

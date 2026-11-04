@@ -17,14 +17,19 @@ from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Judgment
 from ffrd.pipeline.lens import Lens, TriageQuestion
 from ffrd.pipeline.stages import (
+    BUCKET_JUDGE_INSTRUCTIONS,
+    BUCKET_JUDGE_SCHEMA,
+    BUCKET_JUDGE_VERDICTS,
     CANDIDATE_INSTRUCTIONS,
     CANDIDATE_SCHEMA,
+    CHOSEN_NAME,
     CROSS_SCHEMA,
     DRAFT_INSTRUCTIONS,
     DRAFT_SCHEMA,
     INSERTABLE,
     INTENT_INSTRUCTIONS,
     INTENT_SCHEMA,
+    JUDGE_INSTRUCTIONS,
     JUDGE_SCHEMA,
     PICK_DRAFT_INSTRUCTIONS,
     PICK_DRAFT_SCHEMA,
@@ -33,6 +38,9 @@ from ffrd.pipeline.stages import (
     SCREEN_SCHEMA,
     SPEAKER_DRAFT_INSTRUCTIONS,
     TRANS_CANDIDATE,
+    TRANS_PICK_DRAFT_SCHEMA,
+    TRANS_SHAPE_INSTRUCTIONS,
+    TRANS_SHAPES,
     Batch,
     Intent,
     PickChange,
@@ -825,6 +833,24 @@ def test_editing_intent_rule_reruns_intent(tmp_path: Path) -> None:
     assert len(ask.calls) == 2
 
 
+def test_draft_target_with_a_bucket_stores_under_the_same_key_as_without(tmp_path: Path) -> None:
+    draft(Store(tmp_path / "plain"), LENS, SCENE, [TARGET_ONE], None, Fake(DRAFT_ANSWER))
+    draft(Store(tmp_path / "bucketed"), LENS, SCENE, [replace(TARGET_ONE, bucket=BUCKET)], None, Fake(DRAFT_ANSWER))
+    [plain] = (tmp_path / "plain" / "results").glob("*.json")
+    [bucketed] = (tmp_path / "bucketed" / "results").glob("*.json")
+
+    assert bucketed.stem == plain.stem
+
+
+def test_speaker_draft_target_with_a_bucket_stores_under_the_same_key_as_without(tmp_path: Path) -> None:
+    draft_speaker(Store(tmp_path / "plain"), LENS, [(SCENE, [TARGET_ONE])], Fake(DRAFT_ANSWER))
+    draft_speaker(Store(tmp_path / "bucketed"), LENS, [(SCENE, [replace(TARGET_ONE, bucket=BUCKET)])], Fake(DRAFT_ANSWER))
+    [plain] = (tmp_path / "plain" / "results").glob("*.json")
+    [bucketed] = (tmp_path / "bucketed" / "results").glob("*.json")
+
+    assert bucketed.stem == plain.stem
+
+
 def test_draft_schema_requires_drafts_per_target_and_forbids_extra_properties() -> None:
     entry = DRAFT_SCHEMA["properties"]["drafts"]["items"]
     assert DRAFT_SCHEMA["type"] == "object"
@@ -1305,6 +1331,195 @@ def test_editing_judge_rubric_reruns_judge(tmp_path: Path) -> None:
     assert len(ask.calls) == 2
 
 
+JUDGE_INSTRUCTIONS_PINNED = (
+    "Judge a candidate rewrite of the target line. Return JSON with six booleans. meaning: the candidate keeps "
+    "everything the judge rubric protects: the plot facts, who loves whom, the character traits and the beat. plot: "
+    "the plot is unchanged. minimal_change: the candidate changes no more than it must; moving toward the Japanese "
+    "line counts as minimal change. callback: every callback still holds. fixed: the candidate answers no to every "
+    "line reason question. restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese "
+    "line is the meaning reference. The judge rubric overrides the Japanese line wherever they conflict. Refer to "
+    "lines only by namespace and key."
+)
+BUCKET_JUDGE_INSTRUCTIONS_PINNED = (
+    "Judge a candidate rewrite of the target line, drafted under the bucket named below. Return JSON with eight booleans. "
+    "meaning: the candidate keeps everything the judge rubric protects: the plot facts, who loves whom, the character "
+    "traits and the beat. plot: the plot is unchanged. minimal_change: the candidate changes no more than it must; moving "
+    "toward the Japanese line counts as minimal change. callback: every callback still holds. fixed: the candidate makes "
+    "the bucket's edit, present and legible, as the judge rubric's [fixed] label defines it for the bucket. no_invention: "
+    "the candidate passes the judge rubric's [no-invention] label. point: the candidate passes the judge rubric's "
+    "[keep-point] label. restores_japanese: the candidate restores the meaning of the Japanese line. The Japanese line is "
+    "the meaning reference. The judge rubric overrides the Japanese line wherever they conflict. Refer to lines only by "
+    "namespace and key."
+)
+JUDGE_WITHOUT_BUCKET_KEY = "0d858f5920a69b814a9f72e6ded443b16da0070a8f0708a5bd9e4ba183e287a4"
+BUCKET = "made-up-bucket"
+BUCKET_JUDGE_ANSWER = {**JUDGE_ANSWER, "no_invention": True, "point": True}
+BUCKET_JUDGMENT = Judgment(
+    meaning=True,
+    plot=True,
+    minimal_change=True,
+    callback=True,
+    fixed=True,
+    restores_japanese=False,
+    no_invention=True,
+    point=True,
+)
+
+
+def test_bucket_judge_verdicts_are_the_six_plus_no_invention_and_point() -> None:
+    assert BUCKET_JUDGE_VERDICTS == (
+        "meaning",
+        "plot",
+        "minimal_change",
+        "callback",
+        "fixed",
+        "restores_japanese",
+        "no_invention",
+        "point",
+    )
+
+
+def test_bucket_judge_schema_requires_the_eight_verdicts_and_forbids_extra_properties() -> None:
+    verdicts = list(BUCKET_JUDGE_VERDICTS)
+
+    assert BUCKET_JUDGE_SCHEMA["type"] == "object"
+    assert BUCKET_JUDGE_SCHEMA["required"] == verdicts
+    assert set(BUCKET_JUDGE_SCHEMA["properties"]) == set(verdicts)
+    assert all(BUCKET_JUDGE_SCHEMA["properties"][verdict] == {"type": "boolean"} for verdict in verdicts)
+    assert BUCKET_JUDGE_SCHEMA["additionalProperties"] is False
+
+
+def test_bucket_judge_instructions_are_the_judge_instructions_with_the_bucket_edits() -> None:
+    assert BUCKET_JUDGE_INSTRUCTIONS == BUCKET_JUDGE_INSTRUCTIONS_PINNED
+
+
+def test_judge_without_bucket_keeps_the_base_instructions_schema_and_store_key(tmp_path: Path) -> None:
+    ask = Fake(JUDGE_ANSWER)
+
+    judge(Store(tmp_path), LENS, SCENE, LINE_ONE, "Made-up candidate. Not game text.", [CALLBACK], REASONS, INTENT_TEXT, CONTEXT, ask)
+
+    assert JUDGE_INSTRUCTIONS == JUDGE_INSTRUCTIONS_PINNED
+    _model, parts, schema = ask.calls[0]
+    assert parts[0] == JUDGE_INSTRUCTIONS_PINNED
+    assert schema == JUDGE_SCHEMA
+    assert not any(part.startswith("Bucket:\n") for part in parts)
+    [record] = (tmp_path / "results").glob("*.json")
+    assert record.stem == JUDGE_WITHOUT_BUCKET_KEY
+
+
+def test_judge_with_bucket_asks_bucket_instructions_and_schema_with_a_bucket_part_after_the_rubric(tmp_path: Path) -> None:
+    ask = Fake(BUCKET_JUDGE_ANSWER)
+
+    result = judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        ask,
+        bucket=BUCKET,
+    )
+
+    assert result == BUCKET_JUDGMENT
+    _model, parts, schema = ask.calls[0]
+    assert parts[0] == BUCKET_JUDGE_INSTRUCTIONS
+    assert schema == BUCKET_JUDGE_SCHEMA
+    assert parts[1] == f"Judge rubric:\n{LENS.stage_text('judge')}"
+    assert parts[2] == f"Bucket:\n{BUCKET}"
+
+
+@pytest.mark.parametrize("verdict", ["no_invention", "point"])
+def test_bucket_judge_returns_a_false_no_invention_or_point_answer_as_false(tmp_path: Path, verdict: str) -> None:
+    answer = {**BUCKET_JUDGE_ANSWER, verdict: False}
+
+    result = judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(answer),
+        bucket=BUCKET,
+    )
+
+    assert getattr(result, verdict) is False
+    assert result == replace(BUCKET_JUDGMENT, **{verdict: False})
+
+
+def test_bucket_judge_store_key_carries_the_bucket(tmp_path: Path) -> None:
+    judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(BUCKET_JUDGE_ANSWER),
+        bucket=BUCKET,
+    )
+    [record] = (tmp_path / "results").glob("*.json")
+    inputs = {
+        "scene": SCENE.key,
+        "lines": [asdict(line) for line in SCENE.lines],
+        "line": {"namespace": LINE_ONE.namespace, "key": LINE_ONE.key},
+        "text": "Made-up candidate. Not game text.",
+        "callbacks": [CALLBACK],
+        "reasons": list(REASONS),
+        "intent": INTENT_TEXT,
+        "context": CONTEXT,
+    }
+    lens_text = LENS.stage_text("judge") + "\n" + LENS.stage_text("triage")
+
+    assert record.stem == store_key("judge", {**inputs, "bucket": BUCKET}, lens_text)
+    assert record.stem != store_key("judge", inputs, lens_text)
+
+
+def test_fresh_store_on_same_root_returns_stored_bucket_judgment_without_asking(tmp_path: Path) -> None:
+    judge(
+        Store(tmp_path),
+        LENS,
+        SCENE,
+        LINE_ONE,
+        "Made-up candidate. Not game text.",
+        [CALLBACK],
+        REASONS,
+        INTENT_TEXT,
+        CONTEXT,
+        Fake(BUCKET_JUDGE_ANSWER),
+        bucket=BUCKET,
+    )
+    ask = Fake()
+
+    assert (
+        judge(
+            Store(tmp_path),
+            LENS,
+            SCENE,
+            LINE_ONE,
+            "Made-up candidate. Not game text.",
+            [CALLBACK],
+            REASONS,
+            INTENT_TEXT,
+            CONTEXT,
+            ask,
+            bucket=BUCKET,
+        )
+        == BUCKET_JUDGMENT
+    )
+    assert ask.calls == []
+
+
 def test_cross_judge_schema_requires_consistent_and_forbids_extra_properties() -> None:
     assert CROSS_SCHEMA["type"] == "object"
     assert CROSS_SCHEMA["required"] == ["consistent"]
@@ -1683,19 +1898,23 @@ def test_changed_arc_context_or_cast_asks_again(
 
 
 PICK_GROUPS = [(SCENE, [LINE_ONE]), (SCENE_TWO, [LINE_THREE])]
-PICK_KEEP = {"keep": True, "namespace": "", "key": "", "intent": "", "drafts": []}
+PICK_KEEP = {"keep": True, "namespace": "", "key": "", "intent": "", "drafts": [], "shape": "none"}
 PICK_CHANGE = {
     "keep": False,
     "namespace": LINE_THREE.namespace,
     "key": LINE_THREE.key,
     "intent": "Made-up trans detail intent. Not game text.",
     "drafts": ["Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."],
+    "shape": CHOSEN_NAME,
 }
+# A world or nonbinary answer carries no shape. Not game text.
+PICK_WORLD_CHANGE = {name: value for name, value in PICK_CHANGE.items() if name != "shape"}
 PICK_RESULT = PickChange(
     namespace=LINE_THREE.namespace,
     key=LINE_THREE.key,
     intent="Made-up trans detail intent. Not game text.",
     drafts=("Made-up trans draft. Not game text.", "Made-up second trans draft. Not game text."),
+    shape=CHOSEN_NAME,
 )
 # A made-up scene of nine lines, for the window around each line of a pick. Not game text.
 WIDE_LINES = tuple(
@@ -1720,6 +1939,32 @@ def test_pick_draft_schema_asks_for_one_entry_with_keep_namespace_key_intent_and
     assert PICK_DRAFT_SCHEMA["properties"]["drafts"] == {"type": "array", "items": {"type": "string"}}
 
 
+def test_trans_pick_draft_schema_adds_a_required_shape_of_the_four_shapes_or_none() -> None:
+    assert TRANS_SHAPES == ("acceptance", "backing", "chosen-name", "present-life")
+    assert CHOSEN_NAME == "chosen-name"
+    assert TRANS_PICK_DRAFT_SCHEMA["type"] == "object"
+    assert TRANS_PICK_DRAFT_SCHEMA["required"] == ["keep", "namespace", "key", "intent", "drafts", "shape"]
+    assert TRANS_PICK_DRAFT_SCHEMA["additionalProperties"] is False
+    assert TRANS_PICK_DRAFT_SCHEMA["properties"]["shape"] == {
+        "type": "string",
+        "enum": ["acceptance", "backing", "chosen-name", "present-life", "none"],
+    }
+    trans_properties = {name: value for name, value in TRANS_PICK_DRAFT_SCHEMA["properties"].items() if name != "shape"}
+    assert trans_properties == PICK_DRAFT_SCHEMA["properties"]
+
+
+def test_world_and_nonbinary_pick_draft_schema_has_no_shape() -> None:
+    assert "shape" not in PICK_DRAFT_SCHEMA["properties"]
+    assert "shape" not in PICK_DRAFT_SCHEMA["required"]
+
+
+def test_trans_shape_instructions_name_the_four_shape_ids_and_none() -> None:
+    assert TRANS_SHAPE_INSTRUCTIONS == (
+        "The bucket's label names four shapes by id: acceptance, backing, chosen-name and present-life. "
+        "Set shape to the id of the shape the change uses, and to none when no line changes."
+    )
+
+
 def test_pick_draft_instructions_keep_the_placeholder_tag_and_length_rules_without_partner_wording() -> None:
     assert "Keep every {...} placeholder" in PICK_DRAFT_INSTRUCTIONS
     assert "every <text ...>...</> tag" in PICK_DRAFT_INSTRUCTIONS
@@ -1736,7 +1981,7 @@ def test_pick_draft_instructions_name_no_single_bucket_and_point_at_the_bucket_l
     assert "she's trans" not in PICK_DRAFT_INSTRUCTIONS
 
 
-def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(tmp_path: Path) -> None:
+def test_pick_draft_sends_one_opus_call_with_the_trans_schema_and_returns_the_chosen_line_and_shape(tmp_path: Path) -> None:
     ask = Fake(PICK_CHANGE)
 
     result = pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, ask)
@@ -1745,9 +1990,24 @@ def test_pick_draft_sends_one_opus_call_with_schema_and_returns_the_chosen_line(
     assert len(ask.calls) == 1
     model, parts, schema = ask.calls[0]
     assert model == claude.OPUS
-    assert schema == PICK_DRAFT_SCHEMA
+    assert schema == TRANS_PICK_DRAFT_SCHEMA
     assert PICK_DRAFT_INSTRUCTIONS in parts
+    assert TRANS_SHAPE_INSTRUCTIONS in parts
     assert "Made-up intent rule. Not game text." in "\n".join(parts)
+
+
+@pytest.mark.parametrize("bucket", ["world", "nonbinary"])
+def test_world_and_nonbinary_pick_draft_sends_the_pick_schema_with_no_shape_part_and_returns_no_shape(tmp_path: Path, bucket: str) -> None:
+    ask = Fake(PICK_WORLD_CHANGE)
+
+    result = pick_draft(Store(tmp_path), LENS, bucket, PICK_GROUPS, ask)
+
+    assert result == replace(PICK_RESULT, shape=None)
+    model, parts, schema = ask.calls[0]
+    assert model == claude.OPUS
+    assert schema == PICK_DRAFT_SCHEMA
+    assert parts[0] == PICK_DRAFT_INSTRUCTIONS
+    assert TRANS_SHAPE_INSTRUCTIONS not in parts
 
 
 def test_pick_draft_no_change_returns_none_and_a_second_call_reuses_it(tmp_path: Path) -> None:
@@ -1782,6 +2042,8 @@ def test_pick_draft_shows_each_line_with_the_three_scene_lines_either_side_and_n
         pytest.param({**PICK_CHANGE, "intent": ""}, id="change-without-intent"),
         pytest.param({**PICK_CHANGE, "drafts": []}, id="change-without-drafts"),
         pytest.param({**PICK_KEEP, "drafts": ["Made-up draft kept with no change. Not game text."]}, id="no-change-with-drafts"),
+        pytest.param({**PICK_CHANGE, "shape": "none"}, id="change-with-no-shape"),
+        pytest.param({**PICK_KEEP, "shape": "backing"}, id="keep-with-a-shape"),
     ],
 )
 def test_pick_draft_answers_that_break_the_pick_rules_are_rejected_and_stored_nothing(tmp_path: Path, answer: Any) -> None:
@@ -1829,12 +2091,28 @@ def test_pick_draft_is_stored_under_its_pick_draft_key_with_its_bucket_and_a_fre
                 "targets": [{"namespace": LINE_THREE.namespace, "key": LINE_THREE.key}],
             },
         ],
+        "shapes": list(TRANS_SHAPES),
     }
 
     assert record.stem == store_key("pick_draft", inputs, LENS.stage_text("intent"))
     assert json.loads(record.read_text(encoding="utf-8"))["stage"] == "pick_draft"
     assert pick_draft(Store(tmp_path), LENS, "trans", PICK_GROUPS, Fake()) == PICK_RESULT
     assert len(ask.calls) == 1
+
+
+# Pinned to the store keys the unchanged world and nonbinary pick drafts had at the base revision d5bc8c1. Not game text.
+@pytest.mark.parametrize(
+    ("bucket", "digest"),
+    [
+        ("world", "47792a2aa000e6e110248fe1b57ec58d9dca836df1aea32e808fdc7af9692f6b"),
+        ("nonbinary", "551867dbb716553a288eeb4d95caf37ca3fff490c54bb8abc39ff3d1dab4233e"),
+    ],
+)
+def test_world_and_nonbinary_pick_drafts_keep_their_base_store_key(tmp_path: Path, bucket: str, digest: str) -> None:
+    pick_draft(Store(tmp_path), LENS, bucket, PICK_GROUPS, Fake(PICK_WORLD_CHANGE))
+
+    [record] = (tmp_path / "results").glob("*.json")
+    assert record.stem == digest
 
 
 CANDIDATE_REFS = [(LINE_ONE.namespace, LINE_ONE.key), (LINE_TWO.namespace, LINE_TWO.key), (LINE_THREE.namespace, LINE_THREE.key)]

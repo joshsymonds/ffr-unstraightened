@@ -60,9 +60,10 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   point, so that deleting the mention would lose something. The mention takes one short
   clause, with no labels and no explaining.
 - `trans-bucket`: for a trans pick, at most one candidate line of the speaker changes. Where
-  the line naturally allows it, one light, natural trans detail of one of four shapes: a
-  family member's acceptance, possibly in progress; someone who backs the speaker; a name
-  the speaker chose and likes; or ordinary present life with the speaker's gender a given.
+  the line naturally allows it, one light, natural trans detail of one of four shapes:
+  acceptance (a family member's acceptance, possibly in progress); backing (someone who backs
+  the speaker); chosen-name (a name the speaker chose and likes); or present-life (ordinary
+  present life with the speaker's gender a given).
   The detail must be recognizable as trans and must answer the line's own topic. Where the
   line does not allow it, the line stays unchanged as no-hit. The detail is never forced.
   The trans bucket never adds a "she's trans" aside.
@@ -92,7 +93,7 @@ ends short of its target is reported exhausted, which happens only when its pool
 Each pool is sorted by a salted SHA-256 of its unit id, and each side has its own salt. Each
 side is refilled from the order until the target or the pool runs out, and a pick counts only
 when a changed line survives every judge. Every romance line of a queer pick converts,
-drafted together. A gender-roles mark never puts a unit in the queer pool.
+drafted together. A gender-roles mark never puts a unit in the queer pool. At most two accepted trans picks use the chosen-name shape, and a further one is refilled from the order.
 
 ## The flirt
 
@@ -159,6 +160,20 @@ It rejects a rewrite that breaks any of these labels.
 - `protect-plot`: rejects a rewrite that changes a plot fact, or that changes the scene's
   meaning to fit a label. A partner's or crush's gender is not a plot fact by itself, unless
   that partner appears or is named as a character elsewhere in the given context.
+- `fixed`: fixed means the bucket's edit is present and legible. For a queer pick, the
+  partner or crush is now same-sex. For a redirect, the flirt now aims at a man present in
+  the scene, or its address is generalized. A redirect whose flirt still aims only at a woman
+  is not fixed. For a world pick, a same-sex partner mention is present. For a nonbinary pick,
+  a specific partner is referred to with they/them at least once. "my partner" with no
+  they/them leaves the gender unspecified and is not fixed. For a trans pick, the line carries
+  one of the four shapes. A rewording that adds or changes no gender content is not fixed.
+- `no-invention`: rejects a rewrite that adds a name, person or fact that neither the line nor
+  its context holds, beyond the bucket's own edit, or that swaps a name for another. A partner
+  mention names no one new.
+  The chosen-name shape may give only the speaker's own chosen name.
+- `keep-point`: rejects a rewrite that loses the line's point (its joke, its purpose in the
+  scene, or what it shows of the speaker). The bucket's edit rides on the point and never
+  replaces it. A gag rewritten into a line about something else has lost its point.
 
 The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 `no-contradiction` and `protect-plot`, so each rewrite is drafted to pass its judge.
