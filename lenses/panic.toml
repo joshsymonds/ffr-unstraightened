@@ -1,0 +1,138 @@
+# Panic lens. Takes out sympathetic or comic panic at same-sex attraction, mistaken-identity panic, and crossdressing or "trap" gags, and keeps the beat.
+# Flags queer-coded villain menace as a scene pattern, and keeps the villain's villainy, motive and plot role.
+# Each screen criterion and each intent/judge paragraph starts with its [label].
+
+base = "unstraightening"
+leave_out = ["queering"]
+
+[[triage]]
+id = "p1-panic"
+question = "A character in this scene reacts with panic, disgust, fear or ridicule to same-sex attraction or advance, or to someone being gay, bi or trans, whether the moment is played for laughs, for sympathy or straight."
+
+[[triage]]
+id = "p2-mistaken-identity"
+question = "A character in this scene panics on finding out, or fearing, that someone they flirted with, kissed or were drawn to is the same sex or trans."
+
+[[triage]]
+id = "p3-crossdressing-gag"
+question = "A man in women's clothes, a woman in men's clothes, or a gender-ambiguous character in this scene is made a joke, a trick or a \"trap\"."
+
+[screen]
+model = "opus"
+criteria = [
+    "[p1-panic] Flag p1-panic when a character reacts with panic, disgust, fear or ridicule to same-sex attraction or advance, or to someone being gay, bi or trans. This holds whether the moment is played for laughs, for sympathy or straight.",
+    "[p2-mistaken-identity] Flag p2-mistaken-identity when a character panics on finding out, or fearing, that someone they flirted with, kissed or were drawn to is the same sex or trans.",
+    "[p3-crossdressing-gag] Flag p3-crossdressing-gag when a man in women's clothes, a woman in men's clothes, or a gender-ambiguous character is made a joke, a trick or a \"trap\". Clothes or an ambiguous gender the scene treats with respect is never a hit.",
+    "[on-screen-at-all] Flag panic shown at all, including when the scene condemns it. The intent stage decides keeps, so a condemned panic is still flagged here.",
+    "[neutral-presence] Never flag neutral or positive queer presence, including a camp but harmless character. A queer character who is simply there, at ease or played warmly is never a hit.",
+    "[villain-coding-is-scene] Queer-coded villain menace is the scene pattern's job, never this screen's. Never flag a villain's queer-coded menace here. A character's fear of a villain's threat or predation is not p1-panic: flag p1-panic only when the reaction is to the queerness itself.",
+]
+
+[intent]
+rule = """
+You rewrite only the line you are given: one line that carries a p1-panic, p2-mistaken-identity or p3-crossdressing-gag hit. Change only what the hit asks, and keep the story.
+
+[act-on-clear-hits] Act only on a clear hit. Keep a line unchanged only for a reason from this keep list: no-hit when the line is not the shape its label names, condemned-in-scene when the scene clearly condemns the panic or gag, protection when a protect rule below covers it, or plot when the change would alter what happens. Name no other reason.
+
+[minimal-fix] Change only the words the edit needs. Leave the rest of the line as written. Do not rewrite a whole line when one word or one clause carries the panic or the gag.
+
+[p1-panic] For a p1-panic line, remove the panic and keep the beat. The panic, disgust, fear or ridicule at same-sex attraction or advance, or at someone being gay, bi or trans, is taken out, and the line keeps its place and its point in the scene.
+
+[p2-mistaken-identity] For a p2-mistaken-identity line, remove the panic and keep the beat. The discovery stays in the scene, and the panic or fear at finding out, or fearing, that someone is the same sex or trans is taken out. A disguise the plot needs stays.
+
+[p3-crossdressing-gag] For a p3-crossdressing-gag line, remove the gag and keep the beat. The joke, trick or trap about the clothes or the gender is taken out, and the scene's action stays. A disguise the plot needs stays.
+
+[condemned-in-scene] When the scene clearly condemns the panic or gag, keep the line unchanged as condemned-in-scene. Condemned means the scene itself answers the panic as wrong. A scene that only shows the panic without answering it is not condemned, and the line is rewritten as usual.
+
+[protect-queer-presence] Never make anyone straight-acting or less queer, and never undo queer presence. A line that shows a queer character as they are stays as written, and a rewrite that makes a queer character straighter is never a fix.
+
+[protect-villainy] A villain keeps villainy, motive and plot role. Only the queer coding of the menace goes; the villain's threat, what the villain does and why stay as the scene has them.
+
+[protect-plot] Keep every plot fact: what happens, who does what, and the decisions made. Keep a line unchanged for plot when the change would alter what happens.
+
+[keep-voice] Keep the speaker's voice: their word choice, rhythm and manner.
+
+[no-new-detail] Add no name, object or motive the original line lacks.
+
+[no-explaining] Do not explain the change in the line, and do not add a tokenistic detail.
+"""
+
+[judge]
+rubric = """
+You judge one rewritten line against its original and the label it was drafted under. Reject the rewrite when it breaks any label below.
+
+[meaning] Reject a rewrite that changes what the line means beyond taking out the panic or the gag, or that changes how the line stands toward the people in the scene.
+
+[minimal-fix] Reject a rewrite that changes more than its edit needs.
+
+[p1-panic] Reject a rewrite that leaves the panic, disgust, fear or ridicule at same-sex attraction or advance, or at someone being gay, bi or trans, in place.
+
+[p2-mistaken-identity] Reject a rewrite that leaves the panic at finding out that someone is the same sex or trans in place, or that removes the discovery the scene needs.
+
+[p3-crossdressing-gag] Reject a rewrite that leaves the joke, trick or trap in place, or that removes a disguise the plot needs.
+
+[condemned-in-scene] Reject a rewrite that changes a line the scene clearly condemns as condemned-in-scene, or that weakens the condemnation the scene gives.
+
+[protect-queer-presence] Reject a rewrite that makes anyone straight-acting or less queer, or that undoes queer presence.
+
+[protect-villainy] Reject a rewrite that removes or softens a villain's villainy, motive or plot role, or that changes more than the queer coding of the menace.
+
+[protect-plot] Reject a rewrite that changes a plot fact: what happens, who does what, the decisions made, or the events of the scene.
+
+[keep-voice] Reject a rewrite that breaks the speaker's voice.
+
+[no-new-detail] Reject a rewrite that adds a name, object or motive the original line lacks.
+
+[no-explaining] Reject a rewrite that explains the change or adds a tokenistic detail.
+
+[fixed] Reject a rewrite that leaves its hit's panic or gag in place, or that takes out the beat instead of the panic or gag. A rewrite with no change to the panic or gag is not fixed.
+
+[keep-point] Reject a rewrite that loses the line's point: its joke, its purpose in the scene, or what it shows of the speaker. Removing the panic or gag never removes the point.
+"""
+
+[scene]
+criteria = [
+    "[v1-queer-coded-menace] Flag v1-queer-coded-menace for the scene when a villain or threat is made menacing through queer coding: camp or effeminate mannerisms used as menace, predatory same-sex interest, or gender ambiguity framed as creepy. Flag the scene for the pattern, not each line.",
+    "[menace-not-presence] Camp but harmless characters are not the pattern, and queer villains whose menace does not rest on queerness are not the pattern either. Only menace built on queer coding flags v1-queer-coded-menace.",
+    "[scene-not-line] Judge the pattern by the scene as a whole, never by a single line. Flag the scene for the pattern, not the line that shows it.",
+]
+plan = """
+[plan-budget] Plan at most 4 changed lines per conversation. Count each line you plan to change, across the whole conversation, and stop planning once 4 lines are planned. A plan with 5 or more changed lines is out of budget and fails.
+
+[carries-pattern] Never plan a line that does not itself carry the flagged pattern. For each planned line, give its carrier quote from the line: the words in that line that carry the menace coding. A line with no carrier quote is not planned.
+
+[line-pass-final] Never plan a line that the line pass changed or kept, for any reason. The line pass has decided those lines, and they stay as the line pass left them. Plan only from lines the line pass did not change or keep.
+
+[keep-villainy] A planned change keeps the villain's villainy, motive and plot role. Only the queer coding of the menace changes. The plan never removes the threat itself, what the villain does, or why the villain acts.
+
+[keep-queerness] A planned change never makes a queer character straighter or less queer. Lines that show queer presence stay as written, and the plan works only on the menace coding: the villain's queerness stays, and only its use as the source of menace changes.
+
+[no-invented-topic] Every fix never invents a topic the scene does not offer. A fix draws only on what the scene already holds.
+
+[named-keep] When no plan within the budget reduces the flagged pattern, keep the scene unchanged and name one reason from exactly these two: protection or plot. Name protection when a protection in the lens applies to the fix. Name plot only when every in-budget fix would change a plot fact or the scene's meaning. A scene's importance to the story is never a reason to keep it.
+"""
+rubric = """
+[reduce-pattern] Judge the plan as a whole. Pass a plan that reduces the flagged pattern while the scene keeps its meaning and plot facts, however central the scene is. Reject a plan that removes the pattern by flattening a villain, making them bland or changing who they are.
+
+[keep-villainy] Reject a plan that removes or softens the villain's villainy, motive or plot role, or that cuts the threat to fit the label.
+
+[keep-queerness] Reject a plan that makes a queer character straighter or less queer, or that removes queer presence from the scene. Removing queer coding's use as the source of menace is the fix, not a loss of queerness.
+
+[protections-hold] Every line-pass protection still holds under the plan: protect-villainy, protect-queer-presence and protect-plot. Reject a plan that breaks any one of them, whatever pattern it reduces.
+
+[carries-pattern] Reject a rewrite that changes a line which does not itself carry the flagged pattern. Only a line that carries the pattern may be rewritten.
+
+[no-added-content] Reject a rewrite that adds content the scene does not offer. The rewrite draws only on what the scene already holds.
+
+[grammatical] Reject a rewrite that leaves a line ungrammatical. Each rewritten line must read as a grammatical sentence.
+
+[keeps-subject] Reject a rewrite that changes what the line is about beyond the menace words: its subject, its point or the information it gives.
+
+[no-new-detail] Reject a rewrite that adds a name, object, motive, topic or clause the original line lacks.
+
+[not-a-no-op] Reject a rewrite that changes so little the pattern still reads the same.
+"""
+
+[[scene.patterns]]
+id = "v1-queer-coded-menace"
+question = "A villain or threat in this scene is made menacing through queer coding: camp or effeminate mannerisms used as menace, predatory same-sex interest, or gender ambiguity framed as creepy."
