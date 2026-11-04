@@ -6,6 +6,7 @@ import re
 import shlex
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from ffrd import deck
@@ -69,6 +70,10 @@ def run_mod(
     files: dict[str, bytes],
     log: str,
     companion: tuple[Path, dict[str, bytes]] | None = None,
+    *,
+    offscreen: bool = True,
+    watch: Callable[[list[str]], None] | None = None,
+    done_timeout: float = DONE_TIMEOUT,
 ) -> list[str]:
     if mod.name in ("", ".."):
         raise Fail(f"mod folder {mod} has no name")
@@ -88,7 +93,7 @@ def run_mod(
         for attempt in range(LAUNCH_ATTEMPTS):
             if attempt:
                 _quit()
-            lines = _launch(f"{dest}/{log}")
+            lines = _launch(f"{dest}/{log}", offscreen, watch, done_timeout)
             if lines is not None:
                 return lines
         raise Fail(f"FFR stalled on {host()} in all {LAUNCH_ATTEMPTS} launches")
@@ -123,15 +128,24 @@ def _write(path: str, data: bytes) -> None:
         )
 
 
-def _launch(log: str) -> list[str] | None:
+def _launch(
+    log: str,
+    offscreen: bool,
+    watch: Callable[[list[str]], None] | None,
+    done_timeout: float,
+) -> list[str] | None:
     # A log left by an earlier launch could already end in done, so it goes before every launch.
     deck.ssh(host(), f"rm -f {deck.remote(log)}")
     # -RenderOffscreen keeps the game thread ticking while the game window is unfocused on the gnomon desktop.
-    deck.ssh(host(), f"timeout 30 steam -applaunch {APP_ID} -RenderOffscreen")
+    render = " -RenderOffscreen" if offscreen else ""
+    # -nosound keeps every launch silent on the gnomon desktop.
+    deck.ssh(host(), f"timeout 30 steam -applaunch {APP_ID} -nosound{render}")
     _wait_for_exe()
     started = time.monotonic()
     while True:
         lines = _log_lines(log)
+        if watch is not None:
+            watch(lines)
         if lines and lines[-1] == "done":
             return lines
         if not _matches(EXE_PATTERN):
@@ -139,8 +153,8 @@ def _launch(log: str) -> list[str] | None:
         elapsed = time.monotonic() - started
         if not lines and elapsed >= STALL_WINDOW:
             return None
-        if elapsed >= DONE_TIMEOUT:
-            raise Fail(f"no done line from the mod on {host()} within {DONE_TIMEOUT}s")
+        if elapsed >= done_timeout:
+            raise Fail(f"no done line from the mod on {host()} within {done_timeout}s")
         time.sleep(POLL_INTERVAL)
 
 
