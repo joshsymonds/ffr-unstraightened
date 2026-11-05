@@ -109,7 +109,7 @@ or their past), or both. An eligible speaker is a named speaker outside the core
 antagonists and the flirt.
 
 The picks come from four salted seeded orders, one each for the romance, world, nonbinary and
-trans sides, disjoint from each other. The romance pool is the speakers outside the core cast,
+trans sides; a unit holds at most one side's change. The romance pool is the speakers outside the core cast,
 the antagonists and the flirt with a `romance` mark, plus each speakerless `romance` line. The
 world and nonbinary pools are the eligible speakers outside the romance pool with an
 `insertable` mark. The trans pool is the eligible speakers with a `trans-candidate` mark. Each
@@ -117,8 +117,10 @@ side's share is a setting, `romance_share`, `world_share`, `nonbinary_share` or 
 a whole number from 0 to 100. A side's target is its share of its denominator, rounded half up:
 the romance pool for romance, the eligible speakers outside the romance pool for world and
 nonbinary, and all eligible speakers for trans. Each refill round draws romance, world,
-nonbinary and then trans, each side skipping units any other side has drawn, and each side
-refills until its target is met or its pool runs out. A world, nonbinary or trans pick's lines
+nonbinary and then trans. A side draws only units it has not tried that no other side holds,
+either as a pick with a surviving change or as that round's draw, so a unit whose pick failed
+on one side can still pass on another. Each side refills until its target is met or it has no
+unit left to try. A world, nonbinary or trans pick's lines
 go to one Opus call per pick, which changes at most one of them. The queering selection does
 not call Jev.
 
