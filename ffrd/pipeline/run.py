@@ -36,6 +36,8 @@ CHAPTER_FILE = re.compile(r"chapter-\d{2,}\.toml")
 UNATTRIBUTED_FILE = "unattributed.toml"
 RECHECK_AT = 0.5
 REDO_NOTE_MAX = 200
+# A redo note of exactly this word keeps the line unchanged: a line the run would change is gate_failed under redo with no redraft.
+REDO_KEEP = "keep"
 MARKS = "marks.jsonl"
 
 OutcomeKind = Literal["changed", "kept_for_plot", "gate_failed", "unfinished", "untouched"]
@@ -528,12 +530,14 @@ def _redraft(
 def _gated(
     ctx: _Context, scene: Scene, target: stages.Target, reasons: tuple[str, ...], first: tuple[str, ...] | Unfinished | Rejected, ask: Ask
 ) -> tuple[Outcome, Change | None]:
-    """Gates one drafted target through the line pass, then redrafts it under its note when the redo list names it."""
+    """Gates one drafted target through the line pass, then redrafts it under its note when the redo list names it, or gate fails it under redo when its note is the keep word."""
     outcome, change = _line(ctx, scene, target, reasons, first, ask)
     line = target.line
     note = ctx.redo.get((line.namespace, line.key))
     if note is None or outcome.outcome != "changed":
         return outcome, change
+    if note == REDO_KEEP:
+        return _outcome(line, reasons, "gate_failed", gate="redo"), None
     return _redraft(ctx, scene, target, reasons, note, ask)
 
 
@@ -717,6 +721,8 @@ def _gate_plan(
         note = ctx.redo.get(ref)
         if note is None or isinstance(normal, Kept | Unfinished | RateLimited):
             return normal
+        if note == REDO_KEEP:
+            return Kept("redo")
         redrafted = _first_drafts(ctx, scene, [target], ask, note)[ref]
         redraft = _scene_gate(ctx, scene, entry, target, redrafted, ask, note)
         return Kept("redo") if isinstance(redraft, Kept) else redraft

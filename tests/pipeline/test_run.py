@@ -23,6 +23,7 @@ from ffrd.pipeline.accounts import Account
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.run import (
+    REDO_KEEP,
     Change,
     Outcome,
     _arc_judged,
@@ -1565,6 +1566,15 @@ def test_failed_redraft_is_gate_failed_under_redo_and_ships_no_first_rewrite(tmp
     ]
     assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in retries[-1])
     assert _note_drafts(claude) == [([(NS_A, "1")], REDO_NOTE), ([(NS_A, "1")], REDO_NOTE)]
+
+
+def test_keep_note_gate_fails_the_line_under_redo_with_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_KEEP}"\n')
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "redo", None, redo=True)
+    assert (NS_A, "1") not in _dialog_texts(tmp_path)
+    assert _note_drafts(claude) == []
 
 
 def test_unfinished_redraft_is_unfinished_and_ships_no_first_rewrite(tmp_path: Path) -> None:
@@ -4193,6 +4203,18 @@ def test_scene_pass_redraft_failing_its_gates_or_the_scene_judge_is_gate_failed_
     assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
 
 
+def test_keep_note_on_a_planned_line_gate_fails_it_under_redo_with_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{REDO_KEEP}"\n')
+    claude = _scene_claude()
+    claude.scene_plan = _plan_answer((NS_A, "2", False), (NS_A, "3", False))
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _note_drafts(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, SCENE_REASONS, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+
+
 def test_listed_planned_line_whose_normal_gating_fails_makes_no_note_call(tmp_path: Path) -> None:
     _redo_file(tmp_path, f'[{NS_A}]\n"3" = "{SCENE_REDO}"\n')
     claude = _scene_claude()
@@ -4948,6 +4970,17 @@ def test_queering_redo_listed_selected_line_is_redrafted_with_its_note(tmp_path:
         NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "changed", None, "opus", redo=True, bucket="queer"
     )
     assert _dialog_records(tmp_path)[(NS_A, "1")]["text"] == REDRAFT_A1
+
+
+def test_queering_keep_note_gate_fails_the_selected_line_under_redo_with_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_KEEP}"\n')
+    claude = _phase_claude()
+    outcomes = _phase(tmp_path, claude)
+    assert _note_drafts(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
+        NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "gate_failed", "redo", None, redo=True, bucket="queer"
+    )
+    assert (NS_A, "1") not in _dialog_records(tmp_path)
 
 
 def test_queering_intent_keep_stays_unchanged_and_keeps_its_bucket(tmp_path: Path) -> None:

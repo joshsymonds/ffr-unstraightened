@@ -239,7 +239,9 @@ a new draft, and other lines keep their keys. The redraft faces the gates its li
 normally faces, the line-pass gates and judges or the scene pass's gates and scene judge,
 then coherence and the arc judges. If no redraft passes, the line is gate failed with gate
 `redo`, and the earlier rewrite is never kept. A listed line that the run would not change
-is left as it is. Each outcome record carries `redo`, which is true for a listed line.
+is left as it is. A note of exactly `keep` keeps the line unchanged: a listed line the run
+would change is gate failed with gate `redo`, with no redraft and no model call. Each outcome
+record carries `redo`, which is true for a listed line.
 
 Third, after all scenes, the repeated lines are unified. Every changed line whose English
 text matches another changed line's takes the rewrite and the writer of the earliest of
