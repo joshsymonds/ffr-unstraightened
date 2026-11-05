@@ -309,13 +309,15 @@ def cmd_shot(args: argparse.Namespace) -> None:
     files = target_files(expected, ways, args.title)
     build = [] if args.vanilla else _build_files()
     host = gnomon.host()
+    if gnomon.running():
+        raise Fail(f"FINAL FANTASY RESONANCE is running on {host}; refusing to start the shot")
     mod = repo_root() / MOD_DIR
     watcher = Watcher(host, f"{gnomon.ue4ss()}/Mods/{mod.name}")
     dest = f"{gnomon.paks()}/~mods"
     with guard():
-        if build:
-            deck.put(host, dest, build)
         try:
+            if build:
+                deck.put(host, dest, build)
             gnomon.run_mod(mod, files, LOG, offscreen=False, watch=watcher, done_timeout=DONE_TIMEOUT)
         finally:
             if build:

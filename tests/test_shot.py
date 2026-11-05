@@ -1,16 +1,20 @@
 """Save guard tests against a fake gnomon filesystem. Made-up save bytes and names. Not game data."""
 
+import argparse
+import contextlib
 import fnmatch
 import json
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
 import pytest
 
-from ffrd import cli, deck, shot
-from ffrd.game import Fail, vanilla_hash
+from ffrd import cli, deck, gnomon, shot
+from ffrd.game import MOD_NAME, Fail, vanilla_hash
+from ffrd.install import EXTS
 
 REMOTE_HOME = "/remote"
 STEAM_ID = "76561197969529126"
@@ -395,3 +399,110 @@ def test_after_expects_the_built_text(fake_vanilla: Path, monkeypatch: pytest.Mo
     built = {("ST_C01_001_01", "10"): "Synthetic rewritten line ten."}
     monkeypatch.setattr(shot, "load_overrides", lambda root, en: (built, [], []))
     assert shot._expected("ST_C01_001_01", "10", before=False) == vanilla_hash("Synthetic rewritten line ten.")
+
+
+AFTER_TEXT = "Synthetic rewritten line ten."
+SNAP_HASH = "9999000011112222"
+HELD_HASH = "1111000011112222"
+
+
+def stub_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, running: bool = False) -> None:
+    monkeypatch.setattr(shot, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(gnomon, "host", lambda: "gnomon")
+    monkeypatch.setattr(gnomon, "ue4ss", lambda: "/synthetic/ue4ss")
+    monkeypatch.setattr(gnomon, "paks", lambda: "/synthetic/paks")
+    monkeypatch.setattr(gnomon, "running", lambda: running)
+    monkeypatch.setattr(shot, "routes", lambda namespace, key: ["event SynEventA"])
+    monkeypatch.setattr(shot, "load_overrides", lambda root, en: ({("ST_C01_001_01", "10"): AFTER_TEXT}, [], []))
+    build = tmp_path / "build"
+    build.mkdir()
+    for ext in EXTS:
+        (build / f"{MOD_NAME}.{ext}").write_bytes(b"synthetic build")
+
+
+def no_save_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shot, "guard", lambda: contextlib.nullcontext())
+
+
+def play_log(monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> None:
+    def run_mod(
+        mod: Path, files: dict[str, bytes], log: str, *, offscreen: bool, watch: Callable[[list[str]], None], done_timeout: float
+    ) -> list[str]:
+        watch(lines)
+        return lines
+
+    monkeypatch.setattr(gnomon, "run_mod", run_mod)
+
+
+def shot_args(vanilla: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(namespace="ST_C01_001_01", key="10", vanilla=vanilla, title=False)
+
+
+def removed_build(desktop: FakeDesktop) -> list[str]:
+    names = [f"{MOD_NAME}.{ext}" for ext in EXTS]
+    return [c for c in desktop.commands if c.startswith("rm -f ") and all(n in c for n in names)]
+
+
+def test_a_matching_run_keeps_one_png_under_shots(
+    desktop: FakeDesktop, fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stub_run(monkeypatch, tmp_path)
+    no_save_guard(monkeypatch)
+    expected = vanilla_hash(AFTER_TEXT)
+    play_log(monkeypatch, [f"snap {expected}", f"held {expected}", "done"])
+    desktop.windows = [{"id": 42, "app_id": "steam_app_3259780"}]
+    shot.cmd_shot(shot_args())
+    pngs = sorted((tmp_path / "shots").iterdir())
+    assert [p.name for p in pngs] == ["ST_C01_001_01.10.after.png"]
+    assert pngs[0].read_bytes() == b"synthetic png"
+    assert len(removed_build(desktop)) == 1
+
+
+def test_a_mismatching_run_keeps_no_png_and_names_key_expected_snap_and_held(
+    desktop: FakeDesktop, fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stub_run(monkeypatch, tmp_path)
+    no_save_guard(monkeypatch)
+    expected = vanilla_hash(AFTER_TEXT)
+    play_log(monkeypatch, [f"snap {SNAP_HASH}", f"held {HELD_HASH}", "done"])
+    desktop.windows = [{"id": 42, "app_id": "steam_app_3259780"}]
+    with pytest.raises(Fail) as err:
+        shot.cmd_shot(shot_args())
+    message = str(err.value)
+    for part in ("ST_C01_001_01,10", f"expected {expected}", f"snap {SNAP_HASH}", f"held {HELD_HASH}"):
+        assert part in message
+    assert not (tmp_path / "shots").exists()
+    assert len(removed_build(desktop)) == 1
+
+
+def test_a_build_is_removed_when_its_upload_fails_after_the_first_file(
+    desktop: FakeDesktop, fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stub_run(monkeypatch, tmp_path)
+    no_save_guard(monkeypatch)
+    second = f"{MOD_NAME}.{EXTS[1]}"
+    fake_ssh = desktop.ssh
+
+    def failing_ssh(host: str, command: str, stdin: IO[bytes] | int = subprocess.DEVNULL) -> bytes:
+        if "cat >" in command and second in command:
+            raise Fail("ssh to gnomon exited 1")
+        return fake_ssh(host, command, stdin)
+
+    monkeypatch.setattr(deck, "ssh", failing_ssh)
+    with pytest.raises(Fail, match="exited 1"):
+        shot.cmd_shot(shot_args())
+    assert len(removed_build(desktop)) == 1
+
+
+def test_a_running_game_refuses_before_any_save_write_backup_or_put(
+    remote: FakeRemote, saves: dict[str, bytes], fake_vanilla: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stub_run(monkeypatch, tmp_path, running=True)
+    started: list[str] = []
+    monkeypatch.setattr(deck, "put", lambda host, dest, files: started.append("put"))
+    play_log(monkeypatch, [])
+    with pytest.raises(Fail, match="running"):
+        shot.cmd_shot(shot_args())
+    assert started == []
+    assert remote.writes == []
+    assert not (tmp_path / BACKUP_ROOT).exists()
