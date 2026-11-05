@@ -50,7 +50,7 @@ INTENT: frozenset[str] = frozenset(
         "protect-plot",
     }
 )
-JUDGE: frozenset[str] = INTENT | {"meaning", "fixed", "no-invention", "keep-point"}
+JUDGE: frozenset[str] = INTENT | {"meaning", "fixed", "no-invention", "keep-point", "fits-the-moment"}
 BOUND_STAGES: tuple[Stage, ...] = ("screen", "intent", "judge")
 # The label table: which bracketed labels each stage's text must carry.
 BINDING: dict[Stage, frozenset[str]] = {"screen": SCREEN, "intent": INTENT, "judge": JUDGE}
@@ -272,7 +272,7 @@ DOC_SHAPE_AND_CAP_PHRASES: tuple[str, ...] = (
     "At most two accepted trans picks use the chosen-name shape, and a further one is refilled from the order.",
 )
 # The judge labels that the doc lists as bullets in its Judge rubric section.
-DOC_NEW_JUDGE_LABELS: tuple[str, ...] = ("fixed", "no-invention", "keep-point")
+DOC_NEW_JUDGE_LABELS: tuple[str, ...] = ("fixed", "no-invention", "keep-point", "fits-the-moment")
 
 DOC_SECTIONS: tuple[str, ...] = (
     "## Aims",

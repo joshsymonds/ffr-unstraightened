@@ -174,6 +174,12 @@ It rejects a rewrite that breaks any of these labels.
 - `keep-point`: rejects a rewrite that loses the line's point (its joke, its purpose in the
   scene, or what it shows of the speaker). The bucket's edit rides on the point and never
   replaces it. A gag rewritten into a line about something else has lost its point.
+- `fits-the-moment`: rejects a rewrite whose added or changed queer detail could not
+  naturally come up in what the scene is already doing, for any speaker. A detail riding on
+  what the speaker is already doing fits, such as a flirt widened while flirting. An aside in a
+  battle, a threat, a confrontation, a chase or plot exposition does not, nor does a change to
+  a loss or grief that drives the scene. A villain on screen to be villainous gets no queer
+  detail unless the scene is plain downtime.
 
 The intent stage also carries `no-explaining`, `keep-voice`, `no-new-detail`,
 `no-contradiction` and `protect-plot`, so each rewrite is drafted to pass its judge.
