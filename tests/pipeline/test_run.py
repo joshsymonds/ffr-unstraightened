@@ -542,6 +542,8 @@ class FakeClaude:
         self.redrafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         # Answers for each pick's lines, whatever its bucket: keep, intent and drafts. A pick changes the first of its lines with a change answer. A line without an answer is kept. Not game text.
         self.picks: dict[tuple[str, str], dict[str, Any] | Unfinished | Rejected] = {}
+        # Answers for one bucket's picks, by bucket and line, that take the place of the line's answer in picks. Not game text.
+        self.bucket_picks: dict[tuple[str, str, str], dict[str, Any] | Unfinished | Rejected] = {}
         # Candidate marks by line, and the failure of any candidate call that names a line. Not game text.
         self.candidate_marks: dict[tuple[str, str], list[str]] = {}
         self.candidate_failures: dict[tuple[str, str], Unfinished | Rejected] = {}
@@ -672,8 +674,9 @@ class FakeClaude:
 
     def _pick(self, parts: Sequence[str], shaped: bool) -> dict[str, Any] | Unfinished | Rejected:
         # The pick changes the first of its lines with a change answer, and a failed answer for any of its lines fails the pick. Not game text.
+        bucket = _part(parts, "Bucket:\n")
         for namespace, key in _trans_refs(parts):
-            answer = self.picks.get((namespace, key), TRANS_KEEP)
+            answer = self.bucket_picks.get((bucket, namespace, key), self.picks.get((namespace, key), TRANS_KEEP))
             if isinstance(answer, Unfinished | Rejected):
                 return answer
             if not answer["keep"]:
@@ -6354,6 +6357,39 @@ def test_the_four_sides_pick_disjoint_speakers_and_each_side_takes_what_the_othe
         "rounds": [{"tried": 1, "passed": 1}],
         "achieved": 1,
         "exhausted": True,
+    }
+
+
+def test_a_unit_whose_pick_fails_on_one_side_is_drawn_by_a_side_it_had_been_taken_from(tmp_path: Path) -> None:
+    # Speaker s alone is insertable and trans-candidate. Its world pick keeps the line, and its trans pick changes it. Not game text.
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE}
+    claude.candidate_marks = {(NS_A, "4"): [INSERTABLE, TRANS_CANDIDATE]}
+    claude.picks = {(NS_A, "4"): _trans_change(PICK_INTENT, ["Made-up four-side pick of 4. Not game text."])}
+    claude.bucket_picks = {("world", NS_A, "4"): TRANS_KEEP}
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=FOUR_SIDE_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, world_share=17, nonbinary_share=0, trans_share=17),
+    )
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker["made-up-speaker-s"].outcome, by_speaker["made-up-speaker-s"].bucket) == ("changed", "trans")
+    assert _pick_refs(claude, "world") == [(NS_A, "4")]
+    assert _pick_refs(claude, "trans") == [(NS_A, "4")]
+    assert _side(tmp_path, "world")["rounds"] == [{"tried": 1, "passed": 0}]
+    assert _side(tmp_path, "world")["exhausted"] is True
+    assert _side(tmp_path, "trans") == {
+        "share": 17,
+        "pool": 1,
+        "denominator": 6,
+        "target": 1,
+        "rounds": [{"tried": 1, "passed": 1}],
+        "achieved": 1,
+        "exhausted": False,
     }
 
 

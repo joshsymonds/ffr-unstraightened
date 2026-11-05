@@ -76,20 +76,21 @@ core cast who are not antagonists, and the flirt's, and it flags them under thes
   line whose speaker, partner or crush is already trans or nonbinary. The intent keeps these
   as no-hit.
 
-Selection: four disjoint sides, each with its own salted seeded order, so a unit picked by
-one side is never picked by another. The romance side takes romance_share of the romance
+Selection: four disjoint sides, each with its own salted seeded order, so a unit holds at most
+one side's change. A unit whose pick failed on one side can be drawn by another side that has
+not tried it. The romance side takes romance_share of the romance
 pool, where the romance pool is the eligible speakers with a romance line plus each
 speakerless romance line. The world side takes world_share of the eligible characters
 outside the romance pool, and the world pool is the eligible speakers outside the romance
 pool with an insertable mark. The nonbinary side takes nonbinary_share of the eligible
 characters outside the romance pool, and the nonbinary pool is the eligible speakers outside
 the romance pool with an insertable mark. The trans side takes trans_share of all eligible characters,
-and the trans pool is the eligible speakers with a trans-candidate mark, minus the other
-sides' picks. Speakerless lines are never trans picks. Eligible means not core cast, not an
+and the trans pool is the eligible speakers with a trans-candidate mark. Speakerless lines are never trans picks. Eligible means not core cast, not an
 antagonist, and not the flirt. Each share is a whole number from 0 to 100, and its target is
 the share of its denominator rounded half up: a share of 100 targets the whole denominator,
 only the romance pool equals its denominator, and a share of 0 draws nothing. A side that
-ends short of its target is reported exhausted, which happens only when its pool runs out.
+ends short of its target is reported exhausted, which happens only when every unit of its
+pool has been tried by it or holds another side's change.
 Each pool is sorted by a salted SHA-256 of its unit id, and each side has its own salt. Each
 side is refilled from the order until the target or the pool runs out, and a pick counts only
 when a changed line survives every judge. Every romance line of a queer pick converts,

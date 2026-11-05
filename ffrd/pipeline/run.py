@@ -1360,21 +1360,23 @@ def _round(
     return _settle(ctx, [entry.scene for entry in screened], outcomes, changes, batch)
 
 
-def _draw(order: Sequence[str], start: int, taken: frozenset[str], count: int) -> tuple[list[str], int]:
-    """Draws up to count units from the order, from position start on, skipping each unit the other side has drawn. Returns the units drawn and the position after the last unit read."""
-    drawn: list[str] = []
-    position = start
-    while position < len(order) and len(drawn) < count:
-        unit = order[position]
-        position += 1
-        if unit not in taken:
-            drawn.append(unit)
-    return drawn, position
+def _draw(order: Sequence[str], tried: Collection[str], held: Collection[str], count: int) -> list[str]:
+    """Draws up to count units in the order's sequence that this side has not tried and no other side holds."""
+    return [unit for unit in order if unit not in tried and unit not in held][:count]
 
 
-def _spent(passing: frozenset[str], target: int, read: int, order: Sequence[str]) -> bool:
-    """A side is spent once its surviving picks meet its target or its order has been read to the end."""
-    return len(passing) >= target or read >= len(order)
+def _spent(passing: frozenset[str], target: int, order: Sequence[str], tried: Collection[str], held: Collection[str]) -> bool:
+    """A side is spent once its surviving picks meet its target or every unit of its order is tried by it or held by another side."""
+    return len(passing) >= target or not _draw(order, tried, held, 1)
+
+
+def _held(
+    bucket: queering.Selection,
+    passing: Mapping[queering.Selection, frozenset[str]],
+    fresh: Mapping[queering.Selection, Sequence[str]],
+) -> frozenset[str]:
+    """The units another side holds: its picks with a surviving change and the units it drew this round."""
+    return frozenset(unit for other, units in (*passing.items(), *fresh.items()) if other != bucket for unit in units)
 
 
 def _side_of(name: str, bucket: queering.Selection, share: int, pool: Collection[str], salt: str, denominator: int) -> _Side:
@@ -1405,16 +1407,20 @@ def _refill(
     sides: Sequence[_Side],
     batch: Callable[[], Ask],
 ) -> _Refill:
-    """The refill loop over the sides' seeded orders. Each round draws every side's shortfall in side order, and no side draws a unit that another side has drawn. The round plays the cumulative picks through phase two, unification and both arc judges, and counts each side's picks with a surviving changed line. It stops once every side has met its target or read its order to the end."""
+    """The refill loop over the sides' seeded orders. Each round draws every side's shortfall in side order: units the side has not tried that no other side holds, either with a surviving change or as this round's draw. A unit whose pick failed stays with its side until another side draws it. The round plays the cumulative picks through phase two, unification and both arc judges, and counts each side's picks with a surviving changed line. It stops once every side has met its target or has no unit left to try."""
     drawn: dict[queering.Selection, list[str]] = {side.bucket: [] for side in sides}
-    read: dict[queering.Selection, int] = {side.bucket: 0 for side in sides}
+    tried: dict[queering.Selection, set[str]] = {side.bucket: set() for side in sides}
     passing: dict[queering.Selection, frozenset[str]] = {side.bucket: frozenset() for side in sides}
     rounds: dict[queering.Selection, list[tuple[int, int]]] = {side.bucket: [] for side in sides}
     while True:
         fresh: dict[queering.Selection, list[str]] = {}
         for side in sides:
-            taken = frozenset(unit for bucket, units in drawn.items() if bucket != side.bucket for unit in units)
-            fresh[side.bucket], read[side.bucket] = _draw(side.order, read[side.bucket], taken, side.target - len(passing[side.bucket]))
+            fresh[side.bucket] = _draw(
+                side.order, tried[side.bucket], _held(side.bucket, passing, fresh), side.target - len(passing[side.bucket])
+            )
+            tried[side.bucket].update(fresh[side.bucket])
+            for bucket in drawn:
+                drawn[bucket] = [unit for unit in drawn[bucket] if unit not in fresh[side.bucket]]
             drawn[side.bucket] += fresh[side.bucket]
         picks: dict[queering.Selection, frozenset[str]] = {bucket: frozenset(units) for bucket, units in drawn.items()}
         outcomes, changes = _round(ctx, root, marking, screened, picks, batch)
@@ -1422,7 +1428,9 @@ def _refill(
             passing[side.bucket] = _surviving(outcomes, side.bucket)
             if fresh[side.bucket]:
                 rounds[side.bucket].append((len(fresh[side.bucket]), len(passing[side.bucket].intersection(fresh[side.bucket]))))
-        if all(_spent(passing[side.bucket], side.target, read[side.bucket], side.order) for side in sides):
+        if all(
+            _spent(passing[side.bucket], side.target, side.order, tried[side.bucket], _held(side.bucket, passing, {})) for side in sides
+        ):
             return _Refill(outcomes, changes, {bucket: tuple(entries) for bucket, entries in rounds.items()}, passing)
 
 
