@@ -1361,8 +1361,8 @@ def _round(
 
 
 def _draw(order: Sequence[str], tried: Collection[str], held: Collection[str], count: int) -> list[str]:
-    """Draws up to count units in the order's sequence that this side has not tried and no other side holds."""
-    return [unit for unit in order if unit not in tried and unit not in held][:count]
+    """Draws up to count units in the order's sequence that this side has not tried and no other side holds. A count below one draws nothing."""
+    return [unit for unit in order if unit not in tried and unit not in held][: max(count, 0)]
 
 
 def _spent(passing: frozenset[str], target: int, order: Sequence[str], tried: Collection[str], held: Collection[str]) -> bool:

@@ -31,6 +31,7 @@ from ffrd.pipeline.run import (
     _chapters,
     _coherent,
     _Context,
+    _draw,
     _record,
     cmd_run,
     opaque_label,
@@ -6391,6 +6392,11 @@ def test_a_unit_whose_pick_fails_on_one_side_is_drawn_by_a_side_it_had_been_take
         "achieved": 1,
         "exhausted": False,
     }
+
+
+def test_a_side_whose_surviving_picks_pass_its_target_draws_nothing() -> None:
+    # A later round can revive an earlier failed pick, so a side's surviving picks can pass its target and its shortfall turn negative. Made-up unit ids. Not game text.
+    assert _draw(("made-up-unit-1", "made-up-unit-2", "made-up-unit-3"), set(), set(), -1) == []
 
 
 PAIR_INSERTABLE_SCENES = (Scene("made-up-scene-x-pair", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_X, EN_A2, 1))),)
