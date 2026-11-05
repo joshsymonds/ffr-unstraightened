@@ -239,7 +239,9 @@ a new draft, and other lines keep their keys. The redraft faces the gates its li
 normally faces, the line-pass gates and judges or the scene pass's gates and scene judge,
 then coherence and the arc judges. If no redraft passes, the line is gate failed with gate
 `redo`, and the earlier rewrite is never kept. A listed line that the run would not change
-is left as it is. Each outcome record carries `redo`, which is true for a listed line.
+is left as it is. A note of exactly `keep` keeps the line unchanged: a listed line the run
+would change is gate failed with gate `redo`, with no redraft and no model call. Each outcome
+record carries `redo`, which is true for a listed line.
 
 Third, after all scenes, the repeated lines are unified. Every changed line whose English
 text matches another changed line's takes the rewrite and the writer of the earliest of
@@ -363,9 +365,11 @@ denominator, rounded half up:
 - trans: `trans_share`, default 5, of all eligible speakers. The pool is the eligible speakers
   with a `trans-candidate` mark. Speakerless lines are never trans picks.
 
-Each refill round draws romance, world, nonbinary and then trans, and each side skips any unit
-another side has drawn. A side refills until its target is met or its pool runs out. A share of
-0 draws nothing. A side that ends short of its target is exhausted, and a pick counts only when
+Each refill round draws romance, world, nonbinary and then trans. A side draws only units it has
+not tried that no other side holds, either as a pick with a surviving change or as that round's
+draw. A unit whose pick failed stays with its side until another side draws it, so it can still
+pass on another side. A side refills until its target is met or it has no unit left to try. A
+share of 0 draws nothing. A side that ends short of its target is exhausted, and a pick counts only when
 a changed line survives every judge. At most two accepted trans picks use chosen-name. A
 further one is gate failed with gate `variety` and refilled.
 

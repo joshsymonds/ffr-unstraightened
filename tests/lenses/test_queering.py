@@ -50,7 +50,7 @@ INTENT: frozenset[str] = frozenset(
         "protect-plot",
     }
 )
-JUDGE: frozenset[str] = INTENT | {"meaning", "fixed", "no-invention", "keep-point"}
+JUDGE: frozenset[str] = INTENT | {"meaning", "fixed", "no-invention", "keep-point", "fits-the-moment"}
 BOUND_STAGES: tuple[Stage, ...] = ("screen", "intent", "judge")
 # The label table: which bracketed labels each stage's text must carry.
 BINDING: dict[Stage, frozenset[str]] = {"screen": SCREEN, "intent": INTENT, "judge": JUDGE}
@@ -272,7 +272,7 @@ DOC_SHAPE_AND_CAP_PHRASES: tuple[str, ...] = (
     "At most two accepted trans picks use the chosen-name shape, and a further one is refilled from the order.",
 )
 # The judge labels that the doc lists as bullets in its Judge rubric section.
-DOC_NEW_JUDGE_LABELS: tuple[str, ...] = ("fixed", "no-invention", "keep-point")
+DOC_NEW_JUDGE_LABELS: tuple[str, ...] = ("fixed", "no-invention", "keep-point", "fits-the-moment")
 
 DOC_SECTIONS: tuple[str, ...] = (
     "## Aims",
@@ -297,7 +297,8 @@ BUCKET_PHRASES: tuple[str, ...] = (
     "trans_share of all eligible characters",
     "the world pool is the eligible speakers outside the romance pool with an insertable mark",
     "the nonbinary pool is the eligible speakers outside the romance pool with an insertable mark",
-    "the trans pool is the eligible speakers with a trans-candidate mark, minus the other sides' picks",
+    "the trans pool is the eligible speakers with a trans-candidate mark",
+    "A unit whose pick failed on one side can be drawn by another side that has not tried it",
     "Speakerless lines are never trans picks",
     "a share of 100 targets the whole denominator, only the romance pool equals its denominator, and a share of 0 draws nothing",
     "refilled from the order until the target or the pool runs out",

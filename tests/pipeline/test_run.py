@@ -23,6 +23,7 @@ from ffrd.pipeline.accounts import Account
 from ffrd.pipeline.claude import Rejected, Unfinished
 from ffrd.pipeline.lens import Lens, ScenePattern, SceneSection, TriageQuestion
 from ffrd.pipeline.run import (
+    REDO_KEEP,
     Change,
     Outcome,
     _arc_judged,
@@ -30,6 +31,7 @@ from ffrd.pipeline.run import (
     _chapters,
     _coherent,
     _Context,
+    _draw,
     _record,
     cmd_run,
     opaque_label,
@@ -541,6 +543,8 @@ class FakeClaude:
         self.redrafts: dict[tuple[str, str], list[str] | Unfinished | Rejected] = {}
         # Answers for each pick's lines, whatever its bucket: keep, intent and drafts. A pick changes the first of its lines with a change answer. A line without an answer is kept. Not game text.
         self.picks: dict[tuple[str, str], dict[str, Any] | Unfinished | Rejected] = {}
+        # Answers for one bucket's picks, by bucket and line, that take the place of the line's answer in picks. Not game text.
+        self.bucket_picks: dict[tuple[str, str, str], dict[str, Any] | Unfinished | Rejected] = {}
         # Candidate marks by line, and the failure of any candidate call that names a line. Not game text.
         self.candidate_marks: dict[tuple[str, str], list[str]] = {}
         self.candidate_failures: dict[tuple[str, str], Unfinished | Rejected] = {}
@@ -671,8 +675,9 @@ class FakeClaude:
 
     def _pick(self, parts: Sequence[str], shaped: bool) -> dict[str, Any] | Unfinished | Rejected:
         # The pick changes the first of its lines with a change answer, and a failed answer for any of its lines fails the pick. Not game text.
+        bucket = _part(parts, "Bucket:\n")
         for namespace, key in _trans_refs(parts):
-            answer = self.picks.get((namespace, key), TRANS_KEEP)
+            answer = self.bucket_picks.get((bucket, namespace, key), self.picks.get((namespace, key), TRANS_KEEP))
             if isinstance(answer, Unfinished | Rejected):
                 return answer
             if not answer["keep"]:
@@ -1565,6 +1570,15 @@ def test_failed_redraft_is_gate_failed_under_redo_and_ships_no_first_rewrite(tmp
     ]
     assert any(part == "The previous candidates failed the plot gate. Write candidates that pass it." for part in retries[-1])
     assert _note_drafts(claude) == [([(NS_A, "1")], REDO_NOTE), ([(NS_A, "1")], REDO_NOTE)]
+
+
+def test_keep_note_gate_fails_the_line_under_redo_with_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_KEEP}"\n')
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (ALPHA,), "gate_failed", "redo", None, redo=True)
+    assert (NS_A, "1") not in _dialog_texts(tmp_path)
+    assert _note_drafts(claude) == []
 
 
 def test_unfinished_redraft_is_unfinished_and_ships_no_first_rewrite(tmp_path: Path) -> None:
@@ -4193,6 +4207,18 @@ def test_scene_pass_redraft_failing_its_gates_or_the_scene_judge_is_gate_failed_
     assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
 
 
+def test_keep_note_on_a_planned_line_gate_fails_it_under_redo_with_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"2" = "{REDO_KEEP}"\n')
+    claude = _scene_claude()
+    claude.scene_plan = _plan_answer((NS_A, "2", False), (NS_A, "3", False))
+    outcomes = _scene_run(tmp_path, claude)
+    plan = scene_pass.plan_id(TABLE_SCENE.key, [(NS_A, "2"), (NS_A, "3")])
+    assert _note_drafts(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "2")) == Outcome(NS_A, "2", 1, None, SCENE_REASONS, "gate_failed", "redo", None, None, None, True)
+    assert _outcome_of(outcomes, (NS_A, "3")) == Outcome(NS_A, "3", 1, None, SCENE_REASONS, "changed", None, "opus", None, plan)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1"), (NS_A, "3")}
+
+
 def test_listed_planned_line_whose_normal_gating_fails_makes_no_note_call(tmp_path: Path) -> None:
     _redo_file(tmp_path, f'[{NS_A}]\n"3" = "{SCENE_REDO}"\n')
     claude = _scene_claude()
@@ -4948,6 +4974,17 @@ def test_queering_redo_listed_selected_line_is_redrafted_with_its_note(tmp_path:
         NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "changed", None, "opus", redo=True, bucket="queer"
     )
     assert _dialog_records(tmp_path)[(NS_A, "1")]["text"] == REDRAFT_A1
+
+
+def test_queering_keep_note_gate_fails_the_selected_line_under_redo_with_no_note_call(tmp_path: Path) -> None:
+    _redo_file(tmp_path, f'[{NS_A}]\n"1" = "{REDO_KEEP}"\n')
+    claude = _phase_claude()
+    outcomes = _phase(tmp_path, claude)
+    assert _note_drafts(claude) == []
+    assert _outcome_of(outcomes, (NS_A, "1")) == Outcome(
+        NS_A, "1", 1, PHASE_SPEAKER, (ROMANCE_ID,), "gate_failed", "redo", None, redo=True, bucket="queer"
+    )
+    assert (NS_A, "1") not in _dialog_records(tmp_path)
 
 
 def test_queering_intent_keep_stays_unchanged_and_keeps_its_bucket(tmp_path: Path) -> None:
@@ -6322,6 +6359,44 @@ def test_the_four_sides_pick_disjoint_speakers_and_each_side_takes_what_the_othe
         "achieved": 1,
         "exhausted": True,
     }
+
+
+def test_a_unit_whose_pick_fails_on_one_side_is_drawn_by_a_side_it_had_been_taken_from(tmp_path: Path) -> None:
+    # Speaker s alone is insertable and trans-candidate. Its world pick keeps the line, and its trans pick changes it. Not game text.
+    claude = FakeClaude()
+    claude.bible = {1: EMPTY_BIBLE}
+    claude.candidate_marks = {(NS_A, "4"): [INSERTABLE, TRANS_CANDIDATE]}
+    claude.picks = {(NS_A, "4"): _trans_change(PICK_INTENT, ["Made-up four-side pick of 4. Not game text."])}
+    claude.bucket_picks = {("world", NS_A, "4"): TRANS_KEEP}
+    outcomes = _run(
+        tmp_path,
+        claude,
+        [],
+        jev=None,
+        renderer=FakeRenderer({}),
+        scenes=FOUR_SIDE_SCENES,
+        lens=replace(QUEER_LENS, romance_share=0, world_share=17, nonbinary_share=0, trans_share=17),
+    )
+    by_speaker = {outcome.speaker: outcome for outcome in outcomes}
+    assert (by_speaker["made-up-speaker-s"].outcome, by_speaker["made-up-speaker-s"].bucket) == ("changed", "trans")
+    assert _pick_refs(claude, "world") == [(NS_A, "4")]
+    assert _pick_refs(claude, "trans") == [(NS_A, "4")]
+    assert _side(tmp_path, "world")["rounds"] == [{"tried": 1, "passed": 0}]
+    assert _side(tmp_path, "world")["exhausted"] is True
+    assert _side(tmp_path, "trans") == {
+        "share": 17,
+        "pool": 1,
+        "denominator": 6,
+        "target": 1,
+        "rounds": [{"tried": 1, "passed": 1}],
+        "achieved": 1,
+        "exhausted": False,
+    }
+
+
+def test_a_side_whose_surviving_picks_pass_its_target_draws_nothing() -> None:
+    # A later round can revive an earlier failed pick, so a side's surviving picks can pass its target and its shortfall turn negative. Made-up unit ids. Not game text.
+    assert _draw(("made-up-unit-1", "made-up-unit-2", "made-up-unit-3"), set(), set(), -1) == []
 
 
 PAIR_INSERTABLE_SCENES = (Scene("made-up-scene-x-pair", (_line(NS_A, "1", REFILL_X, EN_A1, 1), _line(NS_A, "2", REFILL_X, EN_A2, 1))),)
