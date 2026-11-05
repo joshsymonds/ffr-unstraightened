@@ -1,14 +1,10 @@
-chapter 1: 6 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 1769 untouched
+chapter 1: 5 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1773 untouched
   character 2: 1
   character 9: 1
   character 12: 1
   character 20: 1
-  character 21: 1
   character 37: 1
-  gate classifier: 1
-  gate fixed: 1
   gate minimal_change: 1
-  gate redo: 1
   scene eligible: 0
   scene plans: 0
   scene planned lines: 0 (required 0)
@@ -16,17 +12,13 @@ chapter 1: 6 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 1769 untouch
   scene replanned: 0
   scene reverted lines: 0
   scene changed per scene: max 0, median 0
-total: 6 changed, 0 kept for plot, 4 gate failed, 0 unfinished, 1769 untouched
+total: 5 changed, 0 kept for plot, 1 gate failed, 0 unfinished, 1773 untouched
   character 2: 1
   character 9: 1
   character 12: 1
   character 20: 1
-  character 21: 1
   character 37: 1
-  gate classifier: 1
-  gate fixed: 1
   gate minimal_change: 1
-  gate redo: 1
   scene eligible: 0
   scene plans: 0
   scene planned lines: 0 (required 0)
