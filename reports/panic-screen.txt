@@ -1,0 +1,66 @@
+chapter 1: 119 scenes, 0 unfinished, 1779 lines, 9 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 119
+  scene flagged v1-queer-coded-menace: 0
+chapter 2: 37 scenes, 0 unfinished, 727 lines, 1 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 37
+  scene flagged v1-queer-coded-menace: 0
+chapter 3: 89 scenes, 0 unfinished, 1214 lines, 4 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 89
+  scene flagged v1-queer-coded-menace: 0
+chapter 4: 57 scenes, 0 unfinished, 1126 lines, 12 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 57
+  scene flagged v1-queer-coded-menace: 0
+chapter 5: 74 scenes, 0 unfinished, 1183 lines, 7 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 74
+  scene flagged v1-queer-coded-menace: 0
+chapter 6: 42 scenes, 0 unfinished, 860 lines, 0 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 42
+  scene flagged v1-queer-coded-menace: 0
+chapter 7: 25 scenes, 0 unfinished, 531 lines, 1 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 25
+  scene flagged v1-queer-coded-menace: 0
+chapter 8: 30 scenes, 0 unfinished, 935 lines, 0 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 30
+  scene flagged v1-queer-coded-menace: 0
+chapter 9: 20 scenes, 0 unfinished, 269 lines, 0 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 20
+  scene flagged v1-queer-coded-menace: 0
+unattributed: 329 scenes, 0 unfinished, 7346 lines, 42 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 326
+  scene flagged v1-queer-coded-menace: 0
+total: 822 scenes, 0 unfinished, 15970 lines, 76 left out, 0 flagged
+  reason p1-panic: 0
+  reason p2-mistaken-identity: 0
+  reason p3-crossdressing-gag: 0
+  scene eligible: 819
+  scene flagged v1-queer-coded-menace: 0
