@@ -1546,3 +1546,91 @@ def test_invalid_usage_line_fails_naming_file_line_and_field_but_not_the_value(r
     assert f"{path}:2" in message
     assert fragment in message
     assert "SENTINEL" not in message
+
+
+# Made-up screened scenes. Not game text.
+SCREEN_SCENES = (
+    report.ScreenedScene(
+        chapter=1,
+        finished=True,
+        lines=3,
+        left_out=1,
+        flagged=((FIRST,), (FIRST, SECOND)),
+        eligible=True,
+        patterns=(SCENE_PATTERN,),
+    ),
+    report.ScreenedScene(chapter=1, finished=False, lines=2, left_out=0, flagged=(), eligible=False, patterns=()),
+    report.ScreenedScene(
+        chapter=None,
+        finished=True,
+        lines=4,
+        left_out=2,
+        flagged=((SECOND,),),
+        eligible=True,
+        patterns=(OTHER_PATTERN,),
+    ),
+)
+
+
+def test_render_screen_with_no_scenes_prints_zero_total_and_zero_reasons() -> None:
+    assert report.render_screen([], TRIAGE_IDS, ()) == [
+        "total: 0 scenes, 0 unfinished, 0 lines, 0 left out, 0 flagged",
+        f"  reason {FIRST}: 0",
+        f"  reason {SECOND}: 0",
+    ]
+
+
+def test_render_screen_counts_each_block_and_orders_chapters_then_unattributed_then_total() -> None:
+    lines = report.render_screen(SCREEN_SCENES, TRIAGE_IDS, (SCENE_PATTERN, OTHER_PATTERN))
+    assert lines == [
+        "chapter 1: 2 scenes, 1 unfinished, 5 lines, 1 left out, 2 flagged",
+        f"  reason {FIRST}: 2",
+        f"  reason {SECOND}: 1",
+        "  scene eligible: 1",
+        f"  scene flagged {SCENE_PATTERN}: 1",
+        f"  scene flagged {OTHER_PATTERN}: 0",
+        "unattributed: 1 scenes, 0 unfinished, 4 lines, 2 left out, 1 flagged",
+        f"  reason {FIRST}: 0",
+        f"  reason {SECOND}: 1",
+        "  scene eligible: 1",
+        f"  scene flagged {SCENE_PATTERN}: 0",
+        f"  scene flagged {OTHER_PATTERN}: 1",
+        "total: 3 scenes, 1 unfinished, 9 lines, 3 left out, 3 flagged",
+        f"  reason {FIRST}: 2",
+        f"  reason {SECOND}: 2",
+        "  scene eligible: 2",
+        f"  scene flagged {SCENE_PATTERN}: 1",
+        f"  scene flagged {OTHER_PATTERN}: 1",
+    ]
+
+
+def test_render_screen_without_scene_ids_has_no_scene_lines() -> None:
+    lines = report.render_screen(SCREEN_SCENES, TRIAGE_IDS, ())
+    assert not any(line.startswith("  scene ") for line in lines)
+    assert "total: 3 scenes, 1 unfinished, 9 lines, 3 left out, 3 flagged" in lines
+
+
+def test_render_screen_without_unattributed_scenes_has_no_unattributed_block() -> None:
+    chaptered = [s for s in SCREEN_SCENES if s.chapter is not None]
+    lines = report.render_screen(chaptered, TRIAGE_IDS, ())
+    assert [line for line in lines if not line.startswith("  ")] == [
+        "chapter 1: 2 scenes, 1 unfinished, 5 lines, 1 left out, 2 flagged",
+        "total: 2 scenes, 1 unfinished, 5 lines, 1 left out, 2 flagged",
+    ]
+
+
+def test_render_screen_reason_counts_one_per_flagged_line_carrying_it() -> None:
+    # A line flagged with both reasons counts once under each; a repeated reason within one line counts once.
+    scene = report.ScreenedScene(
+        chapter=2,
+        finished=True,
+        lines=2,
+        left_out=0,
+        flagged=((FIRST, SECOND), (FIRST, FIRST)),
+        eligible=False,
+        patterns=(),
+    )
+    lines = report.render_screen([scene], TRIAGE_IDS, ())
+    assert f"  reason {FIRST}: 2" in lines
+    assert f"  reason {SECOND}: 1" in lines
+    assert "chapter 2: 1 scenes, 0 unfinished, 2 lines, 0 left out, 2 flagged" in lines

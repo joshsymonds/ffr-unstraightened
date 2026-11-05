@@ -645,6 +645,7 @@ def test_intent_schema_keep_reason_is_exactly_the_listed_reasons_in_order() -> N
             "oaths-outside-romance",
             "protection",
             "plot",
+            "condemned-in-scene",
             "none",
         ],
     }
@@ -677,6 +678,14 @@ def test_intent_returns_keep_true_with_its_keep_reason_when_the_rule_leaves_the_
     result = intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
 
     assert result == Intent(text="Made-up kept intent. Not game text.", keep=True, keep_reason="earned")
+
+
+def test_intent_returns_keep_true_with_condemned_in_scene_when_the_rule_leaves_the_line_unchanged(tmp_path: Path) -> None:
+    ask = Fake({"intent": "Made-up kept intent. Not game text.", "keep": True, "keep_reason": "condemned-in-scene"})
+
+    result = intent(Store(tmp_path), LENS, SCENE, LINE_ONE, REASONS, [CALLBACK], CONTEXT, ask)
+
+    assert result == Intent(text="Made-up kept intent. Not game text.", keep=True, keep_reason="condemned-in-scene")
 
 
 def test_intent_store_key_carries_its_schema_version(tmp_path: Path) -> None:

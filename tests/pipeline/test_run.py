@@ -782,6 +782,7 @@ def _run(
     through: int | None = None,
     lens: Lens = LENS_OBJ,
     run_id: str = RUN,
+    screen_only: bool = False,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
@@ -796,6 +797,7 @@ def _run(
         scene_table=scene_table,
         through=through,
         out=printed.append,
+        screen_only=screen_only,
     )
 
 
@@ -1018,6 +1020,93 @@ def test_a_line_kept_for_plot_is_kept_for_plot_with_its_reason_and_never_drafted
     assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
     judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
     assert (NS_A, "1") not in judged
+
+
+# A made-up lens whose ledger a run leaves out, and the lines that ledger holds. Not game text.
+LEFT_OUT = "made-up-leave-out-lens"
+
+
+def _left_out_ledger(root: Path, name: str, lines: Sequence[tuple[str, str, str]]) -> None:
+    # The named lens's ledger entries for the lines it changed, each (namespace, key, english), as its run appends them. Not game text.
+    entries = [
+        ledger.Entry(
+            run=RUN,
+            lens=name,
+            base=None,
+            namespace=namespace,
+            key=key,
+            vanilla_hash=vanilla_hash(english),
+            base_hash=None,
+            text_hash=vanilla_hash(TEXT_ONE),
+            reasons=(ALPHA,),
+            writer="opus",
+            plan=None,
+        )
+        for namespace, key, english in lines
+    ]
+    ledger.append(root, name, entries)
+
+
+def _screen_results(work: Path) -> dict[str, dict[str, Any]]:
+    """Each stored screen and recheck result of the run, by result key."""
+    results: dict[str, dict[str, Any]] = {}
+    for path in (work / "results").glob("*.json"):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record["stage"] in {"screen", "rescreen"}:
+            results[path.stem] = record
+    return results
+
+
+def test_a_line_in_a_left_out_ledger_is_untouched_with_no_reasons_and_no_prompt_targets_it(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "1", EN_A1)])
+    claude = _claude()
+    outcomes = _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, leave_out=(LEFT_OUT,)))
+    assert outcomes[0] == Outcome(NS_A, "1", 1, "made-up-speaker-a", (), "untouched", None, None)
+    assert outcomes[1:] == EXPECTED_OUTCOMES[1:]
+    assert not any((NS_A, "1") in _draft_refs(parts) for _, parts, schema in claude.calls if schema is DRAFT_SCHEMA)
+    assert (NS_A, "1") not in [_target(parts) for _, parts, schema in claude.calls if schema is INTENT_SCHEMA]
+    judged = [ref for ref, _ in _judged(claude, JUDGE_SCHEMA) + _judged(claude, CROSS_SCHEMA)]
+    assert (NS_A, "1") not in judged
+
+
+def test_leave_out_makes_the_same_screen_and_recheck_calls_and_stores_the_same_results(tmp_path: Path) -> None:
+    def run_with(root: Path, lens: Lens) -> tuple[FakeClaude, FakeJev, list[Outcome]]:
+        claude = _claude()
+        # The left-out line's screen reason is BETA, so BETA is never rechecked, and ALPHA is rechecked in every scene. Not game text.
+        claude.flags = {(NS_A, "1"): [BETA]}
+        claude.rescreen_flags = {(NS_B, "2"): [ALPHA]}
+        claude.drafts[(NS_B, "2")] = [OPUS_B2]
+        jev = FakeJev(JEV_HIGH)
+        return claude, jev, _run(root, claude, [], jev=jev, lens=lens)
+
+    _left_out_ledger(tmp_path / "with" / "repo", LEFT_OUT, [(NS_A, "1", EN_A1)])
+    with_claude, with_jev, with_outcomes = run_with(tmp_path / "with", replace(LENS_OBJ, leave_out=(LEFT_OUT,)))
+    without_claude, without_jev, without_outcomes = run_with(tmp_path / "without", LENS_OBJ)
+
+    # Scenes are screened concurrently, so the calls are compared as multisets, not in the order they were made.
+    def screens(claude: FakeClaude) -> Counter[tuple[str, tuple[str, ...]]]:
+        return Counter(
+            (model, tuple(parts)) for model, parts, schema in claude.calls if schema is SCREEN_SCHEMA or schema is RESCREEN_SCHEMA
+        )
+
+    assert screens(with_claude) == screens(without_claude)
+    assert any(schema is RESCREEN_SCHEMA for _, _, schema in with_claude.calls)
+    assert Counter((scene, tuple(ids)) for scene, ids in with_jev.calls) == Counter((scene, tuple(ids)) for scene, ids in without_jev.calls)
+    assert _screen_results(tmp_path / "with" / "work" / LENS) == _screen_results(tmp_path / "without" / "work" / LENS)
+    assert _screen_results(tmp_path / "with" / "work" / LENS)
+    assert with_outcomes[1:] == without_outcomes[1:]
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["missing", "empty"])
+def test_a_left_out_ledger_that_is_missing_or_empty_fails_before_any_claude_call(tmp_path: Path, empty: bool) -> None:
+    if empty:
+        path = ledger.path(tmp_path / "repo", LEFT_OUT)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+    claude = _claude()
+    with pytest.raises(Fail, match=re.escape(f"ledger/{LEFT_OUT}.jsonl: no entries to leave out")):
+        _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), lens=replace(LENS_OBJ, leave_out=(LEFT_OUT,)))
+    assert claude.calls == []
 
 
 @pytest.mark.parametrize(
@@ -3822,6 +3911,26 @@ def test_plan_gets_the_line_pass_flagged_lines_as_final_and_no_excluded_lines(tm
     [parts] = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
     assert json.loads(_part(parts, "Final lines:\n")) == [{"namespace": NS_A, "key": "1"}]
     assert json.loads(_part(parts, "Excluded lines:\n")) == []
+
+
+def test_plan_gets_the_left_out_lines_of_its_scene_as_final_lines_beside_the_flagged_ones(tmp_path: Path) -> None:
+    # Line 4 is in the scene and the left-out ledger, and the screen does not flag it. The other ledger line is in no scene of this run. Not game text.
+    claude = _scene_claude()
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "4", EN_A4), (NS_B, "2", EN_B2)])
+    _scene_run(tmp_path, claude, lens=replace(SCENE_LENS, leave_out=(LEFT_OUT,)))
+    [parts] = _scene_prompts(claude, scene_pass.PLAN_SCHEMA)
+    assert json.loads(_part(parts, "Final lines:\n")) == [{"namespace": NS_A, "key": "1"}, {"namespace": NS_A, "key": "4"}]
+
+
+def test_a_left_out_line_the_scene_plan_names_is_rejected_and_never_changed(tmp_path: Path) -> None:
+    claude = _scene_claude()
+    claude.drafts[(NS_A, "4")] = [OPUS_S4]
+    claude.scene_plan = _plan_answer((NS_A, "2", True), (NS_A, "4", False))
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "4", EN_A4)])
+    outcomes = _scene_run(tmp_path, claude, lens=replace(SCENE_LENS, leave_out=(LEFT_OUT,)))
+    assert _outcome_of(outcomes, (NS_A, "1")).outcome == "changed"
+    assert _outcome_of(outcomes, (NS_A, "4")) == Outcome(NS_A, "4", 1, None, (), "unfinished", None, None)
+    assert _dialog_entries(tmp_path) == {(NS_A, "1")}
 
 
 def test_planned_lines_never_reach_the_reason_judge(tmp_path: Path) -> None:
@@ -6680,3 +6789,199 @@ def test_bucket_is_written_only_for_a_marked_outcome(tmp_path: Path) -> None:
     assert list(marked_record)[-2:] == ["redo", "bucket"]
     assert "bucket" not in unmarked_record
     assert [record.outcome for record in report._records(path, TRIAGE)] == ["untouched", "changed"]
+
+
+# Made-up screen-only run: a table scene of four lines with one left out, a chapter 2 scene and an unattributed scene. Not game text.
+SCREEN_ONLY_LENS = replace(SCENE_LENS, leave_out=(LEFT_OUT,))
+SCREEN_ONLY_SCENES = (TABLE_SCENE, SCENE_B, SCENE_C)
+SCREEN_ONLY_STAGES = {"bible", "bible_setups", "screen", "triage", "rescreen", "scene_screen"}
+SCREEN_ONLY_SCHEMAS = (bible.SCHEMA, bible.SETUP_SCHEMA, SCREEN_SCHEMA, RESCREEN_SCHEMA, scene_pass.SCREEN_SCHEMA)
+SCREEN_ONLY_REPORT = """\
+chapter 1: 1 scenes, 0 unfinished, 4 lines, 1 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+chapter 2: 1 scenes, 0 unfinished, 2 lines, 0 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 0
+  scene flagged made-up-pattern-one: 0
+  scene flagged made-up-pattern-two: 0
+unattributed: 1 scenes, 0 unfinished, 1 lines, 0 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 0
+  scene flagged made-up-pattern-one: 0
+  scene flagged made-up-pattern-two: 0
+total: 3 scenes, 0 unfinished, 7 lines, 1 left out, 3 flagged
+  reason made-up-first-id: 3
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+"""
+SCREEN_ONLY_THROUGH_REPORT = """\
+chapter 1: 1 scenes, 0 unfinished, 4 lines, 1 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+total: 1 scenes, 0 unfinished, 4 lines, 1 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+"""
+
+
+def _screen_only_claude() -> FakeClaude:
+    """Flags line 1 and the left-out line 2 of the table scene, line 1 of scene b and of the unattributed scene. The scene pass hits one pattern on the table scene. Not game text."""
+    claude = FakeClaude()
+    claude.bible = {}
+    claude.flags = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [ALPHA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_B, "1"): [OPUS_B1], (NS_C, "1"): [OPUS_C1]}
+    claude.scene_screen = {"patterns": [{"id": PATTERN_ONE, "carriers": [{"namespace": NS_A, "key": "1"}]}]}
+    return claude
+
+
+def _screen_report(tmp_path: Path) -> str:
+    return (tmp_path / "repo" / "reports" / f"{LENS}-screen.txt").read_text(encoding="utf-8")
+
+
+def test_screen_only_report_counts_the_flags_left_out_lines_and_scene_hits(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    _run(tmp_path, _screen_only_claude(), [], jev=FakeJev(JEV_HIGH), scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, screen_only=True)
+    assert _screen_report(tmp_path) == SCREEN_ONLY_REPORT
+
+
+def test_screen_only_through_a_chapter_reports_only_the_scenes_and_lines_through_it(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    _run(
+        tmp_path,
+        _screen_only_claude(),
+        [],
+        jev=FakeJev(JEV_HIGH),
+        scenes=SCREEN_ONLY_SCENES,
+        lens=SCREEN_ONLY_LENS,
+        through=1,
+        screen_only=True,
+    )
+    assert _screen_report(tmp_path) == SCREEN_ONLY_THROUGH_REPORT
+
+
+def test_screen_only_stores_only_screen_results_and_writes_no_other_record(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, screen_only=True)
+    stored = _stored_stages(tmp_path)
+    assert {"screen", "triage", "rescreen", "scene_screen"} <= stored <= SCREEN_ONLY_STAGES
+    assert all(any(schema is allowed for allowed in SCREEN_ONLY_SCHEMAS) for _, _, schema in claude.calls)
+    work = tmp_path / "work" / LENS
+    for name in (report.OUTCOMES, report.ARCS, report.RECALL, scene_record.SCENES):
+        assert not (work / name).exists()
+    assert not (tmp_path / "repo" / "dialog").exists()
+    assert not ledger.path(tmp_path / "repo", LENS).exists()
+    assert [path.name for path in (tmp_path / "repo" / "reports").iterdir()] == [f"{LENS}-screen.txt"]
+
+
+def test_full_run_after_screen_only_makes_no_screen_rescreen_triage_or_scene_screen_call(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    jev = FakeJev(JEV_HIGH)
+    _run(tmp_path, claude, [], jev=jev, scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, screen_only=True)
+    claude.calls.clear()
+    triaged = len(jev.calls)
+    _run(tmp_path, claude, [], jev=jev, scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, run_id=OTHER_RUN)
+    assert _scene_prompts(claude, SCREEN_SCHEMA) == []
+    assert _scene_prompts(claude, RESCREEN_SCHEMA) == []
+    assert _scene_prompts(claude, scene_pass.SCREEN_SCHEMA) == []
+    assert len(jev.calls) == triaged
+    assert _scene_prompts(claude, DRAFT_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    ("failure", "summary", "screen_calls"),
+    [
+        ("line screen", "chapter 1: 1 scenes, 1 unfinished, 4 lines, 1 left out, 0 flagged", 0),
+        ("recheck", "chapter 1: 1 scenes, 1 unfinished, 4 lines, 1 left out, 0 flagged", 0),
+        ("scene screen", "chapter 1: 1 scenes, 1 unfinished, 4 lines, 1 left out, 1 flagged", 1),
+    ],
+)
+def test_unfinished_call_counts_its_scene_unfinished_and_makes_a_scene_pattern_screen_only_when_the_line_screen_finished(
+    tmp_path: Path, failure: str, summary: str, screen_calls: int
+) -> None:
+    claude = _screen_only_claude()
+    if failure == "line screen":
+        claude.screen_failure_refs[(NS_A, "1")] = Unfinished("Made-up screen failure. Not game text.")
+    elif failure == "recheck":
+        claude.rescreen_failures[BETA] = Unfinished("Made-up recheck failure. Not game text.")
+    else:
+        claude.scene_screen = Unfinished("Made-up scene screen failure. Not game text.")
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(TABLE_SCENE,), lens=SCREEN_ONLY_LENS, screen_only=True)
+    assert _screen_report(tmp_path).splitlines()[0] == summary
+    assert len(_scene_prompts(claude, scene_pass.SCREEN_SCHEMA)) == screen_calls
+
+
+def test_screen_only_on_a_selection_lens_fails_before_any_claude_call(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    with pytest.raises(Fail, match="--screen-only"):
+        _run(
+            tmp_path,
+            claude,
+            [],
+            jev=FakeJev(JEV_HIGH),
+            scenes=SCREEN_ONLY_SCENES,
+            lens=replace(SCREEN_ONLY_LENS, selection="queering"),
+            screen_only=True,
+        )
+    assert claude.batches == 0
+    assert claude.calls == []
+    assert not (tmp_path / "work").exists()
+    assert not (tmp_path / "repo" / "reports").exists()
+
+
+def test_screen_only_screens_the_base_text_of_a_lens_with_a_base(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE}, scenes=SCREEN_ONLY_SCENES)
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    _run(
+        tmp_path,
+        claude,
+        [],
+        jev=FakeJev(JEV_HIGH),
+        scenes=SCREEN_ONLY_SCENES,
+        lens=replace(SCREEN_ONLY_LENS, base=BASE),
+        screen_only=True,
+    )
+    prompts = [part for _, parts, _ in claude.calls for part in parts]
+    assert any(BASE_A1 in text for text in prompts)
+    assert not any(EN_A1 in text for text in prompts)
+    assert (tmp_path / "repo" / "reports" / f"{LENS}-screen.txt").is_file()
+
+
+def test_register_declares_screen_only_as_a_flag_that_is_off_by_default() -> None:
+    assert _parse(["run", "--lens", LENS]).screen_only is False
+    assert _parse(["run", "--lens", LENS, "--screen-only"]).screen_only is True
+
+
+def test_run_command_with_screen_only_prints_scene_counts_and_writes_the_screen_report_alone(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, _claude(), FakeJev(JEV_HIGH))
+    args = _parse(["run", "--lens", LENS, "--screen-only"])
+
+    args.fn(args)
+
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == len(SCENES)
+    assert all(line.startswith("scene ") for line in printed)
+    assert (lens_repo / "reports" / f"{LENS}-screen.txt").is_file()
+    assert not (lens_repo / "work" / LENS / report.OUTCOMES).exists()
