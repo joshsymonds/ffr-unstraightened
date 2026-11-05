@@ -5,25 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # ffr-unstraightened
 
-A text-only dialogue mod for FINAL FANTASY RESONANCE (Steam app 3259780, Unreal Engine).
-It changes the game's English text. The default pak also carries an
-`FFRS/Config/UserGame.ini` that adds its own localization folder. The `ffrd` command
-line tool pulls the game's text, checks your edits against it, and packs them into
-mod files the game loads.
+I made a dialogue mod for FINAL FANTASY RESONANCE that makes the world a little less
+straight, and this is the tooling I wrote to build it. It only affects the English text of
+the game -- though the default pak also includes an `FFRS/Config/UserGame.ini` that adds
+its own localization folder. The `ffrd` command line tool extracts the game's text,
+compares it to your changes, and packs them into mod files that the game can load.
 
 ## Why it exists
 
-The game's text lives in `FFRS/Content/Localization/Game/<lang>/Game.locres` inside
-the game's paks. Editing a line by hand breaks silently when the game changes that
-line. Each edit here is keyed by namespace and key, and stores a hash of the line it
-replaces. A build fails when that line changes in the game, so an update never
-reverts an edit without warning.
+The game's text is stored in `FFRS/Content/Localization/Game/<lang>/Game.locres` in the
+game's paks. If you manually edit a line there, it's very easy to get out of sync with the
+game itself -- the game will change the line and your edit will silently fail. To prevent
+this, every edit here is keyed by namespace and key, and we store a hash of the line we're
+replacing. If the game changes that line, the build will fail.
 
 ## How it fits together
 
-The colours show where each step runs. Yellow boxes are commands in this
-repository. Blue is your `dialog/` edits. Grey is the game's files. Green is local
-data that git ignores.
+The colors indicate what's being run at each step: yellow boxes are commands in this
+repository, blue is your changes to `dialog/`, grey is the game files, and green is local
+data that git doesn't track.
 
 ```mermaid
 flowchart LR
@@ -69,7 +69,7 @@ game. `ffrd leak-check` checks the git history for game text. `ffrd scenes` writ
 
 ## Install
 
-You need Nix with devenv, and the game installed through Steam.
+You'll need Nix with devenv, and the game installed through Steam.
 
 Run `direnv allow` to load the devenv environment through `.envrc`, or run `devenv shell`.
 devenv provides repak with Epic's Oodle runtime, the .NET 10 SDK, Python with pylocres, ruff,
@@ -78,7 +78,7 @@ repository root.
 
 ## Use
 
-Set the game's Text Language to English before you play.
+Make sure to set the Text Language to English before you start playing.
 
 | Command | What it does |
 | --- | --- |
@@ -134,7 +134,7 @@ are copies of the game's empty `global` container, which the loader requires.
 Namespaces that name no chapter are never shown. A namespace names a chapter when it
 has `ST_C<n>_` at the start or a later `C<n>` underscore segment.
 
-To recover a Steam Deck install that breaks the game, run `ffrd uninstall --deck`.
+To fix a Steam Deck install that breaks the game, use `ffrd uninstall --deck`.
 
 ### Rewrite pipeline
 
@@ -154,7 +154,7 @@ The `unstraightening` lens is `lenses/unstraightening.toml`. Its rules, refineme
 protections and precedence are recorded in
 [docs/lenses/unstraightening.md](docs/lenses/unstraightening.md).
 
-`ffrd run` works in three stages.
+`ffrd run` has three phases.
 
 First, for a lens without a `base`, Opus writes a story bible for each chapter, in script order. A bible lists the
 characters with their gender and notes, the facts, the callbacks, and the arcs. Each arc
@@ -213,7 +213,8 @@ through the placeholder, tag, length and classifier gates, but not the per-line 
 An optional line that fails is dropped. This is the carrier gate. After the gates above,
 a candidate that still contains the words the plan quoted for its line, ignoring case,
 is dropped, since it has not changed the pattern. The candidate nearest the English line
-among the rest wins. A line left with no candidate fails the `scene` gate. A required line that fails sends the scene back
+among the rest wins. A line left with no candidate fails the `scene` gate. A required line
+that fails sends the scene back
 for one new plan without that line; if that plan also loses a required line, the scene
 stays vanilla. Opus then judges the plan as a whole against the lens's scene rubric, in
 the same two-pass way as the coherence check, reading the scene with the line-pass
@@ -252,7 +253,8 @@ its lines in story order, with the rewrites applied. The arcs are judged at the 
 check works the same way. Opus names the lines it would revert. If it finds a problem, a
 recheck sees those proposals and names only the ones that must revert. A line reverts
 only when both passes name it. The arc judge reads the line-pass rewrites, plus any
-scene-pass rewrite copied onto an identical line-pass line when repeated lines are unified. Then a second arc judge reads each arc that holds a surviving
+scene-pass rewrite copied onto an identical line-pass line when repeated lines are
+unified. Then a second arc judge reads each arc that holds a surviving
 scene-pass rewrite, with the line-pass rewrites that survived, against both the judge
 rubric and the lens's scene rubric, the scene rubric winning for scene-pass lines. It
 may revert only scene-pass lines, and each revert takes the whole plan.
@@ -302,7 +304,8 @@ not finish counts as unfinished, and its line flags still count. Progress prints
 position, opaque label and counts.
 
 It writes `reports/<name>-screen.txt`, which holds one block per chapter, then `unattributed`
-when a scene has no chapter, then `total`. Each block counts the scenes, the unfinished scenes, the lines, the lines left
+when a scene has no chapter, then `total`. Each block counts the scenes, the unfinished
+scenes, the lines, the lines left
 out and the flagged lines. It also counts the flagged lines per triage reason, and for a lens
 with a `[scene]` section it counts the eligible scenes and the scenes hit per scene pattern.
 The file holds counts and ids only, never line text.
@@ -598,9 +601,9 @@ differs from `vanilla/BUILDID`.
 mappings. It saves them to `vanilla/Mappings.usmap`, which git ignores. Re-run it after
 each game update.
 
-Each launch runs `steam -applaunch 3259780 -RenderOffscreen` on the probe host.
-`-RenderOffscreen` keeps the game ticking while its window is unfocused. A launch that
-stalls at start is killed and relaunched, up to 4 launches in all.
+Each launch does `steam -applaunch 3259780 -RenderOffscreen` on the probe host.
+`-RenderOffscreen` allows the game to continue running even if it's not the active window.
+If a launch doesn't start properly, it's killed and restarted, up to 4 launches in all.
 
 The latest probe runs found the target, full and ue4ss shapes honoured, and the partial
 shape not honoured. A plugin localization target, which is not a build shape, was not
@@ -671,9 +674,9 @@ runs it, since it pushes to `origin`.
 
 ### Voice models
 
-The `ffrd voice` commands build the training data for the voice models, train them,
-and measure them. The GPU work runs on the GPU host, not on your machine. The commands
-are listed in [Use](#use).
+The `ffrd voice` commands are used to create the training data for the voice models, train
+them, and evaluate them. The GPU work is done on the GPU host, not your local machine. See
+the commands in [Use](#use).
 
 The GPU host needs:
 
@@ -682,8 +685,8 @@ The GPU host needs:
 - A scratch directory at `FFR_VOICE_SCRATCH`. The commands sync `tools/voice/` into it.
   The host's devenv state stays there and is never synced.
 
-The GPU work runs in the `cuda` profile of `tools/voice/devenv.nix`. The default profile
-is CPU. To run the voice tool tests:
+The GPU work is done in the `cuda` profile of `tools/voice/devenv.nix`. The default
+profile is CPU. To run the voice tool tests:
 
 ```sh
 cd tools/voice && devenv shell -- env -C ../.. pytest tools/voice
@@ -732,14 +735,14 @@ or published. Anyone with the game can retrain the models from this repository's
 - `just check-provenance` fails when the history names withheld private terms. It
   prints locations and digest prefixes, never the matched text.
 
-Tests use synthetic fixtures only. See `tests/conftest.py`. Coding agents follow
-[AGENTS.md](AGENTS.md).
+All tests use synthetic fixtures only. Check out `tests/conftest.py`. Coding agents should
+follow [AGENTS.md](AGENTS.md).
 
 `vanilla/`, `work/` and `build/` are gitignored.
 
 ## License
 
-The code is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+This code is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 FINAL FANTASY RESONANCE and its text belong to Square Enix. The edits in `dialog/`
 derive from Square Enix's text. This repository claims no license over them.
