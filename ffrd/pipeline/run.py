@@ -25,7 +25,7 @@ from ffrd.pipeline import jev as jev_client
 from ffrd.pipeline.claude import RateLimited, Rejected, Unfinished
 from ffrd.pipeline.gates import Candidate, Judgment, Kept, check, gate_line, gate_mechanical
 from ffrd.pipeline.lens import Lens, SceneSection, load_lens
-from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, SELECTION, USAGE, Record, render
+from ffrd.pipeline.report import ARCS, OUTCOME_LABELS, OUTCOMES, RECALL, SELECTION, USAGE, Record, ScreenedScene, render, render_screen
 from ffrd.pipeline.scene_record import SCENES, SceneRecord, write_scenes
 from ffrd.pipeline.scope import scoped
 from ffrd.pipeline.select import choose, distance
@@ -975,10 +975,10 @@ def _characters(marks: Sequence[Outcome]) -> int:
     return len({outcome.speaker for outcome in marks if outcome.speaker})
 
 
-def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
-    if ctx.marking is not None:
-        return _marked(ctx, scene, ctx.marking, ask)
-    cast = arcs.cast(ctx.bibles, _speakers(scene))
+def _flag(
+    ctx: _Context, scene: Scene, cast: Sequence[Mapping[str, Any]], ask: Ask
+) -> tuple[dict[tuple[str, str], tuple[str, ...]], _Recall] | None:
+    """A scene's line screen, then its Jev check and any recheck. Returns the flags and the recall counts, or None when a call did not finish."""
 
     def screen() -> dict[tuple[str, str], tuple[str, ...]] | Unfinished | Rejected:
         return stages.screen(ctx.store, ctx.lens, scene, cast, ask, model=ctx.lens.screen_model)
@@ -990,11 +990,11 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
 
     flagged, probabilities = _both(screen, triage)
     if not isinstance(flagged, dict):
-        return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
+        return None
     recall = _Recall()
     if ctx.jev is not None:
         if not isinstance(probabilities, dict):
-            return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
+            return None
         # A disagreement is decided from the screen's flags only. A recheck adds just its own triage id, so it never decides another id.
         questions = [
             question
@@ -1005,10 +1005,50 @@ def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[C
         for question, rechecked in zip(questions, rechecks, strict=True):
             recall.disagreements[question.id] += 1
             if not isinstance(rechecked, dict):
-                return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
+                return None
             if rechecked:
                 recall.confirmed[question.id] += 1
             flagged = _join(ctx.lens, flagged, rechecked)
+    return flagged, recall
+
+
+def _screen_scene(ctx: _Context, scene: Scene, ask: Ask) -> ScreenedScene:
+    """One scene of a screen-only run: the line screen, Jev check and recheck of a full run, with left-out lines dropped from the flags. A table scene of a lens with a scene section also gets the scene-pattern screen of a full run. A scene whose line screen, Jev check or recheck does not finish gets no scene-pattern screen."""
+    cast = arcs.cast(ctx.bibles, _speakers(scene))
+    section = ctx.lens.scene
+    eligible = section is not None and _from_table(ctx, scene)
+    flags = _flag(ctx, scene, cast, ask)
+    finished = flags is not None
+    flagged: tuple[tuple[str, ...], ...] = ()
+    patterns: tuple[str, ...] = ()
+    if flags is not None:
+        found, _ = flags
+        flagged = tuple(reasons for ref, reasons in found.items() if ref not in ctx.left_out)
+        if section is not None and eligible:
+            hits = scene_pass.screen(ctx.store, ctx.lens, scene, cast, ask)
+            if isinstance(hits, dict):
+                patterns = tuple(pattern.id for pattern in section.patterns if pattern.id in hits)
+            else:
+                finished = False
+    return ScreenedScene(
+        chapter=_scene_chapter(scene),
+        finished=finished,
+        lines=len(scene.lines),
+        left_out=sum((line.namespace, line.key) in ctx.left_out for line in scene.lines),
+        flagged=flagged,
+        eligible=eligible,
+        patterns=patterns,
+    )
+
+
+def _scene(ctx: _Context, scene: Scene, ask: Ask) -> tuple[list[Outcome], list[Change], _Recall, _PassRecord]:
+    if ctx.marking is not None:
+        return _marked(ctx, scene, ctx.marking, ask)
+    cast = arcs.cast(ctx.bibles, _speakers(scene))
+    flags = _flag(ctx, scene, cast, ask)
+    if flags is None:
+        return _every_line(scene, "unfinished"), [], _Recall(), _PassRecord()
+    flagged, recall = flags
     # A line a left-out ledger holds keeps its screen flags for the scene pass, which never plans it, but the line pass never intends, drafts or gates it.
     drafted = {ref: reasons for ref, reasons in flagged.items() if ref not in ctx.left_out}
     flagged_lines = [line for line in scene.lines if (line.namespace, line.key) in drafted]
@@ -1638,9 +1678,12 @@ def run(
     scene_table: bool,
     through: int | None = None,
     out: Callable[[str], None] = print,
+    screen_only: bool = False,
 ) -> list[Outcome]:
     if through is not None and through < 1:
         raise Fail("through must be at least 1")
+    if screen_only and lens.selection is not None:
+        raise Fail(f"lens {lens.name} has a selection, and --screen-only runs no selection")
     store = _Metered(store, run_id)
     table_lines = frozenset((line.namespace, line.key) for scene in scenes if scene.table for line in scene.lines)
     vanilla_hashes = {ref: vanilla_hash(line.english) for ref, line in _first_lines(scenes).items()}
@@ -1685,6 +1728,9 @@ def run(
         marking=_marking(built, in_scope) if selecting else None,
         left_out=left_out,
     )
+    if screen_only:
+        _screen_only(root, ctx, scenes, batch, out)
+        return []
     progress = threading.Lock()
     waiting = sum(_holds_chapter_one(scene) for scene in scenes)
     chapter_one: list[tuple[int, Scene, _PassRecord, list[Outcome]]] = []
@@ -1747,6 +1793,26 @@ def run(
     return outcomes
 
 
+def _screen_only(root: Path, ctx: _Context, scenes: Sequence[Scene], batch: Callable[[], Ask], out: Callable[[str], None]) -> None:
+    """Screens every scene of a screen-only run, then writes reports/<lens>-screen.txt. Progress prints each scene's position, opaque label and counts."""
+    progress = threading.Lock()
+
+    def screen_one(item: tuple[int, Scene, Ask]) -> ScreenedScene:
+        position, scene, ask = item
+        screened = _screen_scene(ctx, scene, ask)
+        with progress:
+            out(f"scene {position}/{len(scenes)} {opaque_label(scene.key)}: {len(screened.flagged)} flagged, {screened.left_out} left out")
+        return screened
+
+    items = [(position, scene, batch()) for position, scene in enumerate(scenes, start=1)]
+    screened = claude.fan_out(screen_one, items)
+    lens = ctx.lens
+    triage_ids = [question.id for question in lens.triage]
+    scene_ids = [] if lens.scene is None else [pattern.id for pattern in lens.scene.patterns]
+    lines = render_screen(screened, triage_ids, scene_ids)
+    _write_atomic(root / "reports" / f"{lens.name}-screen.txt", "".join(f"{line}\n" for line in lines))
+
+
 def _ledger_entry(lens: Lens, run_id: str, c: Change) -> ledger.Entry:
     return ledger.Entry(
         run=run_id,
@@ -1791,6 +1857,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             batch=_batch,
             scene_table=bound.scenes.scene_table,
             through=args.through,
+            screen_only=args.screen_only,
         )
 
 
@@ -1821,5 +1888,10 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         default=None,
         metavar="N",
         help="run only lines of chapter N or earlier, leaving out unplaced lines (default all chapters)",
+    )
+    p.add_argument(
+        "--screen-only",
+        action="store_true",
+        help="screen every scene's lines and table scenes' patterns, write reports/<name>-screen.txt with the counts, then stop before any draft or rewrite (default off)",
     )
     p.set_defaults(fn=cmd_run)

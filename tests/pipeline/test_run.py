@@ -782,6 +782,7 @@ def _run(
     through: int | None = None,
     lens: Lens = LENS_OBJ,
     run_id: str = RUN,
+    screen_only: bool = False,
 ) -> list[Outcome]:
     return run(
         tmp_path / "repo",
@@ -796,6 +797,7 @@ def _run(
         scene_table=scene_table,
         through=through,
         out=printed.append,
+        screen_only=screen_only,
     )
 
 
@@ -6787,3 +6789,199 @@ def test_bucket_is_written_only_for_a_marked_outcome(tmp_path: Path) -> None:
     assert list(marked_record)[-2:] == ["redo", "bucket"]
     assert "bucket" not in unmarked_record
     assert [record.outcome for record in report._records(path, TRIAGE)] == ["untouched", "changed"]
+
+
+# Made-up screen-only run: a table scene of four lines with one left out, a chapter 2 scene and an unattributed scene. Not game text.
+SCREEN_ONLY_LENS = replace(SCENE_LENS, leave_out=(LEFT_OUT,))
+SCREEN_ONLY_SCENES = (TABLE_SCENE, SCENE_B, SCENE_C)
+SCREEN_ONLY_STAGES = {"bible", "bible_setups", "screen", "triage", "rescreen", "scene_screen"}
+SCREEN_ONLY_SCHEMAS = (bible.SCHEMA, bible.SETUP_SCHEMA, SCREEN_SCHEMA, RESCREEN_SCHEMA, scene_pass.SCREEN_SCHEMA)
+SCREEN_ONLY_REPORT = """\
+chapter 1: 1 scenes, 0 unfinished, 4 lines, 1 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+chapter 2: 1 scenes, 0 unfinished, 2 lines, 0 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 0
+  scene flagged made-up-pattern-one: 0
+  scene flagged made-up-pattern-two: 0
+unattributed: 1 scenes, 0 unfinished, 1 lines, 0 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 0
+  scene flagged made-up-pattern-one: 0
+  scene flagged made-up-pattern-two: 0
+total: 3 scenes, 0 unfinished, 7 lines, 1 left out, 3 flagged
+  reason made-up-first-id: 3
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+"""
+SCREEN_ONLY_THROUGH_REPORT = """\
+chapter 1: 1 scenes, 0 unfinished, 4 lines, 1 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+total: 1 scenes, 0 unfinished, 4 lines, 1 left out, 1 flagged
+  reason made-up-first-id: 1
+  reason made-up-second-id: 0
+  scene eligible: 1
+  scene flagged made-up-pattern-one: 1
+  scene flagged made-up-pattern-two: 0
+"""
+
+
+def _screen_only_claude() -> FakeClaude:
+    """Flags line 1 and the left-out line 2 of the table scene, line 1 of scene b and of the unattributed scene. The scene pass hits one pattern on the table scene. Not game text."""
+    claude = FakeClaude()
+    claude.bible = {}
+    claude.flags = {(NS_A, "1"): [ALPHA], (NS_A, "2"): [ALPHA], (NS_B, "1"): [ALPHA], (NS_C, "1"): [ALPHA]}
+    claude.drafts = {(NS_A, "1"): [OPUS_A1], (NS_B, "1"): [OPUS_B1], (NS_C, "1"): [OPUS_C1]}
+    claude.scene_screen = {"patterns": [{"id": PATTERN_ONE, "carriers": [{"namespace": NS_A, "key": "1"}]}]}
+    return claude
+
+
+def _screen_report(tmp_path: Path) -> str:
+    return (tmp_path / "repo" / "reports" / f"{LENS}-screen.txt").read_text(encoding="utf-8")
+
+
+def test_screen_only_report_counts_the_flags_left_out_lines_and_scene_hits(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    _run(tmp_path, _screen_only_claude(), [], jev=FakeJev(JEV_HIGH), scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, screen_only=True)
+    assert _screen_report(tmp_path) == SCREEN_ONLY_REPORT
+
+
+def test_screen_only_through_a_chapter_reports_only_the_scenes_and_lines_through_it(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    _run(
+        tmp_path,
+        _screen_only_claude(),
+        [],
+        jev=FakeJev(JEV_HIGH),
+        scenes=SCREEN_ONLY_SCENES,
+        lens=SCREEN_ONLY_LENS,
+        through=1,
+        screen_only=True,
+    )
+    assert _screen_report(tmp_path) == SCREEN_ONLY_THROUGH_REPORT
+
+
+def test_screen_only_stores_only_screen_results_and_writes_no_other_record(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, screen_only=True)
+    stored = _stored_stages(tmp_path)
+    assert {"screen", "triage", "rescreen", "scene_screen"} <= stored <= SCREEN_ONLY_STAGES
+    assert all(any(schema is allowed for allowed in SCREEN_ONLY_SCHEMAS) for _, _, schema in claude.calls)
+    work = tmp_path / "work" / LENS
+    for name in (report.OUTCOMES, report.ARCS, report.RECALL, scene_record.SCENES):
+        assert not (work / name).exists()
+    assert not (tmp_path / "repo" / "dialog").exists()
+    assert not ledger.path(tmp_path / "repo", LENS).exists()
+    assert [path.name for path in (tmp_path / "repo" / "reports").iterdir()] == [f"{LENS}-screen.txt"]
+
+
+def test_full_run_after_screen_only_makes_no_screen_rescreen_triage_or_scene_screen_call(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    jev = FakeJev(JEV_HIGH)
+    _run(tmp_path, claude, [], jev=jev, scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, screen_only=True)
+    claude.calls.clear()
+    triaged = len(jev.calls)
+    _run(tmp_path, claude, [], jev=jev, scenes=SCREEN_ONLY_SCENES, lens=SCREEN_ONLY_LENS, run_id=OTHER_RUN)
+    assert _scene_prompts(claude, SCREEN_SCHEMA) == []
+    assert _scene_prompts(claude, RESCREEN_SCHEMA) == []
+    assert _scene_prompts(claude, scene_pass.SCREEN_SCHEMA) == []
+    assert len(jev.calls) == triaged
+    assert _scene_prompts(claude, DRAFT_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    ("failure", "summary", "screen_calls"),
+    [
+        ("line screen", "chapter 1: 1 scenes, 1 unfinished, 4 lines, 1 left out, 0 flagged", 0),
+        ("recheck", "chapter 1: 1 scenes, 1 unfinished, 4 lines, 1 left out, 0 flagged", 0),
+        ("scene screen", "chapter 1: 1 scenes, 1 unfinished, 4 lines, 1 left out, 1 flagged", 1),
+    ],
+)
+def test_unfinished_call_counts_its_scene_unfinished_and_makes_a_scene_pattern_screen_only_when_the_line_screen_finished(
+    tmp_path: Path, failure: str, summary: str, screen_calls: int
+) -> None:
+    claude = _screen_only_claude()
+    if failure == "line screen":
+        claude.screen_failure_refs[(NS_A, "1")] = Unfinished("Made-up screen failure. Not game text.")
+    elif failure == "recheck":
+        claude.rescreen_failures[BETA] = Unfinished("Made-up recheck failure. Not game text.")
+    else:
+        claude.scene_screen = Unfinished("Made-up scene screen failure. Not game text.")
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    _run(tmp_path, claude, [], jev=FakeJev(JEV_HIGH), scenes=(TABLE_SCENE,), lens=SCREEN_ONLY_LENS, screen_only=True)
+    assert _screen_report(tmp_path).splitlines()[0] == summary
+    assert len(_scene_prompts(claude, scene_pass.SCREEN_SCHEMA)) == screen_calls
+
+
+def test_screen_only_on_a_selection_lens_fails_before_any_claude_call(tmp_path: Path) -> None:
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    with pytest.raises(Fail, match="--screen-only"):
+        _run(
+            tmp_path,
+            claude,
+            [],
+            jev=FakeJev(JEV_HIGH),
+            scenes=SCREEN_ONLY_SCENES,
+            lens=replace(SCREEN_ONLY_LENS, selection="queering"),
+            screen_only=True,
+        )
+    assert claude.batches == 0
+    assert claude.calls == []
+    assert not (tmp_path / "work").exists()
+    assert not (tmp_path / "repo" / "reports").exists()
+
+
+def test_screen_only_screens_the_base_text_of_a_lens_with_a_base(tmp_path: Path) -> None:
+    _base_file(tmp_path, _base_record(NS_A, "1", EN_A1, BASE_A1))
+    _base_ledger(tmp_path, [(NS_A, "1", EN_A1, BASE_A1)])
+    _seed_base(tmp_path, {1: CHAPTER_ONE_BIBLE}, scenes=SCREEN_ONLY_SCENES)
+    _left_out_ledger(tmp_path / "repo", LEFT_OUT, [(NS_A, "2", EN_A2)])
+    claude = _screen_only_claude()
+    _run(
+        tmp_path,
+        claude,
+        [],
+        jev=FakeJev(JEV_HIGH),
+        scenes=SCREEN_ONLY_SCENES,
+        lens=replace(SCREEN_ONLY_LENS, base=BASE),
+        screen_only=True,
+    )
+    prompts = [part for _, parts, _ in claude.calls for part in parts]
+    assert any(BASE_A1 in text for text in prompts)
+    assert not any(EN_A1 in text for text in prompts)
+    assert (tmp_path / "repo" / "reports" / f"{LENS}-screen.txt").is_file()
+
+
+def test_register_declares_screen_only_as_a_flag_that_is_off_by_default() -> None:
+    assert _parse(["run", "--lens", LENS]).screen_only is False
+    assert _parse(["run", "--lens", LENS, "--screen-only"]).screen_only is True
+
+
+def test_run_command_with_screen_only_prints_scene_counts_and_writes_the_screen_report_alone(
+    lens_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind(monkeypatch, _claude(), FakeJev(JEV_HIGH))
+    args = _parse(["run", "--lens", LENS, "--screen-only"])
+
+    args.fn(args)
+
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == len(SCENES)
+    assert all(line.startswith("scene ") for line in printed)
+    assert (lens_repo / "reports" / f"{LENS}-screen.txt").is_file()
+    assert not (lens_repo / "work" / LENS / report.OUTCOMES).exists()
